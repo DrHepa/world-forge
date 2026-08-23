@@ -74,7 +74,9 @@ export type WorldForgeCreationContract =
   | WorldForgeImmutablePersistenceGenerationV1
   | WorldForgeDeterministicGameExecutionScriptV1
   | WorldForgeBoundedHeadlessExecutionReceiptV1
-  | WorldForgeImmutableExternalHeadlessEvidenceSetV1;
+  | WorldForgeImmutableExternalHeadlessEvidenceSetV1
+  | ImmutableAgentWorkerActivationV1
+  | ImmutableAgentCapabilityGrantV1;
 export type WorldForgeWorldProjectMigrationJournalRecordV1 = {
   format: "world-forge.world_project_migration_journal";
   format_version: 1;
@@ -17311,6 +17313,48 @@ export type WorldForgeImmutablePersistenceGenerationV1 = {
   sequence: number;
   slot: string;
 };
+/**
+ * @maxItems 64
+ *
+ * This interface was referenced by `ImmutableAgentWorkerActivationV1`'s JSON-Schema
+ * via the `definition` "capabilities".
+ */
+export type Capabilities = (
+  | "project.read"
+  | "artifact.read"
+  | "artifact.propose"
+  | "tool.invoke"
+  | "memory.read"
+  | "memory.propose"
+)[];
+/**
+ * @maxItems 64
+ *
+ * This interface was referenced by `ImmutableAgentWorkerActivationV1`'s JSON-Schema
+ * via the `definition` "tools".
+ */
+export type Tools = string[];
+/**
+ * @maxItems 64
+ *
+ * This interface was referenced by `ImmutableAgentCapabilityGrantV1`'s JSON-Schema
+ * via the `definition` "capabilities".
+ */
+export type Capabilities1 = (
+  | "project.read"
+  | "artifact.read"
+  | "artifact.propose"
+  | "tool.invoke"
+  | "memory.read"
+  | "memory.propose"
+)[];
+/**
+ * @maxItems 64
+ *
+ * This interface was referenced by `ImmutableAgentCapabilityGrantV1`'s JSON-Schema
+ * via the `definition` "tools".
+ */
+export type Tools1 = string[];
 
 export interface WorldForgeLegacyIdentityAllowlistV1 {
   format: "world-forge.legacy_identity_allowlist";
@@ -48669,6 +48713,184 @@ export interface Host1 {
   platform_family: "platform:linux" | "platform:windows";
   platform_id: "platform:linux_x86_64" | "platform:windows_x86_64";
   renderer: "raylib";
+}
+export interface ImmutableAgentWorkerActivationV1 {
+  /**
+   * This interface was referenced by `ImmutableAgentWorkerActivationV1`'s JSON-Schema
+   * via the `definition` "id".
+   */
+  activation_id: string;
+  /**
+   * This interface was referenced by `ImmutableAgentWorkerActivationV1`'s JSON-Schema
+   * via the `definition` "sha256".
+   */
+  content_hash: string;
+  context_mode: "fresh";
+  /**
+   * This interface was referenced by `ImmutableAgentWorkerActivationV1`'s JSON-Schema
+   * via the `definition` "id".
+   */
+  execution_id: string;
+  format: "world-forge.agent_worker_activation";
+  format_version: 1;
+  input: Identity9;
+  prompt: Identity9;
+  requested_capability_ids: Capabilities;
+  requested_tool_ids: Tools;
+  role: Binding3;
+  runtime: Binding3;
+  work_order: WorkOrder;
+}
+/**
+ * This interface was referenced by `ImmutableAgentWorkerActivationV1`'s JSON-Schema
+ * via the `definition` "identity".
+ */
+export interface Identity9 {
+  /**
+   * This interface was referenced by `ImmutableAgentWorkerActivationV1`'s JSON-Schema
+   * via the `definition` "sha256".
+   */
+  content_hash: string;
+  /**
+   * This interface was referenced by `ImmutableAgentWorkerActivationV1`'s JSON-Schema
+   * via the `definition` "id".
+   */
+  id: string;
+}
+/**
+ * This interface was referenced by `ImmutableAgentWorkerActivationV1`'s JSON-Schema
+ * via the `definition` "binding".
+ */
+export interface Binding3 {
+  /**
+   * This interface was referenced by `ImmutableAgentWorkerActivationV1`'s JSON-Schema
+   * via the `definition` "sha256".
+   */
+  content_hash: string;
+  /**
+   * This interface was referenced by `ImmutableAgentWorkerActivationV1`'s JSON-Schema
+   * via the `definition` "id".
+   */
+  id: string;
+  /**
+   * This interface was referenced by `ImmutableAgentWorkerActivationV1`'s JSON-Schema
+   * via the `definition` "revision".
+   */
+  revision: number;
+}
+/**
+ * This interface was referenced by `ImmutableAgentWorkerActivationV1`'s JSON-Schema
+ * via the `definition` "work_order".
+ */
+export interface WorkOrder {
+  capability_ids: Capabilities;
+  /**
+   * This interface was referenced by `ImmutableAgentWorkerActivationV1`'s JSON-Schema
+   * via the `definition` "sha256".
+   */
+  content_hash: string;
+  /**
+   * This interface was referenced by `ImmutableAgentWorkerActivationV1`'s JSON-Schema
+   * via the `definition` "id".
+   */
+  id: string;
+  /**
+   * This interface was referenced by `ImmutableAgentWorkerActivationV1`'s JSON-Schema
+   * via the `definition` "revision".
+   */
+  revision: number;
+  tool_ids: Tools;
+}
+export interface ImmutableAgentCapabilityGrantV1 {
+  activation: Identity10;
+  /**
+   * This interface was referenced by `ImmutableAgentCapabilityGrantV1`'s JSON-Schema
+   * via the `definition` "sha256".
+   */
+  content_hash: string;
+  effective_capability_ids: Capabilities1;
+  effective_tool_ids: Tools1;
+  /**
+   * This interface was referenced by `ImmutableAgentCapabilityGrantV1`'s JSON-Schema
+   * via the `definition` "id".
+   */
+  execution_id: string;
+  format: "world-forge.agent_capability_grant";
+  format_version: 1;
+  /**
+   * This interface was referenced by `ImmutableAgentCapabilityGrantV1`'s JSON-Schema
+   * via the `definition` "id".
+   */
+  grant_id: string;
+  policy: {
+    capability_ids: Capabilities1;
+    tool_ids: Tools1;
+  };
+  role: Binding4;
+  role_capability_ids: Capabilities1;
+  role_tool_ids: Tools1;
+  runtime: Binding4;
+  work_order: WorkOrder1;
+}
+/**
+ * This interface was referenced by `ImmutableAgentCapabilityGrantV1`'s JSON-Schema
+ * via the `definition` "identity".
+ */
+export interface Identity10 {
+  /**
+   * This interface was referenced by `ImmutableAgentCapabilityGrantV1`'s JSON-Schema
+   * via the `definition` "sha256".
+   */
+  content_hash: string;
+  /**
+   * This interface was referenced by `ImmutableAgentCapabilityGrantV1`'s JSON-Schema
+   * via the `definition` "id".
+   */
+  id: string;
+}
+/**
+ * This interface was referenced by `ImmutableAgentCapabilityGrantV1`'s JSON-Schema
+ * via the `definition` "binding".
+ */
+export interface Binding4 {
+  /**
+   * This interface was referenced by `ImmutableAgentCapabilityGrantV1`'s JSON-Schema
+   * via the `definition` "sha256".
+   */
+  content_hash: string;
+  /**
+   * This interface was referenced by `ImmutableAgentCapabilityGrantV1`'s JSON-Schema
+   * via the `definition` "id".
+   */
+  id: string;
+  /**
+   * This interface was referenced by `ImmutableAgentCapabilityGrantV1`'s JSON-Schema
+   * via the `definition` "revision".
+   */
+  revision: number;
+}
+/**
+ * This interface was referenced by `ImmutableAgentCapabilityGrantV1`'s JSON-Schema
+ * via the `definition` "work_order".
+ */
+export interface WorkOrder1 {
+  capability_ids: Capabilities1;
+  /**
+   * This interface was referenced by `ImmutableAgentCapabilityGrantV1`'s JSON-Schema
+   * via the `definition` "sha256".
+   */
+  content_hash: string;
+  /**
+   * This interface was referenced by `ImmutableAgentCapabilityGrantV1`'s JSON-Schema
+   * via the `definition` "id".
+   */
+  id: string;
+  /**
+   * This interface was referenced by `ImmutableAgentCapabilityGrantV1`'s JSON-Schema
+   * via the `definition` "revision".
+   */
+  revision: number;
+  tool_ids: Tools1;
 }
 
 

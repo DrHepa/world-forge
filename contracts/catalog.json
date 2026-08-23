@@ -23,6 +23,56 @@
       "version": 1
     },
     {
+      "cli_commands": [],
+      "docs": [
+        "README.md",
+        "docs/ARCHITECTURE.md",
+        "docs/decisions/0030-agent-harness-contract-foundation.md"
+      ],
+      "fixtures": [
+        "examples/multigenre-contracts/agent-harness-minimal/capability-grant.json"
+      ],
+      "format": "world-forge.agent_capability_grant",
+      "id": "agent-capability-grant",
+      "kind": "json-schema",
+      "m5_phases": [],
+      "python_symbols": [
+        "worldforge.agent_harness_contracts:validate_agent_harness_document",
+        "worldforge.agent_harness_contracts:validate_agent_harness_documents"
+      ],
+      "schema": "schemas/agent-capability-grant.schema.json",
+      "tests": [
+        "tests/test_agent_harness_contracts.py"
+      ],
+      "title": "Immutable Agent Capability Grant v1",
+      "version": 1
+    },
+    {
+      "cli_commands": [],
+      "docs": [
+        "README.md",
+        "docs/ARCHITECTURE.md",
+        "docs/decisions/0030-agent-harness-contract-foundation.md"
+      ],
+      "fixtures": [
+        "examples/multigenre-contracts/agent-harness-minimal/worker-activation.json"
+      ],
+      "format": "world-forge.agent_worker_activation",
+      "id": "agent-worker-activation",
+      "kind": "json-schema",
+      "m5_phases": [],
+      "python_symbols": [
+        "worldforge.agent_harness_contracts:validate_agent_harness_document",
+        "worldforge.agent_harness_contracts:validate_agent_harness_documents"
+      ],
+      "schema": "schemas/agent-worker-activation.schema.json",
+      "tests": [
+        "tests/test_agent_harness_contracts.py"
+      ],
+      "title": "Immutable Agent Worker Activation v1",
+      "version": 1
+    },
+    {
       "cli_commands": [
         "derive-asset-inventory"
       ],

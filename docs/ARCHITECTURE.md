@@ -405,16 +405,22 @@ IDs/files/hashes, and output filename/role/media lineage. Manifest validation
 passes its own asset root explicitly. Receipt v1 remains readable as an
 identity-only legacy record; it never gains inferred recipe authorization.
 
-## Planned Slice 1 foundation vocabulary
+## Historical Slice 1A planning vocabulary
 
-Slice 1 establishes only architectural vocabulary. None of the following is an
-implemented Studio feature, public schema, runtime claim, provider integration,
-or generated-game requirement. It preserves all published contracts and the
-existing provider-free Studio boundaries.
+This section records the historical Slice 1A architectural plan. Slice 1B.1
+additively supersedes its Harness-only statement with two public immutable
+lineage schemas; it does not implement any execution surface. All remaining
+items below remain planning vocabulary, not an implemented Studio feature,
+runtime claim, provider integration, or generated-game requirement. It
+preserves all published contracts and the existing provider-free Studio
+boundaries.
 
-The future World Forge-owned, provider-neutral Agent Harness has an append-only
-event log and replay, isolated killable worker lifecycle, capability grants,
-execution receipts, and approved memory projections. Studio alone retains
+The future World Forge-owned, provider-neutral Agent Harness is planned to add
+an append-only event log and replay, isolated killable worker lifecycle,
+execution receipts, and approved memory projections. Slice 1B.1 now publishes
+only closed `AgentWorkerActivation` and `AgentCapabilityGrant` lineage
+contracts; their validation does not prove execution, isolation, authority,
+replay, or evidence quality. Studio alone retains
 project, canon, asset, and release authority. DeepSeek Harness is reference
 material, never a dependency or fork. `codebase-memory-mcp` is an optional,
 read-only development benchmark only: it is not a source authority, product
@@ -564,3 +570,11 @@ Composition and engine-neutral 3D authoring do not prove collision, physics,
 navigation, representative performance, cross-platform native behavior, or a
 full 3D runtime release. See
 [AUDIT_M6_2026-07-24.md](AUDIT_M6_2026-07-24.md).
+
+### Agent Harness contract foundation
+
+Slice 1B.1 additively advances the historical Slice 1A plan with only immutable
+worker activation and capability-grant lineage documents. They bind fresh-context
+activation to role, work order, runtime, prompt and input identities. Grant
+effective sets are the policy/role/work-order intersection. Validators do not
+claim execution, isolation, authority, replay, or evidence quality.

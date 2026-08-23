@@ -830,3 +830,10 @@ documentation, migration impact, and tests in the same pull request.
 Repository documentation and tooling interfaces are maintained in English.
 Each world declares its content locales. Each game target separately declares
 the locales and UI policy it supports.
+
+### Agent Harness contract foundation
+
+Slice 1B.1 additively advances the historical Slice 1A Harness plan with public
+v1 `AgentWorkerActivation` and `AgentCapabilityGrant` closed canonical JSON
+lineage documents. They intentionally provide no worker, provider, execution,
+Studio, replay, or runtime capability. See [ADR-0030](docs/decisions/0030-agent-harness-contract-foundation.md).

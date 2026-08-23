@@ -28,6 +28,10 @@ import {
 } from "./generic-asset-validation.mjs";
 import { hasCoherentGenericAssetpack } from "./generic-assetpack-validation.mjs";
 import {
+    canonicalAgentHarnessDocumentBytes,
+    hasCoherentAgentHarnessContract,
+} from "./agent-harness-validation.mjs";
+import {
     hasCoherentGamePersistence,
     hasCoherentPersistenceGeneration,
 } from "./game-persistence-validation.mjs";
@@ -465,6 +469,12 @@ const contractDefinitions = {
     },
     HeadlessEvidenceSet: {
         $ref: "headless-evidence-set.schema.json",
+    },
+    AgentWorkerActivation: {
+        $ref: "agent-worker-activation.schema.json",
+    },
+    AgentCapabilityGrant: {
+        $ref: "agent-capability-grant.schema.json",
     },
 };
 const contractsSchema = {
@@ -4329,6 +4339,8 @@ async function verifyContractSchemas() {
         "game-execution-script",
         "headless-execution-receipt",
         "headless-evidence-set",
+        "agent-worker-activation",
+        "agent-capability-grant",
     ];
     const ajv = new Ajv2020({
         allErrors: true,
@@ -4442,6 +4454,19 @@ async function verifyContractSchemas() {
         schemaType: "string",
         type: "array",
         validate: (field, data) => hasPortableGenericAssetPathTree(data, field),
+    });
+    ajv.addKeyword({
+        keyword: "x-world-forge-agent-harness-coherent",
+        schemaType: "boolean",
+        type: "object",
+        validate: (required, data) =>
+            !required ||
+            hasCoherentAgentHarnessContract(
+                data,
+                data.format === "world-forge.agent_worker_activation"
+                    ? "activation"
+                    : "grant",
+            ),
     });
     ajv.addKeyword({
         keyword: "x-world-forge-generic-assetpack-coherent",
@@ -4587,6 +4612,12 @@ async function verifyContractSchemas() {
             contractSchema["x-world-forge-canonical-content-hash"] !== true
         ) {
             throw new Error(`${name} does not bind its canonical content hash`);
+        }
+        if (
+            ["agent-worker-activation", "agent-capability-grant"].includes(name) &&
+            contractSchema["x-world-forge-agent-harness-coherent"] !== true
+        ) {
+            throw new Error(`${name} does not enforce Agent Harness coherence`);
         }
         if (
             name === "generic-assetpack" &&
@@ -4839,6 +4870,52 @@ async function verifyContractSchemas() {
         );
         documents.set(fixtureKey, document);
     }
+
+    const harnessActivation = documents.get(
+        "agent-harness-minimal/worker-activation.json",
+    );
+    const harnessGrant = documents.get(
+        "agent-harness-minimal/capability-grant.json",
+    );
+    const rejectHarnessMutation = (document, message) => {
+        const schemaId = schemaByFormat.get(document.format);
+        if (schemaId === undefined || ajv.validate(schemaId, document)) {
+            throw new Error(message);
+        }
+    };
+    const badHarnessHash = structuredClone(harnessActivation);
+    badHarnessHash.content_hash = "0".repeat(64);
+    rejectHarnessMutation(badHarnessHash, "Agent Harness accepted a tampered content hash");
+    const unsortedHarnessRequest = reseal(structuredClone(harnessActivation));
+    unsortedHarnessRequest.requested_capability_ids.reverse();
+    reseal(unsortedHarnessRequest);
+    rejectHarnessMutation(unsortedHarnessRequest, "Agent Harness accepted unsorted requested capabilities");
+    const mismatchedHarnessRequest = reseal(structuredClone(harnessActivation));
+    mismatchedHarnessRequest.requested_tool_ids = [];
+    reseal(mismatchedHarnessRequest);
+    rejectHarnessMutation(mismatchedHarnessRequest, "Agent Harness accepted requested/work-order mismatch");
+    const badHarnessIntersection = reseal(structuredClone(harnessGrant));
+    badHarnessIntersection.effective_capability_ids = [];
+    reseal(badHarnessIntersection);
+    rejectHarnessMutation(badHarnessIntersection, "Agent Harness accepted wrong effective intersection");
+    const oversizedHarnessDocument = reseal(structuredClone(harnessActivation));
+    const oversizedToolId = `tool.${"capability.".repeat(210000)}end`;
+    oversizedHarnessDocument.work_order.tool_ids = [oversizedToolId];
+    oversizedHarnessDocument.requested_tool_ids = [oversizedToolId];
+    reseal(oversizedHarnessDocument);
+    if (
+        canonicalAgentHarnessDocumentBytes(oversizedHarnessDocument) <=
+        1024 * 1024
+    ) {
+        throw new Error("Agent Harness oversized mutation did not exceed 1 MiB");
+    }
+    if (hasCoherentAgentHarnessContract(oversizedHarnessDocument, "activation")) {
+        throw new Error("Agent Harness coherence accepted an oversized document");
+    }
+    rejectHarnessMutation(
+        oversizedHarnessDocument,
+        "Agent Harness accepted an oversized canonical document",
+    );
 
     const invalidWorld = structuredClone(
         documents.get("universe-library/source/world/canon.json"),

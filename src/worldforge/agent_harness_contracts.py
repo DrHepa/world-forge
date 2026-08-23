@@ -90,6 +90,7 @@ class AgentHarnessDocuments:
     grant: dict[str, Any]
     events: tuple[dict[str, Any], ...] = ()
     receipt: dict[str, Any] | None = None
+    projection: dict[str, Any] | None = None
 
 
 def _error(detail: str) -> None:
@@ -403,9 +404,10 @@ def validate_agent_harness_documents(activation: object, grant: object) -> Agent
     return AgentHarnessDocuments(activation=active, grant=capability_grant)
 
 
-# Additive Slice 1B.2 event/receipt vocabulary.
+# Additive Slice 1B.2 event/receipt and Slice 1B.3 projection vocabulary.
 AGENT_EVENT_FORMAT = "world-forge.agent_event"
 AGENT_EXECUTION_RECEIPT_FORMAT = "world-forge.agent_execution_receipt"
+AGENT_MEMORY_PROJECTION_FORMAT = "world-forge.agent_memory_projection"
 _EVENT_TYPES = frozenset(
     {
         "worker.activated",
@@ -472,6 +474,54 @@ _INVOCATION_FIELDS = frozenset(
     }
 )
 _REASON_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
+_PROJECTION_FIELDS = frozenset(
+    {
+        "format",
+        "format_version",
+        "projection_id",
+        "execution_id",
+        "receipt",
+        "source_events",
+        "review",
+        "entries",
+        "content_hash",
+    }
+)
+_PROJECTION_REVIEW_FIELDS = frozenset(
+    {
+        "review_id",
+        "reviewer_id",
+        "policy_id",
+        "policy_version",
+        "policy_hash",
+        "receipt_content_hash",
+        "decision",
+    }
+)
+_PROJECTION_ENTRY_FIELDS = frozenset(
+    {"entry_id", "kind", "subject_id", "value_hash", "source_event_ids"}
+)
+_PROJECTION_ENTRY_KINDS = frozenset({"decision", "constraint", "discovery", "preference"})
+_PROJECTION_FORBIDDEN_FIELDS = frozenset(
+    {
+        "memory_text",
+        "prompt",
+        "transcript",
+        "rationale",
+        "path",
+        "url",
+        "endpoint",
+        "command",
+        "env",
+        "stderr",
+        "secret",
+        "credentials",
+        "token",
+        "provider_payload",
+        "executable",
+        "executable_content",
+    }
+)
 
 
 def _nonnegative(value: object, context: str) -> int:
@@ -515,6 +565,55 @@ def _identity_array(value: object, context: str, *, maximum: int = 64) -> list[d
     return result
 
 
+def _portable_id_array(
+    value: object, context: str, *, minimum: int = 1, maximum: int = 64
+) -> list[str]:
+    if not isinstance(value, list) or not minimum <= len(value) <= maximum:
+        _error(f"{context} must be a bounded non-empty ID array")
+    result = [_id(item, f"{context}/{index}") for index, item in enumerate(value)]
+    if result != sorted(set(result), key=lambda item: item.encode("utf-8")):
+        _error(f"{context} must be sorted unique")
+    return result
+
+
+def _document_ref(value: object, context: str, *, expected_format: str) -> dict[str, Any]:
+    result = _subject(value, context)
+    if result["format"] != expected_format:
+        _error(f"{context} format must be {expected_format}")
+    return result
+
+
+def _document_ref_array(
+    value: object, context: str, *, expected_format: str
+) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or not 1 <= len(value) <= 64:
+        _error(f"{context} must be a bounded non-empty document-ref array")
+    result = [
+        _document_ref(item, f"{context}/{index}", expected_format=expected_format)
+        for index, item in enumerate(value)
+    ]
+    ids = [item["id"] for item in result]
+    if ids != sorted(set(ids), key=lambda item: item.encode("utf-8")):
+        _error(f"{context} must be sorted unique by id")
+    return result
+
+
+def _reject_projection_forbidden_fields(value: object) -> None:
+    stack = [value]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, dict):
+            forbidden = set(current) & _PROJECTION_FORBIDDEN_FIELDS
+            if forbidden:
+                _error(
+                    "agent memory projection contains forbidden fields: "
+                    + ", ".join(sorted(forbidden))
+                )
+            stack.extend(current.values())
+        elif isinstance(current, list):
+            stack.extend(current)
+
+
 def _validate_event(value: dict[str, Any]) -> None:
     _exact(value, _EVENT_FIELDS, "agent event")
     _verify_common(value, AGENT_EVENT_FORMAT)
@@ -537,7 +636,7 @@ def _validate_event(value: dict[str, Any]) -> None:
         "execution.started": AGENT_WORKER_ACTIVATION_FORMAT,
         "execution.cancel_requested": AGENT_WORKER_ACTIVATION_FORMAT,
         "execution.receipt_recorded": AGENT_EXECUTION_RECEIPT_FORMAT,
-        "memory.projected": "world-forge.agent_memory_projection",
+        "memory.projected": AGENT_MEMORY_PROJECTION_FORMAT,
     }
     if subject["format"] != expected[event_type]:
         _error("event subject format is incompatible")
@@ -603,6 +702,55 @@ def _validate_receipt(value: dict[str, Any]) -> None:
             _error("successful invocation must not contain failure codes")
 
 
+def _validate_projection(value: dict[str, Any]) -> None:
+    _reject_projection_forbidden_fields(value)
+    _exact(value, _PROJECTION_FIELDS, "agent memory projection")
+    _verify_common(value, AGENT_MEMORY_PROJECTION_FORMAT)
+    _id(value.get("projection_id"), "projection_id")
+    _id(value.get("execution_id"), "execution_id")
+    receipt_ref = _document_ref(
+        value.get("receipt"),
+        "receipt",
+        expected_format=AGENT_EXECUTION_RECEIPT_FORMAT,
+    )
+    source_events = _document_ref_array(
+        value.get("source_events"),
+        "source_events",
+        expected_format=AGENT_EVENT_FORMAT,
+    )
+    review = _object(value.get("review"), "review")
+    _exact(review, _PROJECTION_REVIEW_FIELDS, "review")
+    for name in ("review_id", "reviewer_id", "policy_id"):
+        _id(review.get(name), f"review.{name}")
+    _revision(review.get("policy_version"), "review.policy_version")
+    _hash(review.get("policy_hash"), "review.policy_hash")
+    _hash(review.get("receipt_content_hash"), "review.receipt_content_hash")
+    if review["receipt_content_hash"] != receipt_ref["content_hash"]:
+        _error("review receipt_content_hash must match the projected receipt ref")
+    if review.get("decision") != "approved":
+        _error("review.decision must be approved")
+    entries = value.get("entries")
+    if not isinstance(entries, list) or not 1 <= len(entries) <= 64:
+        _error("entries must be a bounded non-empty memory-entry array")
+    entry_ids: list[str] = []
+    source_ids = {item["id"] for item in source_events}
+    for index, entry in enumerate(entries):
+        item = _object(entry, f"entries/{index}")
+        _exact(item, _PROJECTION_ENTRY_FIELDS, f"entries/{index}")
+        entry_ids.append(_id(item.get("entry_id"), f"entries/{index}.entry_id"))
+        if item.get("kind") not in _PROJECTION_ENTRY_KINDS:
+            _error(f"entries/{index}.kind is unsupported")
+        _id(item.get("subject_id"), f"entries/{index}.subject_id")
+        _hash(item.get("value_hash"), f"entries/{index}.value_hash")
+        entry_sources = _portable_id_array(
+            item.get("source_event_ids"), f"entries/{index}.source_event_ids"
+        )
+        if not set(entry_sources) <= source_ids:
+            _error("entry source_event_ids must be a subset of projection source events")
+    if entry_ids != sorted(set(entry_ids), key=lambda item: item.encode("utf-8")):
+        _error("entries must be sorted unique by entry_id")
+
+
 # Override public dispatch and aggregate additively.
 _old_validate_agent_harness_document = validate_agent_harness_document
 
@@ -612,7 +760,11 @@ def validate_agent_harness_document(
 ) -> dict[str, Any]:
     normalized = _normalize_json_numbers(value, context="Agent Harness document")
     document = _object(normalized, "Agent Harness document")
-    if document.get("format") in {AGENT_EVENT_FORMAT, AGENT_EXECUTION_RECEIPT_FORMAT}:
+    if document.get("format") in {
+        AGENT_EVENT_FORMAT,
+        AGENT_EXECUTION_RECEIPT_FORMAT,
+        AGENT_MEMORY_PROJECTION_FORMAT,
+    }:
         _structure(document, context="Agent Harness document")
         encoded = json.dumps(
             document, ensure_ascii=False, separators=(",", ":"), sort_keys=True, allow_nan=False
@@ -621,9 +773,12 @@ def validate_agent_harness_document(
             _error(f"Agent Harness document exceeds {MAX_AGENT_HARNESS_DOCUMENT_BYTES}-byte limit")
         if expected_format is not None and document.get("format") != expected_format:
             _error(f"Agent Harness document format must be {expected_format}")
-        (_validate_event if document["format"] == AGENT_EVENT_FORMAT else _validate_receipt)(
-            document
-        )
+        validators = {
+            AGENT_EVENT_FORMAT: _validate_event,
+            AGENT_EXECUTION_RECEIPT_FORMAT: _validate_receipt,
+            AGENT_MEMORY_PROJECTION_FORMAT: _validate_projection,
+        }
+        validators[document["format"]](document)
         return copy.deepcopy(document)
     return _old_validate_agent_harness_document(document, expected_format=expected_format)
 
@@ -632,7 +787,11 @@ _old_validate_agent_harness_documents = validate_agent_harness_documents
 
 
 def validate_agent_harness_documents(
-    activation: object, grant: object, events: object = (), receipt: object | None = None
+    activation: object,
+    grant: object,
+    events: object = (),
+    receipt: object | None = None,
+    projection: object | None = None,
 ) -> AgentHarnessDocuments:
     aggregate = _old_validate_agent_harness_documents(activation, grant)
     event_values = tuple(
@@ -715,9 +874,57 @@ def validate_agent_harness_documents(
         for item in receipt_value["tool_invocations"]:
             if item["tool_id"] not in aggregate.grant["effective_tool_ids"]:
                 _error("receipt invokes an ungranted tool")
+    projection_value = (
+        None
+        if projection is None
+        else validate_agent_harness_document(
+            projection, expected_format=AGENT_MEMORY_PROJECTION_FORMAT
+        )
+    )
+    if projection_value is not None and receipt_value is None:
+        _error("memory projection requires a supplied receipt")
+    if projection_value is not None:
+        expected_receipt_ref = {
+            "format": AGENT_EXECUTION_RECEIPT_FORMAT,
+            "format_version": AGENT_HARNESS_VERSION,
+            "id": receipt_value["receipt_id"],
+            "content_hash": receipt_value["content_hash"],
+        }
+        if (
+            projection_value["execution_id"] != aggregate.activation["execution_id"]
+            or projection_value["receipt"] != expected_receipt_ref
+            or projection_value["review"]["receipt_content_hash"] != receipt_value["content_hash"]
+        ):
+            _error("memory projection lineage does not match execution and receipt")
+        event_refs = {
+            event["event_id"]: {
+                "format": AGENT_EVENT_FORMAT,
+                "format_version": AGENT_HARNESS_VERSION,
+                "id": event["event_id"],
+                "content_hash": event["content_hash"],
+            }
+            for event in event_values
+        }
+        for source_ref in projection_value["source_events"]:
+            if event_refs.get(source_ref["id"]) != source_ref:
+                _error("memory projection source event does not resolve exactly")
+    memory_events = [event for event in event_values if event["event_type"] == "memory.projected"]
+    if memory_events and projection_value is None:
+        _error("memory-projected event requires a supplied projection")
+    if projection_value is not None:
+        expected_projection_ref = {
+            "format": AGENT_MEMORY_PROJECTION_FORMAT,
+            "format_version": AGENT_HARNESS_VERSION,
+            "id": projection_value["projection_id"],
+            "content_hash": projection_value["content_hash"],
+        }
+        for event in memory_events:
+            if event["subject"] != expected_projection_ref:
+                _error("memory projection event subject does not match supplied projection")
     return AgentHarnessDocuments(
         activation=aggregate.activation,
         grant=aggregate.grant,
         events=event_values,
         receipt=receipt_value,
+        projection=projection_value,
     )

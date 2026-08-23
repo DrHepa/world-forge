@@ -835,6 +835,7 @@ the locales and UI policy it supports.
 
 Slice 1B.1 publishes the closed canonical JSON v1 `AgentWorkerActivation` and
 `AgentCapabilityGrant` lineage documents. Slice 1B.2 adds `AgentEvent` and
-`AgentExecutionReceipt`; `MemoryProjection` remains pending. These contracts
-provide no worker, provider, execution, Studio, replay, or runtime capability.
+`AgentExecutionReceipt`. Slice 1B.3 adds the final contract-only
+`AgentMemoryProjection`. These contracts provide no worker, provider,
+execution, Studio, replay, runtime capability, or memory-truth inference.
 See [ADR-0030](docs/decisions/0030-agent-harness-contract-foundation.md).

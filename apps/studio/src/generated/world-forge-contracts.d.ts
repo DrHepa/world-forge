@@ -78,7 +78,8 @@ export type WorldForgeCreationContract =
   | ImmutableAgentWorkerActivationV1
   | ImmutableAgentCapabilityGrantV1
   | ImmutableAgentEventV1
-  | ImmutableAgentExecutionReceiptV1;
+  | ImmutableAgentExecutionReceiptV1
+  | ImmutableAgentMemoryProjectionV1;
 export type WorldForgeWorldProjectMigrationJournalRecordV1 = {
   format: "world-forge.world_project_migration_journal";
   format_version: 1;
@@ -49124,6 +49125,137 @@ export interface Binding5 {
    */
   id: string;
   revision: number;
+}
+export interface ImmutableAgentMemoryProjectionV1 {
+  /**
+   * This interface was referenced by `ImmutableAgentMemoryProjectionV1`'s JSON-Schema
+   * via the `definition` "sha".
+   */
+  content_hash: string;
+  /**
+   * @minItems 1
+   * @maxItems 64
+   */
+  entries: [Entry, ...Entry[]];
+  /**
+   * This interface was referenced by `ImmutableAgentMemoryProjectionV1`'s JSON-Schema
+   * via the `definition` "id".
+   */
+  execution_id: string;
+  format: "world-forge.agent_memory_projection";
+  format_version: 1;
+  /**
+   * This interface was referenced by `ImmutableAgentMemoryProjectionV1`'s JSON-Schema
+   * via the `definition` "id".
+   */
+  projection_id: string;
+  receipt: ReceiptRef;
+  review: Review2;
+  /**
+   * @minItems 1
+   * @maxItems 64
+   */
+  source_events: [EventRef, ...EventRef[]];
+}
+/**
+ * This interface was referenced by `ImmutableAgentMemoryProjectionV1`'s JSON-Schema
+ * via the `definition` "entry".
+ */
+export interface Entry {
+  /**
+   * This interface was referenced by `ImmutableAgentMemoryProjectionV1`'s JSON-Schema
+   * via the `definition` "id".
+   */
+  entry_id: string;
+  kind: "decision" | "constraint" | "discovery" | "preference";
+  /**
+   * @minItems 1
+   * @maxItems 64
+   */
+  source_event_ids: [string, ...string[]];
+  /**
+   * This interface was referenced by `ImmutableAgentMemoryProjectionV1`'s JSON-Schema
+   * via the `definition` "id".
+   */
+  subject_id: string;
+  /**
+   * This interface was referenced by `ImmutableAgentMemoryProjectionV1`'s JSON-Schema
+   * via the `definition` "sha".
+   */
+  value_hash: string;
+}
+/**
+ * This interface was referenced by `ImmutableAgentMemoryProjectionV1`'s JSON-Schema
+ * via the `definition` "receipt_ref".
+ */
+export interface ReceiptRef {
+  /**
+   * This interface was referenced by `ImmutableAgentMemoryProjectionV1`'s JSON-Schema
+   * via the `definition` "sha".
+   */
+  content_hash: string;
+  format: "world-forge.agent_execution_receipt";
+  format_version: 1;
+  /**
+   * This interface was referenced by `ImmutableAgentMemoryProjectionV1`'s JSON-Schema
+   * via the `definition` "id".
+   */
+  id: string;
+}
+/**
+ * This interface was referenced by `ImmutableAgentMemoryProjectionV1`'s JSON-Schema
+ * via the `definition` "review".
+ */
+export interface Review2 {
+  decision: "approved";
+  /**
+   * This interface was referenced by `ImmutableAgentMemoryProjectionV1`'s JSON-Schema
+   * via the `definition` "sha".
+   */
+  policy_hash: string;
+  /**
+   * This interface was referenced by `ImmutableAgentMemoryProjectionV1`'s JSON-Schema
+   * via the `definition` "id".
+   */
+  policy_id: string;
+  /**
+   * This interface was referenced by `ImmutableAgentMemoryProjectionV1`'s JSON-Schema
+   * via the `definition` "revision".
+   */
+  policy_version: number;
+  /**
+   * This interface was referenced by `ImmutableAgentMemoryProjectionV1`'s JSON-Schema
+   * via the `definition` "sha".
+   */
+  receipt_content_hash: string;
+  /**
+   * This interface was referenced by `ImmutableAgentMemoryProjectionV1`'s JSON-Schema
+   * via the `definition` "id".
+   */
+  review_id: string;
+  /**
+   * This interface was referenced by `ImmutableAgentMemoryProjectionV1`'s JSON-Schema
+   * via the `definition` "id".
+   */
+  reviewer_id: string;
+}
+/**
+ * This interface was referenced by `ImmutableAgentMemoryProjectionV1`'s JSON-Schema
+ * via the `definition` "event_ref".
+ */
+export interface EventRef {
+  /**
+   * This interface was referenced by `ImmutableAgentMemoryProjectionV1`'s JSON-Schema
+   * via the `definition` "sha".
+   */
+  content_hash: string;
+  format: "world-forge.agent_event";
+  format_version: 1;
+  /**
+   * This interface was referenced by `ImmutableAgentMemoryProjectionV1`'s JSON-Schema
+   * via the `definition` "id".
+   */
+  id: string;
 }
 
 

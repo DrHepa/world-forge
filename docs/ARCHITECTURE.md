@@ -420,9 +420,9 @@ an append-only event log and replay, isolated killable worker lifecycle,
 execution receipts, and approved memory projections. Slice 1B.1 now publishes
 only the closed `AgentWorkerActivation` and `AgentCapabilityGrant` lineage
 contracts. Slice 1B.2 adds the closed `AgentEvent` and
-`AgentExecutionReceipt` contracts while `MemoryProjection` remains pending.
-Their validation does not prove execution, isolation, authority, replay, or
-evidence quality. Studio alone retains
+`AgentExecutionReceipt` contracts. Slice 1B.3 adds the final closed
+`AgentMemoryProjection` contract. Their validation does not prove execution,
+isolation, authority, replay, evidence quality, or memory truth. Studio alone retains
 project, canon, asset, and release authority. DeepSeek Harness is reference
 material, never a dependency or fork. `codebase-memory-mcp` is an optional,
 read-only development benchmark only: it is not a source authority, product
@@ -587,3 +587,10 @@ the reserved memory-projection subject format does not publish a
 `MemoryProjection` contract. Receipts bind exact activation, grant, runtime,
 prompt, bounded invocation, artifact, outcome, and usage identities. These
 documents still do not prove that execution or tool invocation occurred.
+
+Slice 1B.3 adds an approved identity-only memory projection. It binds one exact
+execution receipt, one or more exact source events, an explicit approved review
+identity, and one or more hash-only decision, constraint, discovery, or
+preference entries. It stores no memory text, prompt, transcript, rationale,
+provider payload, executable content, or operational path. The artifact neither
+mutates Engram nor infers that projected content is true.

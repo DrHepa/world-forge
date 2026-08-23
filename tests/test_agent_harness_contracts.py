@@ -11,6 +11,7 @@ from worldforge.agent_harness_contracts import (
     AGENT_EVENT_FORMAT,
     AGENT_EXECUTION_RECEIPT_FORMAT,
     AGENT_HARNESS_VERSION,
+    AGENT_MEMORY_PROJECTION_FORMAT,
     AGENT_WORKER_ACTIVATION_FORMAT,
     AgentHarnessContractError,
     canonical_agent_harness_hash,
@@ -26,6 +27,9 @@ TOOLS = ["source.read", "world.validate"]
 BASELINE_FIXTURE_SHA256 = {
     "worker-activation.json": "f8224c8b22ee2836dd14785536abb6c9ed399cc7cce0e63ae49a18fbc044e39f",
     "capability-grant.json": "9aa237725ff3600c8085d29a48248124b529ad73dd68e603ba2a7cd99a14407c",
+    "event-00.json": "058655ed59983e612dfd1435066140d36f591dd767c2de03bb451a1b3991c279",
+    "event-01.json": "bd6a12671cb8089dcd609a893d5c25c61e4c6ea6f15b78803efb62931d366ac1",
+    "execution-receipt.json": "dcaa37f483f21203107ea16bc8330b5bd75374aa1124a4ddda16efe4917247d0",
 }
 EVENT_SUBJECT_FORMATS = {
     "worker.activated": AGENT_WORKER_ACTIVATION_FORMAT,
@@ -33,7 +37,7 @@ EVENT_SUBJECT_FORMATS = {
     "execution.started": AGENT_WORKER_ACTIVATION_FORMAT,
     "execution.cancel_requested": AGENT_WORKER_ACTIVATION_FORMAT,
     "execution.receipt_recorded": AGENT_EXECUTION_RECEIPT_FORMAT,
-    "memory.projected": "world-forge.agent_memory_projection",
+    "memory.projected": AGENT_MEMORY_PROJECTION_FORMAT,
 }
 
 
@@ -160,6 +164,7 @@ def _subject(
     activation: dict[str, object],
     grant: dict[str, object],
     receipt: dict[str, object] | None = None,
+    projection: dict[str, object] | None = None,
 ) -> dict[str, object]:
     if event_type == "grant.issued":
         identifier, content_hash = grant["grant_id"], grant["content_hash"]
@@ -168,7 +173,10 @@ def _subject(
             raise AssertionError("receipt subject requires a receipt")
         identifier, content_hash = receipt["receipt_id"], receipt["content_hash"]
     elif event_type == "memory.projected":
-        identifier, content_hash = "projection_01", "c" * 64
+        if projection is None:
+            identifier, content_hash = "projection_01", "c" * 64
+        else:
+            identifier, content_hash = projection["projection_id"], projection["content_hash"]
     else:
         identifier, content_hash = activation["activation_id"], activation["content_hash"]
     return {
@@ -186,6 +194,7 @@ def _event(
     activation: dict[str, object],
     grant: dict[str, object],
     receipt: dict[str, object] | None = None,
+    projection: dict[str, object] | None = None,
 ) -> dict[str, object]:
     return _seal(
         {
@@ -197,7 +206,7 @@ def _event(
             "sequence": sequence,
             "previous_event_hash": previous_event_hash,
             "event_type": event_type,
-            "subject": _subject(event_type, activation, grant, receipt),
+            "subject": _subject(event_type, activation, grant, receipt, projection),
             "content_hash": "",
         }
     )
@@ -208,24 +217,82 @@ def _event_chain(
     activation: dict[str, object],
     grant: dict[str, object],
     receipt: dict[str, object] | None = None,
+    projection: dict[str, object] | None = None,
 ) -> list[dict[str, object]]:
     result: list[dict[str, object]] = []
     previous: str | None = None
     for sequence, event_type in enumerate(event_types):
-        event = _event(event_type, sequence, previous, activation, grant, receipt)
+        event = _event(event_type, sequence, previous, activation, grant, receipt, projection)
         result.append(event)
         previous = event["content_hash"]
     return result
 
 
+def _projection(
+    activation: dict[str, object],
+    receipt: dict[str, object],
+    source_events: list[dict[str, object]],
+    *,
+    entries: int = 1,
+) -> dict[str, object]:
+    source_refs = [
+        {
+            "format": AGENT_EVENT_FORMAT,
+            "format_version": AGENT_HARNESS_VERSION,
+            "id": event["event_id"],
+            "content_hash": event["content_hash"],
+        }
+        for event in source_events
+    ]
+    source_ids = [event["event_id"] for event in source_events]
+    memory_entries = [
+        {
+            "entry_id": f"entry_{index:02d}",
+            "kind": "decision" if index % 2 == 0 else "discovery",
+            "subject_id": f"subject_{index:02d}",
+            "value_hash": f"{(index % 9) + 1}" * 64,
+            "source_event_ids": source_ids,
+        }
+        for index in range(entries)
+    ]
+    return _seal(
+        {
+            "format": AGENT_MEMORY_PROJECTION_FORMAT,
+            "format_version": AGENT_HARNESS_VERSION,
+            "projection_id": "projection_01",
+            "execution_id": activation["execution_id"],
+            "receipt": {
+                "format": AGENT_EXECUTION_RECEIPT_FORMAT,
+                "format_version": AGENT_HARNESS_VERSION,
+                "id": receipt["receipt_id"],
+                "content_hash": receipt["content_hash"],
+            },
+            "source_events": source_refs,
+            "review": {
+                "review_id": "review_01",
+                "reviewer_id": "reviewer_01",
+                "policy_id": "memory_policy",
+                "policy_version": 1,
+                "policy_hash": "d" * 64,
+                "receipt_content_hash": receipt["content_hash"],
+                "decision": "approved",
+            },
+            "entries": memory_entries,
+            "content_hash": "",
+        }
+    )
+
+
 class AgentHarnessContractTests(unittest.TestCase):
-    def test_all_five_fixtures_are_canonical_and_aggregate_valid(self) -> None:
+    def test_all_seven_fixtures_are_canonical_and_aggregate_valid(self) -> None:
         fixture_names = {
             "worker-activation.json",
             "capability-grant.json",
             "event-00.json",
             "event-01.json",
             "execution-receipt.json",
+            "memory-projection.json",
+            "event-02.json",
         }
         self.assertEqual(fixture_names, {path.name for path in FIXTURES.glob("*.json")})
         documents = {
@@ -250,11 +317,17 @@ class AgentHarnessContractTests(unittest.TestCase):
         aggregate = validate_agent_harness_documents(
             documents["worker-activation.json"],
             documents["capability-grant.json"],
-            [documents["event-00.json"], documents["event-01.json"]],
+            [
+                documents["event-00.json"],
+                documents["event-01.json"],
+                documents["event-02.json"],
+            ],
             documents["execution-receipt.json"],
+            documents["memory-projection.json"],
         )
-        self.assertEqual([0, 1], [event["sequence"] for event in aggregate.events])
+        self.assertEqual([0, 1, 2], [event["sequence"] for event in aggregate.events])
         self.assertEqual("receipt_01", aggregate.receipt["receipt_id"])
+        self.assertEqual("projection_01", aggregate.projection["projection_id"])
 
     def test_activation_schema_contract_is_closed_and_hash_bound(self) -> None:
         activation = _activation()
@@ -369,11 +442,9 @@ class AgentHarnessContractTests(unittest.TestCase):
         activation = _activation()
         grant = _grant(activation)
         event = _event("memory.projected", 0, None, activation, grant)
-        aggregate = validate_agent_harness_documents(activation, grant, [event])
-        self.assertEqual(
-            "world-forge.agent_memory_projection", aggregate.events[0]["subject"]["format"]
-        )
-        self.assertEqual("projection_01", aggregate.events[0]["subject"]["id"])
+        validated = validate_agent_harness_document(event)
+        self.assertEqual(AGENT_MEMORY_PROJECTION_FORMAT, validated["subject"]["format"])
+        self.assertEqual("projection_01", validated["subject"]["id"])
 
     def test_receipt_recorded_requires_supplied_exact_receipt(self) -> None:
         activation = _activation()
@@ -560,6 +631,274 @@ class AgentHarnessContractTests(unittest.TestCase):
                 with self.assertRaisesRegex(AgentHarnessContractError, "unknown fields"):
                     validate_agent_harness_document(_seal(forbidden))
 
+    def test_projection_document_and_incremental_aggregate_are_valid(self) -> None:
+        activation = _activation()
+        grant = _grant(activation)
+        receipt = _receipt(activation, grant)
+        events = _event_chain(["worker.activated", "grant.issued"], activation, grant)
+        projection = _projection(activation, receipt, events)
+        validated = validate_agent_harness_document(
+            projection, expected_format=AGENT_MEMORY_PROJECTION_FORMAT
+        )
+        self.assertEqual("projection_01", validated["projection_id"])
+        aggregate = validate_agent_harness_documents(activation, grant, events, receipt, projection)
+        self.assertEqual("projection_01", aggregate.projection["projection_id"])
+
+    def test_projection_receipt_execution_and_review_lineage_fail_closed(self) -> None:
+        activation = _activation()
+        grant = _grant(activation)
+        receipt = _receipt(activation, grant)
+        events = _event_chain(["worker.activated", "grant.issued"], activation, grant)
+        projection = _projection(activation, receipt, events)
+        with self.assertRaisesRegex(AgentHarnessContractError, "requires a supplied receipt"):
+            validate_agent_harness_documents(activation, grant, events, projection=projection)
+        mutations = (
+            ("execution", lambda value: value.__setitem__("execution_id", "execution_02")),
+            ("receipt_id", lambda value: value["receipt"].__setitem__("id", "receipt_02")),
+            (
+                "receipt_hash",
+                lambda value: (
+                    value["receipt"].__setitem__("content_hash", "f" * 64),
+                    value["review"].__setitem__("receipt_content_hash", "f" * 64),
+                ),
+            ),
+        )
+        for name, mutate in mutations:
+            with self.subTest(mutation=name):
+                value = copy.deepcopy(projection)
+                mutate(value)
+                with self.assertRaisesRegex(AgentHarnessContractError, "projection lineage"):
+                    validate_agent_harness_documents(
+                        activation, grant, events, receipt, _seal(value)
+                    )
+        review_mismatch = copy.deepcopy(projection)
+        review_mismatch["review"]["receipt_content_hash"] = "f" * 64
+        with self.assertRaisesRegex(AgentHarnessContractError, "review receipt_content_hash"):
+            validate_agent_harness_document(_seal(review_mismatch))
+        rejected = copy.deepcopy(projection)
+        rejected["review"]["decision"] = "rejected"
+        with self.assertRaisesRegex(AgentHarnessContractError, "approved"):
+            validate_agent_harness_document(_seal(rejected))
+        for field, value in (
+            ("format", AGENT_EVENT_FORMAT),
+            ("format_version", 2),
+        ):
+            with self.subTest(receipt_ref_field=field):
+                wrong_ref = copy.deepcopy(projection)
+                wrong_ref["receipt"][field] = value
+                with self.assertRaisesRegex(AgentHarnessContractError, "receipt"):
+                    validate_agent_harness_document(_seal(wrong_ref))
+
+    def test_projection_source_event_refs_resolve_exactly_and_are_bounded(self) -> None:
+        activation = _activation()
+        grant = _grant(activation)
+        receipt = _receipt(activation, grant)
+        events = _event_chain(["worker.activated", "grant.issued"], activation, grant)
+        projection = _projection(activation, receipt, events)
+        document_mutations = (
+            ("empty", lambda value: value.__setitem__("source_events", [])),
+            (
+                "duplicate",
+                lambda value: value["source_events"].append(
+                    copy.deepcopy(value["source_events"][0])
+                ),
+            ),
+            ("unsorted", lambda value: value["source_events"].reverse()),
+            (
+                "wrong_format",
+                lambda value: value["source_events"][0].__setitem__(
+                    "format", AGENT_EXECUTION_RECEIPT_FORMAT
+                ),
+            ),
+            (
+                "wrong_version",
+                lambda value: value["source_events"][0].__setitem__("format_version", 2),
+            ),
+        )
+        for name, mutate in document_mutations:
+            with self.subTest(document_mutation=name):
+                value = copy.deepcopy(projection)
+                mutate(value)
+                with self.assertRaises(AgentHarnessContractError):
+                    validate_agent_harness_document(_seal(value))
+        oversized = copy.deepcopy(projection)
+        oversized["source_events"] = [
+            {
+                "format": AGENT_EVENT_FORMAT,
+                "format_version": 1,
+                "id": f"event_{index:03d}",
+                "content_hash": f"{(index % 9) + 1}" * 64,
+            }
+            for index in range(65)
+        ]
+        oversized["entries"][0]["source_event_ids"] = ["event_000"]
+        with self.assertRaisesRegex(AgentHarnessContractError, "bounded"):
+            validate_agent_harness_document(_seal(oversized))
+        aggregate_mutations = (
+            ("unresolved", "id", "event_00x"),
+            ("wrong_hash", "content_hash", "f" * 64),
+        )
+        for name, field, value in aggregate_mutations:
+            with self.subTest(aggregate_mutation=name):
+                changed = copy.deepcopy(projection)
+                changed["source_events"][0][field] = value
+                if field == "id":
+                    changed["entries"][0]["source_event_ids"][0] = value
+                with self.assertRaisesRegex(AgentHarnessContractError, "source event"):
+                    validate_agent_harness_documents(
+                        activation, grant, events, receipt, _seal(changed)
+                    )
+
+    def test_projection_entries_and_source_ids_are_sorted_unique_bounded_subsets(self) -> None:
+        activation = _activation()
+        grant = _grant(activation)
+        receipt = _receipt(activation, grant)
+        events = _event_chain(["worker.activated", "grant.issued"], activation, grant)
+        projection = _projection(activation, receipt, events, entries=2)
+        entry_mutations = (
+            ("empty_entries", lambda value: value.__setitem__("entries", [])),
+            ("unsorted_entries", lambda value: value["entries"].reverse()),
+            (
+                "duplicate_entry",
+                lambda value: value["entries"].append(copy.deepcopy(value["entries"][0])),
+            ),
+            (
+                "empty_source_ids",
+                lambda value: value["entries"][0].__setitem__("source_event_ids", []),
+            ),
+            (
+                "unsorted_source_ids",
+                lambda value: value["entries"][0]["source_event_ids"].reverse(),
+            ),
+            (
+                "duplicate_source_ids",
+                lambda value: value["entries"][0]["source_event_ids"].append("event_00"),
+            ),
+            (
+                "unsupported_kind",
+                lambda value: value["entries"][0].__setitem__("kind", "claim"),
+            ),
+        )
+        for name, mutate in entry_mutations:
+            with self.subTest(mutation=name):
+                value = copy.deepcopy(projection)
+                mutate(value)
+                with self.assertRaises(AgentHarnessContractError):
+                    validate_agent_harness_document(_seal(value))
+        oversized_entries = _projection(activation, receipt, events, entries=65)
+        with self.assertRaisesRegex(AgentHarnessContractError, "bounded"):
+            validate_agent_harness_document(oversized_entries)
+        oversized_ids = copy.deepcopy(projection)
+        oversized_ids["entries"][0]["source_event_ids"] = [
+            f"event_{index:03d}" for index in range(65)
+        ]
+        with self.assertRaisesRegex(AgentHarnessContractError, "bounded"):
+            validate_agent_harness_document(_seal(oversized_ids))
+        outside_subset = copy.deepcopy(projection)
+        outside_subset["entries"][0]["source_event_ids"] = ["event_99"]
+        with self.assertRaisesRegex(AgentHarnessContractError, "subset"):
+            validate_agent_harness_documents(
+                activation, grant, events, receipt, _seal(outside_subset)
+            )
+
+    def test_projection_forbidden_surfaces_hash_and_byte_limit_fail_closed(self) -> None:
+        activation = _activation()
+        grant = _grant(activation)
+        receipt = _receipt(activation, grant)
+        events = _event_chain(["worker.activated", "grant.issued"], activation, grant)
+        projection = _projection(activation, receipt, events)
+        forbidden_fields = (
+            "memory_text",
+            "prompt",
+            "transcript",
+            "rationale",
+            "path",
+            "url",
+            "endpoint",
+            "command",
+            "env",
+            "stderr",
+            "secret",
+            "credentials",
+            "token",
+            "provider_payload",
+            "executable",
+            "executable_content",
+        )
+        for field in forbidden_fields:
+            with self.subTest(forbidden_field=field):
+                value = copy.deepcopy(projection)
+                value["entries"][0][field] = "forbidden"
+                with self.assertRaisesRegex(AgentHarnessContractError, "forbidden fields"):
+                    validate_agent_harness_document(_seal(value))
+        nested_locations = ("receipt", "source_events", "review")
+        for location in nested_locations:
+            with self.subTest(nested_location=location):
+                value = copy.deepcopy(projection)
+                target = (
+                    value[location][0] if isinstance(value[location], list) else value[location]
+                )
+                target["raw"] = "forbidden"
+                with self.assertRaisesRegex(AgentHarnessContractError, "unknown fields"):
+                    validate_agent_harness_document(_seal(value))
+        tampered = copy.deepcopy(projection)
+        tampered["content_hash"] = "0" * 64
+        with self.assertRaisesRegex(AgentHarnessContractError, "content hash"):
+            validate_agent_harness_document(tampered)
+        oversized = copy.deepcopy(projection)
+        oversized["raw"] = "x" * (1024 * 1024)
+        with self.assertRaisesRegex(AgentHarnessContractError, "byte limit"):
+            validate_agent_harness_document(_seal(oversized))
+
+    def test_projection_policy_version_uses_javascript_safe_integer_semantics(self) -> None:
+        activation = _activation()
+        grant = _grant(activation)
+        receipt = _receipt(activation, grant)
+        events = _event_chain(["worker.activated", "grant.issued"], activation, grant)
+        projection = _projection(activation, receipt, events)
+        for literal in ("1.0", "1e0"):
+            with self.subTest(accepted_literal=literal):
+                parsed = json.loads(
+                    json.dumps(projection, separators=(",", ":")).replace(
+                        '"policy_version":1', f'"policy_version":{literal}'
+                    )
+                )
+                self.assertEqual(
+                    1,
+                    validate_agent_harness_document(parsed)["review"]["policy_version"],
+                )
+        for value in (True, 1.5, 9_007_199_254_740_992.0):
+            with self.subTest(rejected_value=value):
+                changed = copy.deepcopy(projection)
+                changed["review"]["policy_version"] = value
+                with self.assertRaisesRegex(AgentHarnessContractError, "integer|number"):
+                    validate_agent_harness_document(_seal(changed))
+
+    def test_memory_event_requires_exact_supplied_projection(self) -> None:
+        activation = _activation()
+        grant = _grant(activation)
+        receipt = _receipt(activation, grant)
+        source_events = _event_chain(["worker.activated", "grant.issued"], activation, grant)
+        projection = _projection(activation, receipt, source_events)
+        events = _event_chain(
+            ["worker.activated", "grant.issued", "memory.projected"],
+            activation,
+            grant,
+            receipt,
+            projection,
+        )
+        with self.assertRaisesRegex(AgentHarnessContractError, "requires a supplied projection"):
+            validate_agent_harness_documents(activation, grant, events, receipt)
+        for field, value in (("id", "projection_02"), ("content_hash", "f" * 64)):
+            with self.subTest(field=field):
+                changed_events = copy.deepcopy(events)
+                changed_events[2]["subject"][field] = value
+                changed_events[2] = _seal(changed_events[2])
+                with self.assertRaisesRegex(AgentHarnessContractError, "projection event subject"):
+                    validate_agent_harness_documents(
+                        activation, grant, changed_events, receipt, projection
+                    )
+
     def test_boolean_version_is_not_an_integer_discriminator(self) -> None:
         activation = _activation()
         activation["format_version"] = True
@@ -631,7 +970,7 @@ class AgentHarnessContractTests(unittest.TestCase):
         with self.assertRaisesRegex(AgentHarnessContractError, "execution binding"):
             validate_agent_harness_documents(_activation(), _seal(execution_mismatch))
 
-    def test_schema_catalog_and_generated_types_cover_all_four_contracts_exactly(self) -> None:
+    def test_schema_catalog_and_generated_types_cover_all_five_contracts_exactly(self) -> None:
         catalog = load_contract_catalog(ROOT)
         entries = {entry["id"]: entry for entry in catalog["contracts"]}
         expected = {
@@ -647,6 +986,10 @@ class AgentHarnessContractTests(unittest.TestCase):
             "agent-execution-receipt": (
                 AGENT_EXECUTION_RECEIPT_FORMAT,
                 "ImmutableAgentExecutionReceiptV1",
+            ),
+            "agent-memory-projection": (
+                AGENT_MEMORY_PROJECTION_FORMAT,
+                "ImmutableAgentMemoryProjectionV1",
             ),
         }
         generated = (ROOT / "apps/studio/src/generated/world-forge-contracts.d.ts").read_text(
@@ -669,6 +1012,7 @@ class AgentHarnessContractTests(unittest.TestCase):
             [
                 "examples/multigenre-contracts/agent-harness-minimal/event-00.json",
                 "examples/multigenre-contracts/agent-harness-minimal/event-01.json",
+                "examples/multigenre-contracts/agent-harness-minimal/event-02.json",
             ],
             entries["agent-event"]["fixtures"],
         )
@@ -707,6 +1051,38 @@ class AgentHarnessContractTests(unittest.TestCase):
                     generated[subject_start:subject_end],
                 )
         self.assertNotIn("format: string;", event_declaration)
+        projection_schema = json.loads(
+            (ROOT / "schemas/agent-memory-projection.schema.json").read_text()
+        )
+        self.assertFalse(projection_schema["additionalProperties"])
+        for definition in ("entry", "event_ref", "receipt_ref", "review"):
+            with self.subTest(closed_projection_definition=definition):
+                self.assertFalse(projection_schema["$defs"][definition]["additionalProperties"])
+        projection_start = generated.index("export interface ImmutableAgentMemoryProjectionV1")
+        projection_end = generated.index(
+            "type GenericAssetRuntimeForbiddenFieldName", projection_start
+        )
+        projection_declarations = generated[projection_start:projection_end]
+        for exact_fragment in (
+            'format: "world-forge.agent_memory_projection";',
+            "format_version: 1;",
+            "entries: [Entry, ...Entry[]];",
+            "receipt: ReceiptRef;",
+            "review: Review2;",
+            "source_events: [EventRef, ...EventRef[]];",
+            "export interface Entry {",
+            'kind: "decision" | "constraint" | "discovery" | "preference";',
+            "source_event_ids: [string, ...string[]];",
+            "export interface ReceiptRef {",
+            'format: "world-forge.agent_execution_receipt";',
+            "export interface Review2 {",
+            'decision: "approved";',
+            "export interface EventRef {",
+            'format: "world-forge.agent_event";',
+        ):
+            with self.subTest(generated_projection_fragment=exact_fragment):
+                self.assertIn(exact_fragment, projection_declarations)
+        self.assertNotIn("[k: string]", projection_declarations)
 
 
 if __name__ == "__main__":

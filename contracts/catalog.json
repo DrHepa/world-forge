@@ -56,7 +56,8 @@
       ],
       "fixtures": [
         "examples/multigenre-contracts/agent-harness-minimal/event-00.json",
-        "examples/multigenre-contracts/agent-harness-minimal/event-01.json"
+        "examples/multigenre-contracts/agent-harness-minimal/event-01.json",
+        "examples/multigenre-contracts/agent-harness-minimal/event-02.json"
       ],
       "format": "world-forge.agent_event",
       "id": "agent-event",
@@ -96,6 +97,31 @@
         "tests/test_agent_harness_contracts.py"
       ],
       "title": "Immutable Agent Execution Receipt v1",
+      "version": 1
+    },
+    {
+      "cli_commands": [],
+      "docs": [
+        "README.md",
+        "docs/ARCHITECTURE.md",
+        "docs/decisions/0030-agent-harness-contract-foundation.md"
+      ],
+      "fixtures": [
+        "examples/multigenre-contracts/agent-harness-minimal/memory-projection.json"
+      ],
+      "format": "world-forge.agent_memory_projection",
+      "id": "agent-memory-projection",
+      "kind": "json-schema",
+      "m5_phases": [],
+      "python_symbols": [
+        "worldforge.agent_harness_contracts:validate_agent_harness_document",
+        "worldforge.agent_harness_contracts:validate_agent_harness_documents"
+      ],
+      "schema": "schemas/agent-memory-projection.schema.json",
+      "tests": [
+        "tests/test_agent_harness_contracts.py"
+      ],
+      "title": "Immutable Agent Memory Projection v1",
       "version": 1
     },
     {

@@ -68,6 +68,41 @@ function equalArrays(left, right) {
   return Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((item, index) => item === right[index]);
 }
 
+export const AGENT_MEMORY_PROJECTION_FORBIDDEN_FIELDS = Object.freeze([
+  "memory_text",
+  "prompt",
+  "transcript",
+  "rationale",
+  "path",
+  "url",
+  "endpoint",
+  "command",
+  "env",
+  "stderr",
+  "secret",
+  "credentials",
+  "token",
+  "provider_payload",
+  "executable",
+  "executable_content",
+]);
+const projectionForbiddenFields = new Set(
+  AGENT_MEMORY_PROJECTION_FORBIDDEN_FIELDS,
+);
+
+function hasProjectionForbiddenField(value) {
+  if (Array.isArray(value)) {
+    return value.some((item) => hasProjectionForbiddenField(item));
+  }
+  if (!isRecord(value)) {
+    return false;
+  }
+  return Object.entries(value).some(
+    ([key, item]) =>
+      projectionForbiddenFields.has(key) || hasProjectionForbiddenField(item),
+  );
+}
+
 export function hasCoherentAgentHarnessContract(value, kind) {
   try {
     if (
@@ -111,6 +146,51 @@ export function hasCoherentAgentHarnessContract(value, kind) {
           : typeof value.previous_event_hash === "string") &&
         isRecord(value.subject) &&
         value.subject.format === subjectFormats[value.event_type]
+      );
+    }
+    if (kind === "projection") {
+      const documentRefs = (items, format) =>
+        Array.isArray(items) &&
+        items.length >= 1 &&
+        items.length <= 64 &&
+        sortedUnique(items.map((item) => item?.id)) &&
+        items.every(
+          (item) =>
+            isRecord(item) &&
+            item.format === format &&
+            item.format_version === 1,
+        );
+      if (
+        value.format !== "world-forge.agent_memory_projection" ||
+        value.format_version !== 1 ||
+        hasProjectionForbiddenField(value) ||
+        !isRecord(value.receipt) ||
+        value.receipt.format !== "world-forge.agent_execution_receipt" ||
+        value.receipt.format_version !== 1 ||
+        !documentRefs(value.source_events, "world-forge.agent_event") ||
+        !isRecord(value.review) ||
+        value.review.decision !== "approved" ||
+        !Number.isSafeInteger(value.review.policy_version) ||
+        value.review.policy_version < 1 ||
+        value.review.receipt_content_hash !== value.receipt.content_hash ||
+        !Array.isArray(value.entries) ||
+        value.entries.length < 1 ||
+        value.entries.length > 64 ||
+        !sortedUnique(value.entries.map((entry) => entry?.entry_id))
+      ) {
+        return false;
+      }
+      const sourceEventIds = new Set(value.source_events.map((item) => item.id));
+      return value.entries.every(
+        (entry) =>
+          isRecord(entry) &&
+          ["decision", "constraint", "discovery", "preference"].includes(
+            entry.kind,
+          ) &&
+          Array.isArray(entry.source_event_ids) &&
+          entry.source_event_ids.length >= 1 &&
+          sortedUnique(entry.source_event_ids) &&
+          entry.source_event_ids.every((eventId) => sourceEventIds.has(eventId)),
       );
     }
     if (kind === "receipt") {

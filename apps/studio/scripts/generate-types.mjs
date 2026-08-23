@@ -28,6 +28,7 @@ import {
 } from "./generic-asset-validation.mjs";
 import { hasCoherentGenericAssetpack } from "./generic-assetpack-validation.mjs";
 import {
+    AGENT_MEMORY_PROJECTION_FORBIDDEN_FIELDS,
     canonicalAgentHarnessDocumentBytes,
     hasCoherentAgentHarnessContract,
 } from "./agent-harness-validation.mjs";
@@ -478,6 +479,7 @@ const contractDefinitions = {
     },
     AgentEvent: { $ref: "agent-event.schema.json" },
     AgentExecutionReceipt: { $ref: "agent-execution-receipt.schema.json" },
+    AgentMemoryProjection: { $ref: "agent-memory-projection.schema.json" },
 };
 const contractsSchema = {
     $id: "https://world-forge.local/schemas/world-forge-contracts.generated.json",
@@ -4345,6 +4347,7 @@ async function verifyContractSchemas() {
         "agent-capability-grant",
         "agent-event",
         "agent-execution-receipt",
+        "agent-memory-projection",
     ];
     const ajv = new Ajv2020({
         allErrors: true,
@@ -4471,8 +4474,10 @@ async function verifyContractSchemas() {
                     ? "activation"
                     : data.format === "world-forge.agent_event"
                       ? "event"
-                      : data.format === "world-forge.agent_execution_receipt"
+                    : data.format === "world-forge.agent_execution_receipt"
                         ? "receipt"
+                        : data.format === "world-forge.agent_memory_projection"
+                          ? "projection"
                         : "grant",
             ),
     });
@@ -4622,7 +4627,7 @@ async function verifyContractSchemas() {
             throw new Error(`${name} does not bind its canonical content hash`);
         }
         if (
-            ["agent-worker-activation", "agent-capability-grant", "agent-event", "agent-execution-receipt"].includes(name) &&
+            ["agent-worker-activation", "agent-capability-grant", "agent-event", "agent-execution-receipt", "agent-memory-projection"].includes(name) &&
             contractSchema["x-world-forge-agent-harness-coherent"] !== true
         ) {
             throw new Error(`${name} does not enforce Agent Harness coherence`);
@@ -4892,6 +4897,9 @@ async function verifyContractSchemas() {
     const harnessReceipt = documents.get(
         "agent-harness-minimal/execution-receipt.json",
     );
+    const harnessProjection = documents.get(
+        "agent-harness-minimal/memory-projection.json",
+    );
     const rejectHarnessMutation = (document, message) => {
         const schemaId = schemaByFormat.get(document.format);
         if (schemaId === undefined || ajv.validate(schemaId, document)) {
@@ -5107,6 +5115,176 @@ async function verifyContractSchemas() {
     rejectHarnessMutation(
         oversizedHarnessReceipt,
         "Agent Harness AJV accepted an oversized receipt",
+    );
+    acceptHarnessMutation(
+        harnessProjection,
+        "Agent Harness AJV rejected the canonical memory projection",
+    );
+    for (const [name, mutate] of [
+        [
+            "projection review rejection",
+            (value) => { value.review.decision = "rejected"; },
+        ],
+        [
+            "projection review receipt mismatch",
+            (value) => { value.review.receipt_content_hash = "f".repeat(64); },
+        ],
+        [
+            "projection receipt ref format",
+            (value) => { value.receipt.format = "world-forge.agent_event"; },
+        ],
+        [
+            "projection receipt ref version",
+            (value) => { value.receipt.format_version = 2; },
+        ],
+        [
+            "empty projection source refs",
+            (value) => { value.source_events = []; },
+        ],
+        [
+            "unsorted projection source refs",
+            (value) => { value.source_events.reverse(); },
+        ],
+        [
+            "duplicate projection source refs",
+            (value) => { value.source_events.push(structuredClone(value.source_events[0])); },
+        ],
+        [
+            "projection source ref format",
+            (value) => { value.source_events[0].format = "world-forge.agent_execution_receipt"; },
+        ],
+        [
+            "projection source ref version",
+            (value) => { value.source_events[0].format_version = 2; },
+        ],
+        [
+            "empty projection entries",
+            (value) => { value.entries = []; },
+        ],
+        [
+            "duplicate projection entries",
+            (value) => { value.entries.push(structuredClone(value.entries[0])); },
+        ],
+        [
+            "unsorted projection entries",
+            (value) => {
+                value.entries.push({
+                    ...structuredClone(value.entries[0]),
+                    entry_id: "entry_00",
+                });
+            },
+        ],
+        [
+            "unsupported projection entry kind",
+            (value) => { value.entries[0].kind = "claim"; },
+        ],
+        [
+            "empty projection entry source IDs",
+            (value) => { value.entries[0].source_event_ids = []; },
+        ],
+        [
+            "unsorted projection entry source IDs",
+            (value) => { value.entries[0].source_event_ids.reverse(); },
+        ],
+        [
+            "duplicate projection entry source IDs",
+            (value) => { value.entries[0].source_event_ids.push("event_00"); },
+        ],
+        [
+            "projection entry source outside refs",
+            (value) => { value.entries[0].source_event_ids = ["event_99"]; },
+        ],
+        [
+            "boolean projection policy version",
+            (value) => { value.review.policy_version = true; },
+        ],
+    ]) {
+        const projection = structuredClone(harnessProjection);
+        mutate(projection);
+        reseal(projection);
+        rejectHarnessMutation(
+            projection,
+            `Agent Harness AJV accepted ${name}`,
+        );
+    }
+    for (const [name, number] of [
+        ["non-integral projection policy version", 1.5],
+        ["unsafe projection policy version", 9007199254740992],
+    ]) {
+        const projection = structuredClone(harnessProjection);
+        projection.review.policy_version = number;
+        rejectHarnessMutation(
+            projection,
+            `Agent Harness AJV accepted ${name}`,
+        );
+    }
+    const tooManyProjectionRefs = structuredClone(harnessProjection);
+    tooManyProjectionRefs.source_events = Array.from(
+        { length: 65 },
+        (_, index) => ({
+            content_hash: `${(index % 9) + 1}`.repeat(64),
+            format: "world-forge.agent_event",
+            format_version: 1,
+            id: `event_${String(index).padStart(3, "0")}`,
+        }),
+    );
+    tooManyProjectionRefs.entries[0].source_event_ids = ["event_000"];
+    reseal(tooManyProjectionRefs);
+    rejectHarnessMutation(
+        tooManyProjectionRefs,
+        "Agent Harness AJV accepted more than 64 projection source refs",
+    );
+    const tooManyProjectionEntries = structuredClone(harnessProjection);
+    tooManyProjectionEntries.entries = Array.from(
+        { length: 65 },
+        (_, index) => ({
+            ...structuredClone(harnessProjection.entries[0]),
+            entry_id: `entry_${String(index).padStart(3, "0")}`,
+        }),
+    );
+    reseal(tooManyProjectionEntries);
+    rejectHarnessMutation(
+        tooManyProjectionEntries,
+        "Agent Harness AJV accepted more than 64 projection entries",
+    );
+    const tooManyProjectionEntrySources = structuredClone(harnessProjection);
+    tooManyProjectionEntrySources.entries[0].source_event_ids = Array.from(
+        { length: 65 },
+        (_, index) => `event_${String(index).padStart(3, "0")}`,
+    );
+    reseal(tooManyProjectionEntrySources);
+    rejectHarnessMutation(
+        tooManyProjectionEntrySources,
+        "Agent Harness AJV accepted more than 64 entry source IDs",
+    );
+    for (const forbiddenField of AGENT_MEMORY_PROJECTION_FORBIDDEN_FIELDS) {
+        const projection = structuredClone(harnessProjection);
+        projection.entries[0][forbiddenField] = "forbidden";
+        reseal(projection);
+        rejectHarnessMutation(
+            projection,
+            `Agent Harness AJV accepted projection field ${forbiddenField}`,
+        );
+    }
+    const badProjectionHash = structuredClone(harnessProjection);
+    badProjectionHash.content_hash = "0".repeat(64);
+    rejectHarnessMutation(
+        badProjectionHash,
+        "Agent Harness AJV accepted a tampered projection hash",
+    );
+    const oversizedHarnessProjection = structuredClone(harnessProjection);
+    oversizedHarnessProjection.raw = "x".repeat(1024 * 1024);
+    reseal(oversizedHarnessProjection);
+    if (
+        canonicalAgentHarnessDocumentBytes(oversizedHarnessProjection) <=
+            1024 * 1024 ||
+        hasCoherentAgentHarnessContract(oversizedHarnessProjection, "projection")
+    ) {
+        throw new Error("Agent Harness projection byte limit was not enforced");
+    }
+    rejectHarnessMutation(
+        oversizedHarnessProjection,
+        "Agent Harness AJV accepted an oversized projection",
     );
 
     const invalidWorld = structuredClone(

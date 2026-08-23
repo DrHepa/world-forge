@@ -833,7 +833,8 @@ the locales and UI policy it supports.
 
 ### Agent Harness contract foundation
 
-Slice 1B.1 additively advances the historical Slice 1A Harness plan with public
-v1 `AgentWorkerActivation` and `AgentCapabilityGrant` closed canonical JSON
-lineage documents. They intentionally provide no worker, provider, execution,
-Studio, replay, or runtime capability. See [ADR-0030](docs/decisions/0030-agent-harness-contract-foundation.md).
+Slice 1B.1 publishes the closed canonical JSON v1 `AgentWorkerActivation` and
+`AgentCapabilityGrant` lineage documents. Slice 1B.2 adds `AgentEvent` and
+`AgentExecutionReceipt`; `MemoryProjection` remains pending. These contracts
+provide no worker, provider, execution, Studio, replay, or runtime capability.
+See [ADR-0030](docs/decisions/0030-agent-harness-contract-foundation.md).

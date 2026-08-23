@@ -55,6 +55,57 @@
         "docs/decisions/0030-agent-harness-contract-foundation.md"
       ],
       "fixtures": [
+        "examples/multigenre-contracts/agent-harness-minimal/event-00.json",
+        "examples/multigenre-contracts/agent-harness-minimal/event-01.json"
+      ],
+      "format": "world-forge.agent_event",
+      "id": "agent-event",
+      "kind": "json-schema",
+      "m5_phases": [],
+      "python_symbols": [
+        "worldforge.agent_harness_contracts:validate_agent_harness_document",
+        "worldforge.agent_harness_contracts:validate_agent_harness_documents"
+      ],
+      "schema": "schemas/agent-event.schema.json",
+      "tests": [
+        "tests/test_agent_harness_contracts.py"
+      ],
+      "title": "Immutable Agent Event v1",
+      "version": 1
+    },
+    {
+      "cli_commands": [],
+      "docs": [
+        "README.md",
+        "docs/ARCHITECTURE.md",
+        "docs/decisions/0030-agent-harness-contract-foundation.md"
+      ],
+      "fixtures": [
+        "examples/multigenre-contracts/agent-harness-minimal/execution-receipt.json"
+      ],
+      "format": "world-forge.agent_execution_receipt",
+      "id": "agent-execution-receipt",
+      "kind": "json-schema",
+      "m5_phases": [],
+      "python_symbols": [
+        "worldforge.agent_harness_contracts:validate_agent_harness_document",
+        "worldforge.agent_harness_contracts:validate_agent_harness_documents"
+      ],
+      "schema": "schemas/agent-execution-receipt.schema.json",
+      "tests": [
+        "tests/test_agent_harness_contracts.py"
+      ],
+      "title": "Immutable Agent Execution Receipt v1",
+      "version": 1
+    },
+    {
+      "cli_commands": [],
+      "docs": [
+        "README.md",
+        "docs/ARCHITECTURE.md",
+        "docs/decisions/0030-agent-harness-contract-foundation.md"
+      ],
+      "fixtures": [
         "examples/multigenre-contracts/agent-harness-minimal/worker-activation.json"
       ],
       "format": "world-forge.agent_worker_activation",

@@ -92,6 +92,101 @@ export function hasCoherentAgentHarnessContract(value, kind) {
         equalArrays(value.requested_tool_ids, value.work_order.tool_ids)
       );
     }
+    if (kind === "event") {
+      const subjectFormats = {
+        "worker.activated": "world-forge.agent_worker_activation",
+        "grant.issued": "world-forge.agent_capability_grant",
+        "execution.started": "world-forge.agent_worker_activation",
+        "execution.cancel_requested": "world-forge.agent_worker_activation",
+        "execution.receipt_recorded": "world-forge.agent_execution_receipt",
+        "memory.projected": "world-forge.agent_memory_projection",
+      };
+      return (
+        value.format === "world-forge.agent_event" &&
+        value.format_version === 1 &&
+        Number.isSafeInteger(value.sequence) &&
+        value.sequence >= 0 &&
+        (value.sequence === 0
+          ? value.previous_event_hash === null
+          : typeof value.previous_event_hash === "string") &&
+        isRecord(value.subject) &&
+        value.subject.format === subjectFormats[value.event_type]
+      );
+    }
+    if (kind === "receipt") {
+      const reasonCodes = (codes, required) =>
+        sortedUnique(codes) &&
+        codes.every((code) => /^[a-z][a-z0-9_]{1,63}$/u.test(code)) &&
+        (!required || codes.length > 0);
+      const identityArray = (items, maximum = 64) =>
+        Array.isArray(items) &&
+        items.length <= maximum &&
+        sortedUnique(items.map((item) => item?.id)) &&
+        items.every(
+          (item) =>
+            isRecord(item) &&
+            typeof item.id === "string" &&
+            typeof item.content_hash === "string",
+        );
+      const usage = value.usage;
+      if (
+        !isRecord(usage) ||
+        ![
+          "input_tokens",
+          "output_tokens",
+          "cached_input_tokens",
+          "duration_ms",
+          "cost_minor_units",
+          "currency",
+        ].every((key) => Object.hasOwn(usage, key)) ||
+        ![
+          usage.input_tokens,
+          usage.output_tokens,
+          usage.cached_input_tokens,
+          usage.duration_ms,
+        ].every((number) => Number.isSafeInteger(number) && number >= 0) ||
+        usage.cached_input_tokens > usage.input_tokens ||
+        (usage.cost_minor_units === null) !== (usage.currency === null) ||
+        (usage.cost_minor_units !== null &&
+          (!Number.isSafeInteger(usage.cost_minor_units) || usage.cost_minor_units < 0)) ||
+        (usage.currency !== null && !/^[A-Z]{3}$/u.test(usage.currency))
+      ) {
+        return false;
+      }
+      if (
+        !(
+          value.format === "world-forge.agent_execution_receipt" &&
+          value.format_version === 1 &&
+          value.replay_support === "not_claimed" &&
+          identityArray(value.prompt_identities) &&
+          identityArray(value.result_artifacts) &&
+          Array.isArray(value.tool_invocations) &&
+          value.tool_invocations.length <= 128 &&
+          ["succeeded", "failed", "cancelled"].includes(value.outcome) &&
+          reasonCodes(value.failure_codes, value.outcome !== "succeeded") &&
+          !(value.outcome === "succeeded" && value.failure_codes.length)
+        )
+      ) {
+        return false;
+      }
+      const invocationIds = new Set();
+      return value.tool_invocations.every((item, index) => {
+        if (!isRecord(item) || invocationIds.has(item.invocation_id)) {
+          return false;
+        }
+        invocationIds.add(item.invocation_id);
+        return (
+          item.sequence === index &&
+          typeof item.tool_id === "string" &&
+          item.tool_id.length <= 1024 &&
+          /^[a-z][a-z0-9_]{1,63}(?:\.[a-z][a-z0-9_]{1,63})+$/u.test(item.tool_id) &&
+          ["succeeded", "failed", "cancelled"].includes(item.outcome) &&
+          identityArray(item.result_artifacts) &&
+          reasonCodes(item.failure_codes, item.outcome !== "succeeded") &&
+          !(item.outcome === "succeeded" && item.failure_codes.length)
+        );
+      });
+    }
     if (kind === "grant") {
       return (
         value.format === "world-forge.agent_capability_grant" &&

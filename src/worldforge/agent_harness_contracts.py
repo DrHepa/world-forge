@@ -88,6 +88,8 @@ class AgentHarnessContractError(ValueError):
 class AgentHarnessDocuments:
     activation: dict[str, Any]
     grant: dict[str, Any]
+    events: tuple[dict[str, Any], ...] = ()
+    receipt: dict[str, Any] | None = None
 
 
 def _error(detail: str) -> None:
@@ -399,3 +401,323 @@ def validate_agent_harness_documents(activation: object, grant: object) -> Agent
         if active[name] != capability_grant[name]:
             _error(f"activation and grant {name} binding must match")
     return AgentHarnessDocuments(activation=active, grant=capability_grant)
+
+
+# Additive Slice 1B.2 event/receipt vocabulary.
+AGENT_EVENT_FORMAT = "world-forge.agent_event"
+AGENT_EXECUTION_RECEIPT_FORMAT = "world-forge.agent_execution_receipt"
+_EVENT_TYPES = frozenset(
+    {
+        "worker.activated",
+        "grant.issued",
+        "execution.started",
+        "execution.cancel_requested",
+        "execution.receipt_recorded",
+        "memory.projected",
+    }
+)
+_EVENT_FIELDS = frozenset(
+    {
+        "format",
+        "format_version",
+        "event_id",
+        "log_id",
+        "execution_id",
+        "sequence",
+        "previous_event_hash",
+        "event_type",
+        "subject",
+        "content_hash",
+    }
+)
+_RECEIPT_FIELDS = frozenset(
+    {
+        "format",
+        "format_version",
+        "receipt_id",
+        "execution_id",
+        "activation",
+        "grant",
+        "runtime_binding",
+        "prompt_identities",
+        "tool_invocations",
+        "result_artifacts",
+        "usage",
+        "outcome",
+        "failure_codes",
+        "replay_support",
+        "content_hash",
+    }
+)
+_SUBJECT_FIELDS = frozenset({"format", "format_version", "id", "content_hash"})
+_USAGE_FIELDS = frozenset(
+    {
+        "input_tokens",
+        "output_tokens",
+        "cached_input_tokens",
+        "duration_ms",
+        "cost_minor_units",
+        "currency",
+    }
+)
+_INVOCATION_FIELDS = frozenset(
+    {
+        "invocation_id",
+        "sequence",
+        "tool_id",
+        "request_hash",
+        "outcome",
+        "result_artifacts",
+        "failure_codes",
+    }
+)
+_REASON_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
+
+
+def _nonnegative(value: object, context: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= MAX_SAFE_INTEGER:
+        _error(f"{context} must be a nonnegative JavaScript-safe integer")
+    return value
+
+
+def _subject(value: object, context: str) -> dict[str, Any]:
+    result = _object(value, context)
+    _exact(result, _SUBJECT_FIELDS, context)
+    if (
+        not isinstance(result.get("format"), str)
+        or isinstance(result.get("format_version"), bool)
+        or result.get("format_version") != 1
+    ):
+        _error(f"{context} has unsupported format or format_version")
+    _id(result.get("id"), f"{context}.id")
+    _hash(result.get("content_hash"), f"{context}.content_hash")
+    return result
+
+
+def _reason_codes(value: object, context: str, *, required: bool) -> list[str]:
+    if not isinstance(value, list) or len(value) > 64 or (required and not value):
+        _error(f"{context} must be a bounded reason token array")
+    if any(not isinstance(item, str) or _REASON_RE.fullmatch(item) is None for item in value):
+        _error(f"{context} must contain reason tokens")
+    if value != sorted(set(value), key=lambda item: item.encode("utf-8")):
+        _error(f"{context} must be sorted unique")
+    return value
+
+
+def _identity_array(value: object, context: str, *, maximum: int = 64) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or len(value) > maximum:
+        _error(f"{context} must be a bounded identity array")
+    result = [_identity(item, f"{context}/{index}") for index, item in enumerate(value)]
+    if [item["id"] for item in result] != sorted(
+        (item["id"] for item in result), key=lambda item: item.encode("utf-8")
+    ) or len({item["id"] for item in result}) != len(result):
+        _error(f"{context} must be sorted unique")
+    return result
+
+
+def _validate_event(value: dict[str, Any]) -> None:
+    _exact(value, _EVENT_FIELDS, "agent event")
+    _verify_common(value, AGENT_EVENT_FORMAT)
+    _id(value.get("event_id"), "event_id")
+    _id(value.get("log_id"), "log_id")
+    _id(value.get("execution_id"), "execution_id")
+    sequence = _nonnegative(value.get("sequence"), "sequence")
+    previous = value.get("previous_event_hash")
+    if (sequence == 0 and previous is not None) or (sequence > 0 and not isinstance(previous, str)):
+        _error("previous_event_hash must be null only at sequence 0")
+    if previous is not None:
+        _hash(previous, "previous_event_hash")
+    event_type = value.get("event_type")
+    if event_type not in _EVENT_TYPES:
+        _error("event_type is unsupported")
+    subject = _subject(value.get("subject"), "subject")
+    expected = {
+        "worker.activated": AGENT_WORKER_ACTIVATION_FORMAT,
+        "grant.issued": AGENT_CAPABILITY_GRANT_FORMAT,
+        "execution.started": AGENT_WORKER_ACTIVATION_FORMAT,
+        "execution.cancel_requested": AGENT_WORKER_ACTIVATION_FORMAT,
+        "execution.receipt_recorded": AGENT_EXECUTION_RECEIPT_FORMAT,
+        "memory.projected": "world-forge.agent_memory_projection",
+    }
+    if subject["format"] != expected[event_type]:
+        _error("event subject format is incompatible")
+
+
+def _validate_receipt(value: dict[str, Any]) -> None:
+    _exact(value, _RECEIPT_FIELDS, "agent execution receipt")
+    _verify_common(value, AGENT_EXECUTION_RECEIPT_FORMAT)
+    _id(value.get("receipt_id"), "receipt_id")
+    _id(value.get("execution_id"), "execution_id")
+    _identity(value.get("activation"), "activation")
+    _identity(value.get("grant"), "grant")
+    _binding(value.get("runtime_binding"), "runtime_binding")
+    _identity_array(value.get("prompt_identities"), "prompt_identities")
+    _identity_array(value.get("result_artifacts"), "result_artifacts")
+    outcome = value.get("outcome")
+    if outcome not in {"succeeded", "failed", "cancelled"}:
+        _error("outcome is unsupported")
+    _reason_codes(value.get("failure_codes"), "failure_codes", required=outcome != "succeeded")
+    if outcome == "succeeded" and value["failure_codes"]:
+        _error("succeeded receipt must not contain failure codes")
+    usage = _object(value.get("usage"), "usage")
+    _exact(usage, _USAGE_FIELDS, "usage")
+    for name in ("input_tokens", "output_tokens", "cached_input_tokens", "duration_ms"):
+        _nonnegative(usage.get(name), f"usage.{name}")
+    if usage["cached_input_tokens"] > usage["input_tokens"]:
+        _error("cached_input_tokens must not exceed input_tokens")
+    if (usage["cost_minor_units"] is None) != (usage["currency"] is None):
+        _error("cost_minor_units and currency must be jointly null or present")
+    if usage["cost_minor_units"] is not None:
+        _nonnegative(usage["cost_minor_units"], "usage.cost_minor_units")
+    if usage["currency"] is not None and (
+        not isinstance(usage["currency"], str)
+        or re.fullmatch(r"[A-Z]{3}", usage["currency"]) is None
+    ):
+        _error("currency must be ISO-4217 uppercase")
+    if value.get("replay_support") != "not_claimed":
+        _error("replay_support must be not_claimed")
+    invocations = value.get("tool_invocations")
+    if not isinstance(invocations, list) or len(invocations) > 128:
+        _error("tool_invocations must be bounded")
+    invocation_ids: set[str] = set()
+    for index, invocation in enumerate(invocations):
+        item = _object(invocation, f"tool_invocations/{index}")
+        _exact(item, _INVOCATION_FIELDS, f"tool_invocations/{index}")
+        invocation_id = _id(item.get("invocation_id"), "invocation_id")
+        if invocation_id in invocation_ids:
+            _error("tool invocation IDs must be unique")
+        invocation_ids.add(invocation_id)
+        if _nonnegative(item.get("sequence"), "invocation sequence") != index:
+            _error("tool_invocations must be contiguous by sequence")
+        _sorted_unique([item.get("tool_id")], "tool invocation tool IDs")
+        _hash(item.get("request_hash"), "request_hash")
+        _identity_array(item.get("result_artifacts"), "invocation result artifacts")
+        if item.get("outcome") not in {"succeeded", "failed", "cancelled"}:
+            _error("invocation outcome is unsupported")
+        _reason_codes(
+            item.get("failure_codes"),
+            "invocation failure codes",
+            required=item["outcome"] != "succeeded",
+        )
+        if item["outcome"] == "succeeded" and item["failure_codes"]:
+            _error("successful invocation must not contain failure codes")
+
+
+# Override public dispatch and aggregate additively.
+_old_validate_agent_harness_document = validate_agent_harness_document
+
+
+def validate_agent_harness_document(
+    value: object, *, expected_format: str | None = None
+) -> dict[str, Any]:
+    normalized = _normalize_json_numbers(value, context="Agent Harness document")
+    document = _object(normalized, "Agent Harness document")
+    if document.get("format") in {AGENT_EVENT_FORMAT, AGENT_EXECUTION_RECEIPT_FORMAT}:
+        _structure(document, context="Agent Harness document")
+        encoded = json.dumps(
+            document, ensure_ascii=False, separators=(",", ":"), sort_keys=True, allow_nan=False
+        ).encode("utf-8")
+        if len(encoded) > MAX_AGENT_HARNESS_DOCUMENT_BYTES:
+            _error(f"Agent Harness document exceeds {MAX_AGENT_HARNESS_DOCUMENT_BYTES}-byte limit")
+        if expected_format is not None and document.get("format") != expected_format:
+            _error(f"Agent Harness document format must be {expected_format}")
+        (_validate_event if document["format"] == AGENT_EVENT_FORMAT else _validate_receipt)(
+            document
+        )
+        return copy.deepcopy(document)
+    return _old_validate_agent_harness_document(document, expected_format=expected_format)
+
+
+_old_validate_agent_harness_documents = validate_agent_harness_documents
+
+
+def validate_agent_harness_documents(
+    activation: object, grant: object, events: object = (), receipt: object | None = None
+) -> AgentHarnessDocuments:
+    aggregate = _old_validate_agent_harness_documents(activation, grant)
+    event_values = tuple(
+        validate_agent_harness_document(item, expected_format=AGENT_EVENT_FORMAT) for item in events
+    )
+    if event_values:
+        if event_values[0]["sequence"] != 0:
+            _error("event log must start at sequence 0")
+        log_id, execution_id = event_values[0]["log_id"], event_values[0]["execution_id"]
+        ids: set[str] = set()
+        previous: str | None = None
+        activation_ref = {
+            "format": AGENT_WORKER_ACTIVATION_FORMAT,
+            "format_version": AGENT_HARNESS_VERSION,
+            "id": aggregate.activation["activation_id"],
+            "content_hash": aggregate.activation["content_hash"],
+        }
+        grant_ref = {
+            "format": AGENT_CAPABILITY_GRANT_FORMAT,
+            "format_version": AGENT_HARNESS_VERSION,
+            "id": aggregate.grant["grant_id"],
+            "content_hash": aggregate.grant["content_hash"],
+        }
+        for index, event in enumerate(event_values):
+            if (
+                event["event_id"] in ids
+                or event["log_id"] != log_id
+                or event["execution_id"] != execution_id
+                or event["execution_id"] != aggregate.activation["execution_id"]
+                or event["sequence"] != index
+                or event["previous_event_hash"] != previous
+            ):
+                _error("event chain lineage is invalid")
+            expected_subject = (
+                activation_ref
+                if event["event_type"]
+                in {"worker.activated", "execution.started", "execution.cancel_requested"}
+                else grant_ref
+                if event["event_type"] == "grant.issued"
+                else None
+            )
+            if expected_subject is not None and event["subject"] != expected_subject:
+                _error("event subject lineage does not match its supplied binding")
+            ids.add(event["event_id"])
+            previous = event["content_hash"]
+    receipt_value = (
+        None
+        if receipt is None
+        else validate_agent_harness_document(
+            receipt, expected_format=AGENT_EXECUTION_RECEIPT_FORMAT
+        )
+    )
+    if (
+        any(event["event_type"] == "execution.receipt_recorded" for event in event_values)
+        and receipt_value is None
+    ):
+        _error("receipt-recorded event requires a supplied receipt")
+    if receipt_value is not None:
+        if (
+            receipt_value["execution_id"] != aggregate.activation["execution_id"]
+            or receipt_value["activation"]
+            != {
+                "id": aggregate.activation["activation_id"],
+                "content_hash": aggregate.activation["content_hash"],
+            }
+            or receipt_value["grant"]
+            != {"id": aggregate.grant["grant_id"], "content_hash": aggregate.grant["content_hash"]}
+            or receipt_value["runtime_binding"] != aggregate.activation["runtime"]
+            or receipt_value["prompt_identities"] != [aggregate.activation["prompt"]]
+        ):
+            _error("receipt lineage does not match activation and grant")
+        for event in event_values:
+            if event["event_type"] == "execution.receipt_recorded" and event["subject"] != {
+                "format": AGENT_EXECUTION_RECEIPT_FORMAT,
+                "format_version": 1,
+                "id": receipt_value["receipt_id"],
+                "content_hash": receipt_value["content_hash"],
+            }:
+                _error("receipt event subject does not match supplied receipt")
+        for item in receipt_value["tool_invocations"]:
+            if item["tool_id"] not in aggregate.grant["effective_tool_ids"]:
+                _error("receipt invokes an ungranted tool")
+    return AgentHarnessDocuments(
+        activation=aggregate.activation,
+        grant=aggregate.grant,
+        events=event_values,
+        receipt=receipt_value,
+    )

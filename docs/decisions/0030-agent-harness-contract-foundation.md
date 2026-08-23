@@ -5,12 +5,14 @@
 
 ## Decision
 
-World Forge publishes two closed, hash-bound v1 documents: `AgentWorkerActivation`
-and `AgentCapabilityGrant`. They bind immutable role, work-order, runtime,
-prompt and input identities. Activations are always `fresh` context. A grant's
-effective capabilities and tools are the exact sorted unique intersection of
-policy, role and work-order sets; activation requests repeat the work-order
-sets exactly.
+World Forge publishes four closed, hash-bound v1 documents. Slice 1B.1 publishes
+`AgentWorkerActivation` and `AgentCapabilityGrant`; Slice 1B.2 publishes
+`AgentEvent` and `AgentExecutionReceipt`. They bind immutable role, work-order,
+runtime, prompt, input, event-subject, invocation, result, outcome, and usage
+identities as applicable. `MemoryProjection` remains pending. Activations are
+always `fresh` context. A grant's effective capabilities and tools are the exact
+sorted unique intersection of policy, role and work-order sets; activation
+requests repeat the work-order sets exactly.
 
 ## Boundary
 
@@ -22,6 +24,12 @@ free-form errors.
 
 The standard JSON Schema shape remains closed. The canonical Studio generator
 also applies its named `x-world-forge-agent-harness-coherent` AJV keyword for
-canonical hashing, ordered-set, requested/work-order, and grant-intersection
-semantics; structural JSON Schema alone does not prove those cross-field
-invariants.
+canonical hashing, ordered-set, requested/work-order, grant-intersection,
+event-subject, receipt-outcome, and usage semantics; structural JSON Schema
+alone does not prove all cross-field or aggregate-lineage invariants.
+
+## Slice 1B.2 addition
+
+`AgentEvent` and `AgentExecutionReceipt` add hash-bound event-log lineage and
+identity-only audit receipts. They do not prove that an execution occurred;
+`MemoryProjection` remains pending.

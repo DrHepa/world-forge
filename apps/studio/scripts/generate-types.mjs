@@ -476,6 +476,8 @@ const contractDefinitions = {
     AgentCapabilityGrant: {
         $ref: "agent-capability-grant.schema.json",
     },
+    AgentEvent: { $ref: "agent-event.schema.json" },
+    AgentExecutionReceipt: { $ref: "agent-execution-receipt.schema.json" },
 };
 const contractsSchema = {
     $id: "https://world-forge.local/schemas/world-forge-contracts.generated.json",
@@ -4341,6 +4343,8 @@ async function verifyContractSchemas() {
         "headless-evidence-set",
         "agent-worker-activation",
         "agent-capability-grant",
+        "agent-event",
+        "agent-execution-receipt",
     ];
     const ajv = new Ajv2020({
         allErrors: true,
@@ -4465,7 +4469,11 @@ async function verifyContractSchemas() {
                 data,
                 data.format === "world-forge.agent_worker_activation"
                     ? "activation"
-                    : "grant",
+                    : data.format === "world-forge.agent_event"
+                      ? "event"
+                      : data.format === "world-forge.agent_execution_receipt"
+                        ? "receipt"
+                        : "grant",
             ),
     });
     ajv.addKeyword({
@@ -4614,7 +4622,7 @@ async function verifyContractSchemas() {
             throw new Error(`${name} does not bind its canonical content hash`);
         }
         if (
-            ["agent-worker-activation", "agent-capability-grant"].includes(name) &&
+            ["agent-worker-activation", "agent-capability-grant", "agent-event", "agent-execution-receipt"].includes(name) &&
             contractSchema["x-world-forge-agent-harness-coherent"] !== true
         ) {
             throw new Error(`${name} does not enforce Agent Harness coherence`);
@@ -4832,7 +4840,8 @@ async function verifyContractSchemas() {
         ajv.addSchema(contractSchema);
         const formatProperties =
             contractSchema.properties ??
-            contractSchema.$defs?.common?.properties;
+            contractSchema.$defs?.common?.properties ??
+            contractSchema.oneOf?.[0]?.properties;
         const formatName = formatProperties?.format?.const;
         const formatVersion =
             formatProperties?.format_version?.const ??
@@ -4877,10 +4886,22 @@ async function verifyContractSchemas() {
     const harnessGrant = documents.get(
         "agent-harness-minimal/capability-grant.json",
     );
+    const harnessEvent0 = documents.get(
+        "agent-harness-minimal/event-00.json",
+    );
+    const harnessReceipt = documents.get(
+        "agent-harness-minimal/execution-receipt.json",
+    );
     const rejectHarnessMutation = (document, message) => {
         const schemaId = schemaByFormat.get(document.format);
         if (schemaId === undefined || ajv.validate(schemaId, document)) {
             throw new Error(message);
+        }
+    };
+    const acceptHarnessMutation = (document, message) => {
+        const schemaId = schemaByFormat.get(document.format);
+        if (schemaId === undefined || !ajv.validate(schemaId, document)) {
+            throw new Error(`${message}: ${ajv.errorsText(ajv.errors)}`);
         }
     };
     const badHarnessHash = structuredClone(harnessActivation);
@@ -4915,6 +4936,177 @@ async function verifyContractSchemas() {
     rejectHarnessMutation(
         oversizedHarnessDocument,
         "Agent Harness accepted an oversized canonical document",
+    );
+
+    const harnessSubjectFormats = {
+        "worker.activated": "world-forge.agent_worker_activation",
+        "grant.issued": "world-forge.agent_capability_grant",
+        "execution.started": "world-forge.agent_worker_activation",
+        "execution.cancel_requested": "world-forge.agent_worker_activation",
+        "execution.receipt_recorded": "world-forge.agent_execution_receipt",
+        "memory.projected": "world-forge.agent_memory_projection",
+    };
+    for (const [eventType, subjectFormat] of Object.entries(
+        harnessSubjectFormats,
+    )) {
+        const event = structuredClone(harnessEvent0);
+        event.event_type = eventType;
+        event.subject.format = subjectFormat;
+        if (eventType === "grant.issued") {
+            event.subject.id = harnessGrant.grant_id;
+            event.subject.content_hash = harnessGrant.content_hash;
+        } else if (eventType === "execution.receipt_recorded") {
+            event.subject.id = harnessReceipt.receipt_id;
+            event.subject.content_hash = harnessReceipt.content_hash;
+        } else if (eventType === "memory.projected") {
+            event.subject.id = "projection_01";
+            event.subject.content_hash = "c".repeat(64);
+        }
+        reseal(event);
+        acceptHarnessMutation(
+            event,
+            `Agent Harness AJV rejected ${eventType} exact subject mapping`,
+        );
+        event.subject.format =
+            subjectFormat === "world-forge.agent_worker_activation"
+                ? "world-forge.agent_capability_grant"
+                : "world-forge.agent_worker_activation";
+        reseal(event);
+        rejectHarnessMutation(
+            event,
+            `Agent Harness AJV accepted ${eventType} with wrong subject format`,
+        );
+    }
+
+    const harnessInvocation = {
+        failure_codes: [],
+        invocation_id: "invocation_000",
+        outcome: "succeeded",
+        request_hash: "6".repeat(64),
+        result_artifacts: [],
+        sequence: 0,
+        tool_id: "source.read",
+    };
+    const validZeroCostReceipt = structuredClone(harnessReceipt);
+    validZeroCostReceipt.tool_invocations = [harnessInvocation];
+    validZeroCostReceipt.usage.input_tokens = 3;
+    validZeroCostReceipt.usage.cached_input_tokens = 1;
+    validZeroCostReceipt.usage.cost_minor_units = 0;
+    validZeroCostReceipt.usage.currency = "USD";
+    reseal(validZeroCostReceipt);
+    acceptHarnessMutation(
+        validZeroCostReceipt,
+        "Agent Harness AJV rejected a valid zero-cost receipt",
+    );
+    for (const [name, mutate] of [
+        ["receipt success failure code", (value) => value.failure_codes.push("failed")],
+        ["receipt failure without code", (value) => { value.outcome = "failed"; }],
+        [
+            "invocation success failure code",
+            (value) => value.tool_invocations[0].failure_codes.push("failed"),
+        ],
+        [
+            "invocation failure without code",
+            (value) => { value.tool_invocations[0].outcome = "failed"; },
+        ],
+        [
+            "invocation sequence gap",
+            (value) => { value.tool_invocations[0].sequence = 1; },
+        ],
+        [
+            "duplicate invocation ID",
+            (value) => {
+                value.tool_invocations.push({
+                    ...structuredClone(value.tool_invocations[0]),
+                    sequence: 1,
+                });
+            },
+        ],
+        [
+            "more than 128 invocations",
+            (value) => {
+                value.tool_invocations = Array.from({ length: 129 }, (_, index) => ({
+                    ...structuredClone(harnessInvocation),
+                    invocation_id: `invocation_${String(index).padStart(3, "0")}`,
+                    sequence: index,
+                }));
+            },
+        ],
+        [
+            "unsorted artifact refs",
+            (value) => {
+                value.result_artifacts = [
+                    { id: "artifact_02", content_hash: "a".repeat(64) },
+                    { id: "artifact_01", content_hash: "b".repeat(64) },
+                ];
+            },
+        ],
+        [
+            "duplicate artifact refs",
+            (value) => {
+                value.result_artifacts = [
+                    { id: "artifact_01", content_hash: "a".repeat(64) },
+                    { id: "artifact_01", content_hash: "b".repeat(64) },
+                ];
+            },
+        ],
+        [
+            "cached tokens above input",
+            (value) => { value.usage.cached_input_tokens = 4; },
+        ],
+        [
+            "cost without currency",
+            (value) => { value.usage.currency = null; },
+        ],
+        [
+            "currency without cost",
+            (value) => { value.usage.cost_minor_units = null; },
+        ],
+        [
+            "wrong replay claim",
+            (value) => { value.replay_support = "claimed"; },
+        ],
+        [
+            "boolean numeric field",
+            (value) => { value.usage.input_tokens = true; },
+        ],
+        [
+            "nested raw response",
+            (value) => { value.tool_invocations[0].raw_response = "forbidden"; },
+        ],
+    ]) {
+        const receipt = structuredClone(validZeroCostReceipt);
+        mutate(receipt);
+        reseal(receipt);
+        rejectHarnessMutation(
+            receipt,
+            `Agent Harness AJV accepted ${name}`,
+        );
+    }
+    for (const [name, number] of [
+        ["non-integral numeric field", 1.5],
+        ["unsafe numeric field", 9007199254740992],
+    ]) {
+        const receipt = structuredClone(validZeroCostReceipt);
+        receipt.usage.input_tokens = number;
+        rejectHarnessMutation(
+            receipt,
+            `Agent Harness AJV accepted ${name}`,
+        );
+    }
+    const oversizedHarnessReceipt = structuredClone(validZeroCostReceipt);
+    oversizedHarnessReceipt.raw_response = "x".repeat(1024 * 1024);
+    reseal(oversizedHarnessReceipt);
+    if (
+        canonicalAgentHarnessDocumentBytes(oversizedHarnessReceipt) <=
+            1024 * 1024 ||
+        hasCoherentAgentHarnessContract(oversizedHarnessReceipt, "receipt")
+    ) {
+        throw new Error("Agent Harness receipt byte limit was not enforced");
+    }
+    rejectHarnessMutation(
+        oversizedHarnessReceipt,
+        "Agent Harness AJV accepted an oversized receipt",
     );
 
     const invalidWorld = structuredClone(

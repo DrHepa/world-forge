@@ -76,7 +76,9 @@ export type WorldForgeCreationContract =
   | WorldForgeBoundedHeadlessExecutionReceiptV1
   | WorldForgeImmutableExternalHeadlessEvidenceSetV1
   | ImmutableAgentWorkerActivationV1
-  | ImmutableAgentCapabilityGrantV1;
+  | ImmutableAgentCapabilityGrantV1
+  | ImmutableAgentEventV1
+  | ImmutableAgentExecutionReceiptV1;
 export type WorldForgeWorldProjectMigrationJournalRecordV1 = {
   format: "world-forge.world_project_migration_journal";
   format_version: 1;
@@ -17355,6 +17357,93 @@ export type Capabilities1 = (
  * via the `definition` "tools".
  */
 export type Tools1 = string[];
+export type ImmutableAgentEventV1 =
+  | {
+      content_hash: string;
+      event_id: string;
+      event_type: "worker.activated";
+      execution_id: string;
+      format: "world-forge.agent_event";
+      format_version: 1;
+      log_id: string;
+      previous_event_hash: null | string;
+      sequence: number;
+      subject: SubjectWorkerActivated;
+    }
+  | {
+      content_hash: string;
+      event_id: string;
+      event_type: "grant.issued";
+      execution_id: string;
+      format: "world-forge.agent_event";
+      format_version: 1;
+      log_id: string;
+      previous_event_hash: null | string;
+      sequence: number;
+      subject: SubjectGrantIssued;
+    }
+  | {
+      content_hash: string;
+      event_id: string;
+      event_type: "execution.started";
+      execution_id: string;
+      format: "world-forge.agent_event";
+      format_version: 1;
+      log_id: string;
+      previous_event_hash: null | string;
+      sequence: number;
+      subject: SubjectExecutionStarted;
+    }
+  | {
+      content_hash: string;
+      event_id: string;
+      event_type: "execution.cancel_requested";
+      execution_id: string;
+      format: "world-forge.agent_event";
+      format_version: 1;
+      log_id: string;
+      previous_event_hash: null | string;
+      sequence: number;
+      subject: SubjectExecutionCancelRequested;
+    }
+  | {
+      content_hash: string;
+      event_id: string;
+      event_type: "execution.receipt_recorded";
+      execution_id: string;
+      format: "world-forge.agent_event";
+      format_version: 1;
+      log_id: string;
+      previous_event_hash: null | string;
+      sequence: number;
+      subject: SubjectExecutionReceiptRecorded;
+    }
+  | {
+      content_hash: string;
+      event_id: string;
+      event_type: "memory.projected";
+      execution_id: string;
+      format: "world-forge.agent_event";
+      format_version: 1;
+      log_id: string;
+      previous_event_hash: null | string;
+      sequence: number;
+      subject: SubjectMemoryProjected;
+    };
+/**
+ * @maxItems 64
+ *
+ * This interface was referenced by `ImmutableAgentExecutionReceiptV1`'s JSON-Schema
+ * via the `definition` "reason_codes".
+ */
+export type ReasonCodes = string[];
+/**
+ * @maxItems 64
+ *
+ * This interface was referenced by `ImmutableAgentExecutionReceiptV1`'s JSON-Schema
+ * via the `definition` "artifact_refs".
+ */
+export type ArtifactRefs = Identity11[];
 
 export interface WorldForgeLegacyIdentityAllowlistV1 {
   format: "world-forge.legacy_identity_allowlist";
@@ -48891,6 +48980,150 @@ export interface WorkOrder1 {
    */
   revision: number;
   tool_ids: Tools1;
+}
+export interface SubjectWorkerActivated {
+  content_hash: string;
+  format: "world-forge.agent_worker_activation";
+  format_version: 1;
+  id: string;
+}
+export interface SubjectGrantIssued {
+  content_hash: string;
+  format: "world-forge.agent_capability_grant";
+  format_version: 1;
+  id: string;
+}
+export interface SubjectExecutionStarted {
+  content_hash: string;
+  format: "world-forge.agent_worker_activation";
+  format_version: 1;
+  id: string;
+}
+export interface SubjectExecutionCancelRequested {
+  content_hash: string;
+  format: "world-forge.agent_worker_activation";
+  format_version: 1;
+  id: string;
+}
+export interface SubjectExecutionReceiptRecorded {
+  content_hash: string;
+  format: "world-forge.agent_execution_receipt";
+  format_version: 1;
+  id: string;
+}
+export interface SubjectMemoryProjected {
+  content_hash: string;
+  format: "world-forge.agent_memory_projection";
+  format_version: 1;
+  id: string;
+}
+export interface ImmutableAgentExecutionReceiptV1 {
+  activation: Identity11;
+  /**
+   * This interface was referenced by `ImmutableAgentExecutionReceiptV1`'s JSON-Schema
+   * via the `definition` "sha".
+   */
+  content_hash: string;
+  /**
+   * This interface was referenced by `ImmutableAgentExecutionReceiptV1`'s JSON-Schema
+   * via the `definition` "id".
+   */
+  execution_id: string;
+  failure_codes: ReasonCodes;
+  format: "world-forge.agent_execution_receipt";
+  format_version: 1;
+  grant: Identity11;
+  outcome: "succeeded" | "failed" | "cancelled";
+  prompt_identities: ArtifactRefs;
+  /**
+   * This interface was referenced by `ImmutableAgentExecutionReceiptV1`'s JSON-Schema
+   * via the `definition` "id".
+   */
+  receipt_id: string;
+  replay_support: "not_claimed";
+  result_artifacts: ArtifactRefs;
+  runtime_binding: Binding5;
+  /**
+   * @maxItems 128
+   */
+  tool_invocations: {
+    failure_codes: ReasonCodes;
+    /**
+     * This interface was referenced by `ImmutableAgentExecutionReceiptV1`'s JSON-Schema
+     * via the `definition` "id".
+     */
+    invocation_id: string;
+    outcome: "succeeded" | "failed" | "cancelled";
+    /**
+     * This interface was referenced by `ImmutableAgentExecutionReceiptV1`'s JSON-Schema
+     * via the `definition` "sha".
+     */
+    request_hash: string;
+    result_artifacts: ArtifactRefs;
+    /**
+     * This interface was referenced by `ImmutableAgentExecutionReceiptV1`'s JSON-Schema
+     * via the `definition` "integer".
+     */
+    sequence: number;
+    tool_id: string;
+  }[];
+  usage: {
+    /**
+     * This interface was referenced by `ImmutableAgentExecutionReceiptV1`'s JSON-Schema
+     * via the `definition` "integer".
+     */
+    cached_input_tokens: number;
+    cost_minor_units: number | null;
+    currency: string | null;
+    /**
+     * This interface was referenced by `ImmutableAgentExecutionReceiptV1`'s JSON-Schema
+     * via the `definition` "integer".
+     */
+    duration_ms: number;
+    /**
+     * This interface was referenced by `ImmutableAgentExecutionReceiptV1`'s JSON-Schema
+     * via the `definition` "integer".
+     */
+    input_tokens: number;
+    /**
+     * This interface was referenced by `ImmutableAgentExecutionReceiptV1`'s JSON-Schema
+     * via the `definition` "integer".
+     */
+    output_tokens: number;
+  };
+}
+/**
+ * This interface was referenced by `ImmutableAgentExecutionReceiptV1`'s JSON-Schema
+ * via the `definition` "identity".
+ */
+export interface Identity11 {
+  /**
+   * This interface was referenced by `ImmutableAgentExecutionReceiptV1`'s JSON-Schema
+   * via the `definition` "sha".
+   */
+  content_hash: string;
+  /**
+   * This interface was referenced by `ImmutableAgentExecutionReceiptV1`'s JSON-Schema
+   * via the `definition` "id".
+   */
+  id: string;
+}
+/**
+ * This interface was referenced by `ImmutableAgentExecutionReceiptV1`'s JSON-Schema
+ * via the `definition` "binding".
+ */
+export interface Binding5 {
+  /**
+   * This interface was referenced by `ImmutableAgentExecutionReceiptV1`'s JSON-Schema
+   * via the `definition` "sha".
+   */
+  content_hash: string;
+  /**
+   * This interface was referenced by `ImmutableAgentExecutionReceiptV1`'s JSON-Schema
+   * via the `definition` "id".
+   */
+  id: string;
+  revision: number;
 }
 
 

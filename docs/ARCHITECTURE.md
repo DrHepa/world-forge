@@ -418,9 +418,11 @@ boundaries.
 The future World Forge-owned, provider-neutral Agent Harness is planned to add
 an append-only event log and replay, isolated killable worker lifecycle,
 execution receipts, and approved memory projections. Slice 1B.1 now publishes
-only closed `AgentWorkerActivation` and `AgentCapabilityGrant` lineage
-contracts; their validation does not prove execution, isolation, authority,
-replay, or evidence quality. Studio alone retains
+only the closed `AgentWorkerActivation` and `AgentCapabilityGrant` lineage
+contracts. Slice 1B.2 adds the closed `AgentEvent` and
+`AgentExecutionReceipt` contracts while `MemoryProjection` remains pending.
+Their validation does not prove execution, isolation, authority, replay, or
+evidence quality. Studio alone retains
 project, canon, asset, and release authority. DeepSeek Harness is reference
 material, never a dependency or fork. `codebase-memory-mcp` is an optional,
 read-only development benchmark only: it is not a source authority, product
@@ -578,3 +580,10 @@ worker activation and capability-grant lineage documents. They bind fresh-contex
 activation to role, work order, runtime, prompt and input identities. Grant
 effective sets are the policy/role/work-order intersection. Validators do not
 claim execution, isolation, authority, replay, or evidence quality.
+
+Slice 1B.2 adds immutable event-log lineage and identity-only execution receipts.
+Event subjects bind exact activation, grant, or supplied receipt identities;
+the reserved memory-projection subject format does not publish a
+`MemoryProjection` contract. Receipts bind exact activation, grant, runtime,
+prompt, bounded invocation, artifact, outcome, and usage identities. These
+documents still do not prove that execution or tool invocation occurred.

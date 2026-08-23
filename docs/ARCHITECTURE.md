@@ -594,3 +594,11 @@ identity, and one or more hash-only decision, constraint, discovery, or
 preference entries. It stores no memory text, prompt, transcript, rationale,
 provider payload, executable content, or operational path. The artifact neither
 mutates Engram nor infers that projected content is true.
+
+Slice 2A adds only closed, identity/evidence-only plan, observation, and report
+documents for an optional codebase-memory comparison. Their validators resolve
+the exact plan and complete task/repetition/arm observation inventory, but do not
+run the benchmark, query or refresh an index, compute report metrics, evaluate
+gates, or authorize adoption. The fixtures are synthetic and `not_evaluable`;
+no actual benchmark or adoption decision has been run. See
+[`CODEBASE_MEMORY_BENCHMARK.md`](CODEBASE_MEMORY_BENCHMARK.md).

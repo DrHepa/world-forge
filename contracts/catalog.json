@@ -542,6 +542,89 @@
     {
       "cli_commands": [],
       "docs": [
+        "README.md",
+        "docs/ARCHITECTURE.md",
+        "docs/CODEBASE_MEMORY_BENCHMARK.md",
+        "docs/decisions/0026-world-forge-agent-harness.md"
+      ],
+      "fixtures": [
+        "examples/multigenre-contracts/codebase-memory-benchmark-minimal/observation-navigation-01-a-01.json",
+        "examples/multigenre-contracts/codebase-memory-benchmark-minimal/observation-navigation-01-b-01.json",
+        "examples/multigenre-contracts/codebase-memory-benchmark-minimal/observation-navigation-01-c-01.json",
+        "examples/multigenre-contracts/codebase-memory-benchmark-minimal/observation-other-01-a-01.json",
+        "examples/multigenre-contracts/codebase-memory-benchmark-minimal/observation-other-01-b-01.json",
+        "examples/multigenre-contracts/codebase-memory-benchmark-minimal/observation-other-01-c-01.json"
+      ],
+      "format": "world-forge.codebase_memory_benchmark_observation",
+      "id": "codebase-memory-benchmark-observation",
+      "kind": "json-schema",
+      "m5_phases": [],
+      "python_symbols": [
+        "worldforge.codebase_memory_benchmark:validate_codebase_memory_benchmark_document",
+        "worldforge.codebase_memory_benchmark:validate_codebase_memory_benchmark_documents"
+      ],
+      "schema": "schemas/codebase-memory-benchmark-observation.schema.json",
+      "tests": [
+        "tests/test_codebase_memory_benchmark.py"
+      ],
+      "title": "World Forge Codebase Memory Benchmark Observation v1",
+      "version": 1
+    },
+    {
+      "cli_commands": [],
+      "docs": [
+        "README.md",
+        "docs/ARCHITECTURE.md",
+        "docs/CODEBASE_MEMORY_BENCHMARK.md",
+        "docs/decisions/0026-world-forge-agent-harness.md"
+      ],
+      "fixtures": [
+        "examples/multigenre-contracts/codebase-memory-benchmark-minimal/plan.json"
+      ],
+      "format": "world-forge.codebase_memory_benchmark_plan",
+      "id": "codebase-memory-benchmark-plan",
+      "kind": "json-schema",
+      "m5_phases": [],
+      "python_symbols": [
+        "worldforge.codebase_memory_benchmark:validate_codebase_memory_benchmark_document",
+        "worldforge.codebase_memory_benchmark:validate_codebase_memory_benchmark_documents"
+      ],
+      "schema": "schemas/codebase-memory-benchmark-plan.schema.json",
+      "tests": [
+        "tests/test_codebase_memory_benchmark.py"
+      ],
+      "title": "World Forge Codebase Memory Benchmark Plan v1",
+      "version": 1
+    },
+    {
+      "cli_commands": [],
+      "docs": [
+        "README.md",
+        "docs/ARCHITECTURE.md",
+        "docs/CODEBASE_MEMORY_BENCHMARK.md",
+        "docs/decisions/0026-world-forge-agent-harness.md"
+      ],
+      "fixtures": [
+        "examples/multigenre-contracts/codebase-memory-benchmark-minimal/report.json"
+      ],
+      "format": "world-forge.codebase_memory_benchmark_report",
+      "id": "codebase-memory-benchmark-report",
+      "kind": "json-schema",
+      "m5_phases": [],
+      "python_symbols": [
+        "worldforge.codebase_memory_benchmark:validate_codebase_memory_benchmark_document",
+        "worldforge.codebase_memory_benchmark:validate_codebase_memory_benchmark_documents"
+      ],
+      "schema": "schemas/codebase-memory-benchmark-report.schema.json",
+      "tests": [
+        "tests/test_codebase_memory_benchmark.py"
+      ],
+      "title": "World Forge Codebase Memory Benchmark Report v1",
+      "version": 1
+    },
+    {
+      "cli_commands": [],
+      "docs": [
         "contracts/README.md",
         "docs/ARCHITECTURE.md",
         "docs/ROADMAP.md",

@@ -79,7 +79,10 @@ export type WorldForgeCreationContract =
   | ImmutableAgentCapabilityGrantV1
   | ImmutableAgentEventV1
   | ImmutableAgentExecutionReceiptV1
-  | ImmutableAgentMemoryProjectionV1;
+  | ImmutableAgentMemoryProjectionV1
+  | WorldForgeCodebaseMemoryBenchmarkPlanV1
+  | WorldForgeCodebaseMemoryBenchmarkObservationV1
+  | WorldForgeCodebaseMemoryBenchmarkReportV1;
 export type WorldForgeWorldProjectMigrationJournalRecordV1 = {
   format: "world-forge.world_project_migration_journal";
   format_version: 1;
@@ -17445,6 +17448,20 @@ export type ReasonCodes = string[];
  * via the `definition` "artifact_refs".
  */
 export type ArtifactRefs = Identity11[];
+/**
+ * @maxItems 64
+ *
+ * This interface was referenced by `WorldForgeCodebaseMemoryBenchmarkObservationV1`'s JSON-Schema
+ * via the `definition` "reason_codes".
+ */
+export type ReasonCodes1 = string[];
+/**
+ * @maxItems 64
+ *
+ * This interface was referenced by `WorldForgeCodebaseMemoryBenchmarkReportV1`'s JSON-Schema
+ * via the `definition` "reason_codes".
+ */
+export type ReasonCodes2 = string[];
 
 export interface WorldForgeLegacyIdentityAllowlistV1 {
   format: "world-forge.legacy_identity_allowlist";
@@ -49257,7 +49274,320 @@ export interface EventRef {
    */
   id: string;
 }
+export interface WorldForgeCodebaseMemoryBenchmarkPlanV1 {
+  arms: ["A_direct_reads", "B_existing_memory", "C_memory_candidate_index"];
+  /**
+   * This interface was referenced by `WorldForgeCodebaseMemoryBenchmarkPlanV1`'s JSON-Schema
+   * via the `definition` "sha256".
+   */
+  authorized_egress_policy_hash: string;
+  /**
+   * This interface was referenced by `WorldForgeCodebaseMemoryBenchmarkPlanV1`'s JSON-Schema
+   * via the `definition` "id".
+   */
+  benchmark_id: string;
+  /**
+   * This interface was referenced by `WorldForgeCodebaseMemoryBenchmarkPlanV1`'s JSON-Schema
+   * via the `definition` "sha256".
+   */
+  content_hash: string;
+  format: "world-forge.codebase_memory_benchmark_plan";
+  format_version: 1;
+  gates: {
+    full_net_token_reduction_basis_points: 3000;
+    maximum_critical_omissions: 0;
+    maximum_incremental_p95_ms: 5000;
+    maximum_quality_loss_basis_points: 200;
+    require_tree_unchanged: true;
+    require_zero_unauthorized_egress: true;
+    structural_net_token_reduction_basis_points: 5000;
+  };
+  latency_percentile_method: "nearest_rank";
+  source_binding: {
+    /**
+     * This interface was referenced by `WorldForgeCodebaseMemoryBenchmarkPlanV1`'s JSON-Schema
+     * via the `definition` "sha256".
+     */
+    checkout_id_hash: string;
+    /**
+     * This interface was referenced by `WorldForgeCodebaseMemoryBenchmarkPlanV1`'s JSON-Schema
+     * via the `definition` "revision".
+     */
+    revision: string;
+    /**
+     * This interface was referenced by `WorldForgeCodebaseMemoryBenchmarkPlanV1`'s JSON-Schema
+     * via the `definition` "sha256".
+     */
+    tree_hash: string;
+  };
+  /**
+   * @minItems 1
+   * @maxItems 64
+   */
+  task_set: [
+    {
+      category: "structural_navigation" | "other";
+      repetitions: number;
+      /**
+       * This interface was referenced by `WorldForgeCodebaseMemoryBenchmarkPlanV1`'s JSON-Schema
+       * via the `definition` "sha256".
+       */
+      rubric_hash: string;
+      /**
+       * This interface was referenced by `WorldForgeCodebaseMemoryBenchmarkPlanV1`'s JSON-Schema
+       * via the `definition` "id".
+       */
+      task_id: string;
+      /**
+       * This interface was referenced by `WorldForgeCodebaseMemoryBenchmarkPlanV1`'s JSON-Schema
+       * via the `definition` "sha256".
+       */
+      task_spec_hash: string;
+    },
+    ...{
+      category: "structural_navigation" | "other";
+      repetitions: number;
+      /**
+       * This interface was referenced by `WorldForgeCodebaseMemoryBenchmarkPlanV1`'s JSON-Schema
+       * via the `definition` "sha256".
+       */
+      rubric_hash: string;
+      /**
+       * This interface was referenced by `WorldForgeCodebaseMemoryBenchmarkPlanV1`'s JSON-Schema
+       * via the `definition` "id".
+       */
+      task_id: string;
+      /**
+       * This interface was referenced by `WorldForgeCodebaseMemoryBenchmarkPlanV1`'s JSON-Schema
+       * via the `definition` "sha256".
+       */
+      task_spec_hash: string;
+    }[],
+  ];
+  /**
+   * This interface was referenced by `WorldForgeCodebaseMemoryBenchmarkPlanV1`'s JSON-Schema
+   * via the `definition` "id".
+   */
+  token_accounting_version: string;
+  /**
+   * This interface was referenced by `WorldForgeCodebaseMemoryBenchmarkPlanV1`'s JSON-Schema
+   * via the `definition` "sha256".
+   */
+  tree_guard_policy_hash: string;
+}
+export interface WorldForgeCodebaseMemoryBenchmarkObservationV1 {
+  arm: "A_direct_reads" | "B_existing_memory" | "C_memory_candidate_index";
+  candidate_index_content_hash: string | null;
+  candidate_index_identity_hash: string | null;
+  candidate_state: "available" | "absent" | "untrusted" | "incomplete" | null;
+  /**
+   * This interface was referenced by `WorldForgeCodebaseMemoryBenchmarkObservationV1`'s JSON-Schema
+   * via the `definition` "sha256".
+   */
+  content_hash: string;
+  format: "world-forge.codebase_memory_benchmark_observation";
+  format_version: 1;
+  measurements: {
+    /**
+     * This interface was referenced by `WorldForgeCodebaseMemoryBenchmarkObservationV1`'s JSON-Schema
+     * via the `definition` "nonnegative".
+     */
+    cached_input_tokens: number;
+    /**
+     * This interface was referenced by `WorldForgeCodebaseMemoryBenchmarkObservationV1`'s JSON-Schema
+     * via the `definition` "nonnegative".
+     */
+    critical_omission_count: number;
+    egress_guard: "pass" | "fail" | "unobserved";
+    final_direct_verification: "pass" | "fail" | "unobserved";
+    incremental_refresh_ms: number | null;
+    /**
+     * This interface was referenced by `WorldForgeCodebaseMemoryBenchmarkObservationV1`'s JSON-Schema
+     * via the `definition` "nonnegative".
+     */
+    input_tokens: number;
+    /**
+     * This interface was referenced by `WorldForgeCodebaseMemoryBenchmarkObservationV1`'s JSON-Schema
+     * via the `definition` "nonnegative".
+     */
+    output_tokens: number;
+    quality_basis_points: number;
+    /**
+     * This interface was referenced by `WorldForgeCodebaseMemoryBenchmarkObservationV1`'s JSON-Schema
+     * via the `definition` "nonnegative".
+     */
+    task_wall_ms: number;
+    tree_guard: "pass" | "fail" | "unobserved";
+  };
+  /**
+   * This interface was referenced by `WorldForgeCodebaseMemoryBenchmarkObservationV1`'s JSON-Schema
+   * via the `definition` "id".
+   */
+  observation_id: string;
+  plan: PlanRef;
+  reason_codes: ReasonCodes1;
+  /**
+   * This interface was referenced by `WorldForgeCodebaseMemoryBenchmarkObservationV1`'s JSON-Schema
+   * via the `definition` "sha256".
+   */
+  recorder_identity_hash: string;
+  repetition_index: number;
+  /**
+   * This interface was referenced by `WorldForgeCodebaseMemoryBenchmarkObservationV1`'s JSON-Schema
+   * via the `definition` "sha256".
+   */
+  rubric_evidence_hash: string;
+  source_mode: "direct_reads" | "existing_memory" | "memory_candidate_index";
+  state: "completed" | "failed" | "incomplete" | "invalid";
+  /**
+   * This interface was referenced by `WorldForgeCodebaseMemoryBenchmarkObservationV1`'s JSON-Schema
+   * via the `definition` "id".
+   */
+  task_id: string;
+  /**
+   * This interface was referenced by `WorldForgeCodebaseMemoryBenchmarkObservationV1`'s JSON-Schema
+   * via the `definition` "sha256".
+   */
+  toolchain_identity_hash: string;
+}
+/**
+ * This interface was referenced by `WorldForgeCodebaseMemoryBenchmarkObservationV1`'s JSON-Schema
+ * via the `definition` "plan_ref".
+ */
+export interface PlanRef {
+  /**
+   * This interface was referenced by `WorldForgeCodebaseMemoryBenchmarkObservationV1`'s JSON-Schema
+   * via the `definition` "sha256".
+   */
+  content_hash: string;
+  format: "world-forge.codebase_memory_benchmark_plan";
+  format_version: 1;
+  /**
+   * This interface was referenced by `WorldForgeCodebaseMemoryBenchmarkObservationV1`'s JSON-Schema
+   * via the `definition` "id".
+   */
+  id: string;
+}
+interface WorldForgeCodebaseMemoryBenchmarkReportV1Generated {
+  /**
+   * @minItems 3
+   * @maxItems 3
+   */
+  arm_summaries: never[];
+  /**
+   * This interface was referenced by `WorldForgeCodebaseMemoryBenchmarkReportV1`'s JSON-Schema
+   * via the `definition` "sha256".
+   */
+  content_hash: string;
+  decision: "adopt" | "reject" | "not_evaluable";
+  format: "world-forge.codebase_memory_benchmark_report";
+  format_version: 1;
+  /**
+   * @minItems 7
+   * @maxItems 7
+   */
+  gates: never[];
+  /**
+   * @minItems 1
+   * @maxItems 12288
+   */
+  observation_refs: [
+    Reference & {
+      format?: "world-forge.codebase_memory_benchmark_observation";
+    },
+    ...(Reference & {
+      format?: "world-forge.codebase_memory_benchmark_observation";
+    })[],
+  ];
+  plan: Reference & {
+    format?: "world-forge.codebase_memory_benchmark_plan";
+  };
+  reason_codes: ReasonCodes2;
+  /**
+   * This interface was referenced by `WorldForgeCodebaseMemoryBenchmarkReportV1`'s JSON-Schema
+   * via the `definition` "id".
+   */
+  report_id: string;
+}
+/**
+ * This interface was referenced by `WorldForgeCodebaseMemoryBenchmarkReportV1`'s JSON-Schema
+ * via the `definition` "reference".
+ */
+export interface Reference {
+  /**
+   * This interface was referenced by `WorldForgeCodebaseMemoryBenchmarkReportV1`'s JSON-Schema
+   * via the `definition` "sha256".
+   */
+  content_hash: string;
+  format: string;
+  format_version: 1;
+  /**
+   * This interface was referenced by `WorldForgeCodebaseMemoryBenchmarkReportV1`'s JSON-Schema
+   * via the `definition` "id".
+   */
+  id: string;
+}
+/**
+ * This interface was referenced by `WorldForgeCodebaseMemoryBenchmarkReportV1`'s JSON-Schema
+ * via the `definition` "arm_summary".
+ */
+export interface ArmSummary {
+  arm: "A_direct_reads" | "B_existing_memory" | "C_memory_candidate_index";
+  /**
+   * This interface was referenced by `WorldForgeCodebaseMemoryBenchmarkReportV1`'s JSON-Schema
+   * via the `definition` "nonnegative".
+   */
+  critical_omission_count: number;
+  incremental_refresh_p95_ms: number | null;
+  quality_basis_points: number;
+  /**
+   * This interface was referenced by `WorldForgeCodebaseMemoryBenchmarkReportV1`'s JSON-Schema
+   * via the `definition` "nonnegative".
+   */
+  task_wall_p95_ms: number;
+  /**
+   * This interface was referenced by `WorldForgeCodebaseMemoryBenchmarkReportV1`'s JSON-Schema
+   * via the `definition` "nonnegative".
+   */
+  total_net_tokens: number;
+}
+/**
+ * This interface was referenced by `WorldForgeCodebaseMemoryBenchmarkReportV1`'s JSON-Schema
+ * via the `definition` "gate_record".
+ */
+export interface GateRecord {
+  gate_id:
+    | "full_net_token_reduction"
+    | "maximum_critical_omissions"
+    | "maximum_incremental_p95"
+    | "maximum_quality_loss"
+    | "structural_net_token_reduction"
+    | "tree_unchanged"
+    | "zero_unauthorized_egress";
+  passed: boolean;
+  reason_codes: ReasonCodes2;
+}
 
+
+export type WorldForgeCodebaseMemoryBenchmarkReportV1 = Omit<
+  WorldForgeCodebaseMemoryBenchmarkReportV1Generated,
+  "arm_summaries" | "gates"
+> & {
+  arm_summaries: [
+    Omit<ArmSummary, "arm"> & { arm: "A_direct_reads" },
+    Omit<ArmSummary, "arm"> & { arm: "B_existing_memory" },
+    Omit<ArmSummary, "arm"> & { arm: "C_memory_candidate_index" },
+  ];
+  gates: [
+    Omit<GateRecord, "gate_id"> & { gate_id: "full_net_token_reduction" },
+    Omit<GateRecord, "gate_id"> & { gate_id: "maximum_critical_omissions" },
+    Omit<GateRecord, "gate_id"> & { gate_id: "maximum_incremental_p95" },
+    Omit<GateRecord, "gate_id"> & { gate_id: "maximum_quality_loss" },
+    Omit<GateRecord, "gate_id"> & { gate_id: "structural_net_token_reduction" },
+    Omit<GateRecord, "gate_id"> & { gate_id: "tree_unchanged" },
+    Omit<GateRecord, "gate_id"> & { gate_id: "zero_unauthorized_egress" },
+  ];
+};
 
 type GenericAssetRuntimeForbiddenFieldName =
   | "absolute_path"

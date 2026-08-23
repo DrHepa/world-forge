@@ -839,3 +839,10 @@ Slice 1B.1 publishes the closed canonical JSON v1 `AgentWorkerActivation` and
 `AgentMemoryProjection`. These contracts provide no worker, provider,
 execution, Studio, replay, runtime capability, or memory-truth inference.
 See [ADR-0030](docs/decisions/0030-agent-harness-contract-foundation.md).
+
+Slice 2A publishes only closed recorded-result plan, observation, and report
+documents for the optional codebase-memory benchmark. They do not execute or
+evaluate a benchmark, query an index, or authorize adoption. The committed
+fixtures are synthetic and truthfully `not_evaluable`; no actual benchmark or
+adoption decision has been run. See
+[`CODEBASE_MEMORY_BENCHMARK.md`](docs/CODEBASE_MEMORY_BENCHMARK.md).

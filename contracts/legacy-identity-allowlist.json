@@ -22,7 +22,7 @@
     },
     {
       "category": "migration",
-      "file_sha256": "8b6c540e765e3c57a6baeb59c47ce7b36c6d19220ff0be2ec2e26ed15a3e0fe6",
+      "file_sha256": "2e5a3d44108bf2b592f6c104b3548722f9fc01a8fe2e7f70a17dcc6de6e05003",
       "justification": "The compatibility bridge retains this old public location until the authorized cutover.",
       "offsets": [
         4147,
@@ -294,23 +294,23 @@
     },
     {
       "category": "legacy_contract",
-      "file_sha256": "321d0eb2750d0d00dff73851fd148a1919bfb70e7f53dba713890d171ebf6827",
+      "file_sha256": "3cd5ff55692964ffffc4d3118b95cacc28f4bba5f3f9a0bf2695f57f6c01543b",
       "justification": "Published legacy format, schema, protocol, or storage identity remains immutable.",
       "offsets": [
-        511970
+        512512
       ],
       "path": "apps/studio/src/generated/world-forge-contracts.d.ts",
       "pattern": "RPG World Forge"
     },
     {
       "category": "legacy_contract",
-      "file_sha256": "321d0eb2750d0d00dff73851fd148a1919bfb70e7f53dba713890d171ebf6827",
+      "file_sha256": "3cd5ff55692964ffffc4d3118b95cacc28f4bba5f3f9a0bf2695f57f6c01543b",
       "justification": "Published legacy format, schema, protocol, or storage identity remains immutable.",
       "offsets": [
-        511990,
-        1436107,
-        1441450,
-        1442887
+        512532,
+        1436649,
+        1441992,
+        1443429
       ],
       "path": "apps/studio/src/generated/world-forge-contracts.d.ts",
       "pattern": "rpg-world-forge"
@@ -934,27 +934,27 @@
     },
     {
       "category": "legacy_contract",
-      "file_sha256": "9a4696a4dc52d29433f184cb7ed7a25e489d252f792fd92248dce0b5de33df13",
+      "file_sha256": "9650c3a6665591724aad869d39419917f8d0ed356c579f82b32e46e547511bdf",
       "justification": "Published legacy format, schema, protocol, or storage identity remains immutable.",
       "offsets": [
-        17107,
-        18753,
-        70050,
-        73807,
-        78522,
-        80148,
-        80953,
-        81784,
-        85531,
-        88848,
-        109802
+        20537,
+        22183,
+        73480,
+        77237,
+        81952,
+        83578,
+        84383,
+        85214,
+        88961,
+        92278,
+        113232
       ],
       "path": "contracts/catalog.json",
       "pattern": "RPG World Forge"
     },
     {
       "category": "legacy_contract",
-      "file_sha256": "9a4696a4dc52d29433f184cb7ed7a25e489d252f792fd92248dce0b5de33df13",
+      "file_sha256": "9650c3a6665591724aad869d39419917f8d0ed356c579f82b32e46e547511bdf",
       "justification": "Published legacy format, schema, protocol, or storage identity remains immutable.",
       "offsets": [
         5410,
@@ -969,37 +969,37 @@
         13544,
         14366,
         15228,
-        16568,
-        18325,
-        23948,
-        69011,
-        69699,
-        73490,
-        77939,
-        79712,
-        80509,
-        81307,
-        85087,
-        91643,
-        102182,
-        102976,
-        103921,
-        104726,
-        105627,
-        106337,
-        107038,
-        108230,
-        109492,
-        110275,
-        112504,
-        115823
+        19998,
+        21755,
+        27378,
+        72441,
+        73129,
+        76920,
+        81369,
+        83142,
+        83939,
+        84737,
+        88517,
+        95073,
+        105612,
+        106406,
+        107351,
+        108156,
+        109057,
+        109767,
+        110468,
+        111660,
+        112922,
+        113705,
+        115934,
+        119253
       ],
       "path": "contracts/catalog.json",
       "pattern": "rpg-world-forge"
     },
     {
       "category": "legacy_contract",
-      "file_sha256": "dc240bceb443617b6fd0301ab049c8b675221f19d1dc278686fe751aff34649b",
+      "file_sha256": "401accfc7b58a89d4a6b171cef3d2591235c66b73d36c255c5be2b6da2bee7a7",
       "justification": "Published legacy format, schema, protocol, or storage identity remains immutable.",
       "offsets": [
         6882,

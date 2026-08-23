@@ -1,0 +1,234 @@
+{
+  "$defs": {
+    "id": {
+      "maxLength": 64,
+      "minLength": 2,
+      "pattern": "^[a-z][a-z0-9_]{1,63}$",
+      "type": "string"
+    },
+    "nonnegative": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "plan_ref": {
+      "additionalProperties": false,
+      "properties": {
+        "content_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "format": {
+          "const": "world-forge.codebase_memory_benchmark_plan"
+        },
+        "format_version": {
+          "const": 1
+        },
+        "id": {
+          "$ref": "#/$defs/id"
+        }
+      },
+      "required": [
+        "format",
+        "format_version",
+        "id",
+        "content_hash"
+      ],
+      "type": "object"
+    },
+    "reason_codes": {
+      "items": {
+        "$ref": "#/$defs/id"
+      },
+      "maxItems": 64,
+      "type": "array",
+      "uniqueItems": true
+    },
+    "sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    }
+  },
+  "$id": "https://world-forge.local/schemas/codebase-memory-benchmark-observation.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "arm": {
+      "enum": [
+        "A_direct_reads",
+        "B_existing_memory",
+        "C_memory_candidate_index"
+      ]
+    },
+    "candidate_index_content_hash": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/sha256"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "candidate_index_identity_hash": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/sha256"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "candidate_state": {
+      "enum": [
+        "available",
+        "absent",
+        "untrusted",
+        "incomplete",
+        null
+      ]
+    },
+    "content_hash": {
+      "$ref": "#/$defs/sha256"
+    },
+    "format": {
+      "const": "world-forge.codebase_memory_benchmark_observation"
+    },
+    "format_version": {
+      "const": 1
+    },
+    "measurements": {
+      "additionalProperties": false,
+      "properties": {
+        "cached_input_tokens": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "critical_omission_count": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "egress_guard": {
+          "enum": [
+            "pass",
+            "fail",
+            "unobserved"
+          ]
+        },
+        "final_direct_verification": {
+          "enum": [
+            "pass",
+            "fail",
+            "unobserved"
+          ]
+        },
+        "incremental_refresh_ms": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/nonnegative"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "input_tokens": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "output_tokens": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "quality_basis_points": {
+          "maximum": 10000,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "task_wall_ms": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "tree_guard": {
+          "enum": [
+            "pass",
+            "fail",
+            "unobserved"
+          ]
+        }
+      },
+      "required": [
+        "input_tokens",
+        "output_tokens",
+        "cached_input_tokens",
+        "task_wall_ms",
+        "incremental_refresh_ms",
+        "quality_basis_points",
+        "critical_omission_count",
+        "final_direct_verification",
+        "tree_guard",
+        "egress_guard"
+      ],
+      "type": "object"
+    },
+    "observation_id": {
+      "$ref": "#/$defs/id"
+    },
+    "plan": {
+      "$ref": "#/$defs/plan_ref"
+    },
+    "reason_codes": {
+      "$ref": "#/$defs/reason_codes"
+    },
+    "recorder_identity_hash": {
+      "$ref": "#/$defs/sha256"
+    },
+    "repetition_index": {
+      "maximum": 64,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "rubric_evidence_hash": {
+      "$ref": "#/$defs/sha256"
+    },
+    "source_mode": {
+      "enum": [
+        "direct_reads",
+        "existing_memory",
+        "memory_candidate_index"
+      ]
+    },
+    "state": {
+      "enum": [
+        "completed",
+        "failed",
+        "incomplete",
+        "invalid"
+      ]
+    },
+    "task_id": {
+      "$ref": "#/$defs/id"
+    },
+    "toolchain_identity_hash": {
+      "$ref": "#/$defs/sha256"
+    }
+  },
+  "required": [
+    "format",
+    "format_version",
+    "observation_id",
+    "plan",
+    "task_id",
+    "repetition_index",
+    "arm",
+    "state",
+    "source_mode",
+    "candidate_state",
+    "measurements",
+    "recorder_identity_hash",
+    "rubric_evidence_hash",
+    "toolchain_identity_hash",
+    "candidate_index_identity_hash",
+    "candidate_index_content_hash",
+    "reason_codes",
+    "content_hash"
+  ],
+  "title": "World Forge Codebase Memory Benchmark Observation v1",
+  "type": "object",
+  "x-world-forge-codebase-memory-benchmark-coherent": true
+}

@@ -38,8 +38,12 @@ structural-navigation tasks; no more than a two-percentage-point quality loss; z
 omissions; incremental p95 latency of at most five seconds; zero tracked
 changes; and zero unauthorized egress.
 
-This ADR defines no executable provider adapter, event store, worker, schema,
-Studio protocol, or UI.
+This ADR defines no executable provider adapter, event store, worker, Studio
+protocol, or UI. Slice 2A later publishes only closed recorded-result plan,
+observation, and report schemas for the optional codebase-memory benchmark.
+Those documents do not run or evaluate a benchmark, contact the candidate, or
+authorize adoption. The committed evidence is synthetic and `not_evaluable`;
+no actual benchmark or adoption decision has been run.
 
 ## Consequences
 

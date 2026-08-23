@@ -1,0 +1,398 @@
+{
+  "$defs": {
+    "id": {
+      "maxLength": 64,
+      "minLength": 2,
+      "pattern": "^[a-z][a-z0-9_]{1,63}$",
+      "type": "string"
+    },
+    "nonnegative": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "reason_codes": {
+      "items": {
+        "$ref": "#/$defs/id"
+      },
+      "maxItems": 64,
+      "type": "array",
+      "uniqueItems": true
+    },
+    "reference": {
+      "additionalProperties": false,
+      "properties": {
+        "content_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "format": {
+          "type": "string"
+        },
+        "format_version": {
+          "const": 1
+        },
+        "id": {
+          "$ref": "#/$defs/id"
+        }
+      },
+      "required": [
+        "format",
+        "format_version",
+        "id",
+        "content_hash"
+      ],
+      "type": "object"
+    },
+    "sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "arm_summary": {
+      "additionalProperties": false,
+      "properties": {
+        "arm": {
+          "enum": [
+            "A_direct_reads",
+            "B_existing_memory",
+            "C_memory_candidate_index"
+          ]
+        },
+        "critical_omission_count": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "incremental_refresh_p95_ms": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/nonnegative"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "quality_basis_points": {
+          "maximum": 10000,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "task_wall_p95_ms": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "total_net_tokens": {
+          "$ref": "#/$defs/nonnegative"
+        }
+      },
+      "required": [
+        "arm",
+        "total_net_tokens",
+        "quality_basis_points",
+        "critical_omission_count",
+        "task_wall_p95_ms",
+        "incremental_refresh_p95_ms"
+      ],
+      "type": "object"
+    },
+    "gate_record": {
+      "additionalProperties": false,
+      "properties": {
+        "gate_id": {
+          "enum": [
+            "full_net_token_reduction",
+            "maximum_critical_omissions",
+            "maximum_incremental_p95",
+            "maximum_quality_loss",
+            "structural_net_token_reduction",
+            "tree_unchanged",
+            "zero_unauthorized_egress"
+          ]
+        },
+        "passed": {
+          "type": "boolean"
+        },
+        "reason_codes": {
+          "$ref": "#/$defs/reason_codes"
+        }
+      },
+      "required": [
+        "gate_id",
+        "passed",
+        "reason_codes"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://world-forge.local/schemas/codebase-memory-benchmark-report.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "arm_summaries": {
+      "prefixItems": [
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/arm_summary"
+            },
+            {
+              "properties": {
+                "arm": {
+                  "const": "A_direct_reads"
+                }
+              },
+              "required": [
+                "arm"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/arm_summary"
+            },
+            {
+              "properties": {
+                "arm": {
+                  "const": "B_existing_memory"
+                }
+              },
+              "required": [
+                "arm"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/arm_summary"
+            },
+            {
+              "properties": {
+                "arm": {
+                  "const": "C_memory_candidate_index"
+                }
+              },
+              "required": [
+                "arm"
+              ],
+              "type": "object"
+            }
+          ]
+        }
+      ],
+      "items": false,
+      "maxItems": 3,
+      "minItems": 3,
+      "type": "array"
+    },
+    "content_hash": {
+      "$ref": "#/$defs/sha256"
+    },
+    "decision": {
+      "enum": [
+        "adopt",
+        "reject",
+        "not_evaluable"
+      ]
+    },
+    "format": {
+      "const": "world-forge.codebase_memory_benchmark_report"
+    },
+    "format_version": {
+      "const": 1
+    },
+    "gates": {
+      "prefixItems": [
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/gate_record"
+            },
+            {
+              "properties": {
+                "gate_id": {
+                  "const": "full_net_token_reduction"
+                }
+              },
+              "required": [
+                "gate_id"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/gate_record"
+            },
+            {
+              "properties": {
+                "gate_id": {
+                  "const": "maximum_critical_omissions"
+                }
+              },
+              "required": [
+                "gate_id"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/gate_record"
+            },
+            {
+              "properties": {
+                "gate_id": {
+                  "const": "maximum_incremental_p95"
+                }
+              },
+              "required": [
+                "gate_id"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/gate_record"
+            },
+            {
+              "properties": {
+                "gate_id": {
+                  "const": "maximum_quality_loss"
+                }
+              },
+              "required": [
+                "gate_id"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/gate_record"
+            },
+            {
+              "properties": {
+                "gate_id": {
+                  "const": "structural_net_token_reduction"
+                }
+              },
+              "required": [
+                "gate_id"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/gate_record"
+            },
+            {
+              "properties": {
+                "gate_id": {
+                  "const": "tree_unchanged"
+                }
+              },
+              "required": [
+                "gate_id"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/gate_record"
+            },
+            {
+              "properties": {
+                "gate_id": {
+                  "const": "zero_unauthorized_egress"
+                }
+              },
+              "required": [
+                "gate_id"
+              ],
+              "type": "object"
+            }
+          ]
+        }
+      ],
+      "items": false,
+      "maxItems": 7,
+      "minItems": 7,
+      "type": "array"
+    },
+    "observation_refs": {
+      "items": {
+        "allOf": [
+          {
+            "$ref": "#/$defs/reference"
+          },
+          {
+            "properties": {
+              "format": {
+                "const": "world-forge.codebase_memory_benchmark_observation"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "maxItems": 12288,
+      "minItems": 1,
+      "type": "array",
+      "uniqueItems": true
+    },
+    "plan": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/reference"
+        },
+        {
+          "properties": {
+            "format": {
+              "const": "world-forge.codebase_memory_benchmark_plan"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "reason_codes": {
+      "$ref": "#/$defs/reason_codes"
+    },
+    "report_id": {
+      "$ref": "#/$defs/id"
+    }
+  },
+  "required": [
+    "format",
+    "format_version",
+    "report_id",
+    "plan",
+    "observation_refs",
+    "arm_summaries",
+    "gates",
+    "decision",
+    "reason_codes",
+    "content_hash"
+  ],
+  "title": "World Forge Codebase Memory Benchmark Report v1",
+  "type": "object",
+  "x-world-forge-codebase-memory-benchmark-coherent": true
+}

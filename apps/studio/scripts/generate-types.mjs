@@ -32,6 +32,7 @@ import {
     canonicalAgentHarnessDocumentBytes,
     hasCoherentAgentHarnessContract,
 } from "./agent-harness-validation.mjs";
+import { hasCoherentCodebaseMemoryBenchmarkContract } from "./codebase-memory-benchmark-validation.mjs";
 import {
     hasCoherentGamePersistence,
     hasCoherentPersistenceGeneration,
@@ -480,6 +481,15 @@ const contractDefinitions = {
     AgentEvent: { $ref: "agent-event.schema.json" },
     AgentExecutionReceipt: { $ref: "agent-execution-receipt.schema.json" },
     AgentMemoryProjection: { $ref: "agent-memory-projection.schema.json" },
+    CodebaseMemoryBenchmarkPlan: {
+        $ref: "codebase-memory-benchmark-plan.schema.json",
+    },
+    CodebaseMemoryBenchmarkObservation: {
+        $ref: "codebase-memory-benchmark-observation.schema.json",
+    },
+    CodebaseMemoryBenchmarkReport: {
+        $ref: "codebase-memory-benchmark-report.schema.json",
+    },
 };
 const contractsSchema = {
     $id: "https://world-forge.local/schemas/world-forge-contracts.generated.json",
@@ -593,6 +603,10 @@ const generatedContractsBase = generatedContractsRaw
     .replace(
         "export type WorldForgeRuntimeSafeAssetLicenseRecordV1 =",
         "type WorldForgeRuntimeSafeAssetLicenseRecordV1Generated =",
+    )
+    .replace(
+        "export interface WorldForgeCodebaseMemoryBenchmarkReportV1 {",
+        "interface WorldForgeCodebaseMemoryBenchmarkReportV1Generated {",
     );
 function boundedAnalysisCheckTuple(targetType) {
     return Array.from({ length: 32 }, (_, index) => {
@@ -613,6 +627,26 @@ const analysisChecksWithInconclusive = boundedAnalysisCheckTuple(
     "GameAnalysisInconclusiveCheck",
 );
 const generatedContracts = `${generatedContractsBase}
+
+export type WorldForgeCodebaseMemoryBenchmarkReportV1 = Omit<
+  WorldForgeCodebaseMemoryBenchmarkReportV1Generated,
+  "arm_summaries" | "gates"
+> & {
+  arm_summaries: [
+    Omit<ArmSummary, "arm"> & { arm: "A_direct_reads" },
+    Omit<ArmSummary, "arm"> & { arm: "B_existing_memory" },
+    Omit<ArmSummary, "arm"> & { arm: "C_memory_candidate_index" },
+  ];
+  gates: [
+    Omit<GateRecord, "gate_id"> & { gate_id: "full_net_token_reduction" },
+    Omit<GateRecord, "gate_id"> & { gate_id: "maximum_critical_omissions" },
+    Omit<GateRecord, "gate_id"> & { gate_id: "maximum_incremental_p95" },
+    Omit<GateRecord, "gate_id"> & { gate_id: "maximum_quality_loss" },
+    Omit<GateRecord, "gate_id"> & { gate_id: "structural_net_token_reduction" },
+    Omit<GateRecord, "gate_id"> & { gate_id: "tree_unchanged" },
+    Omit<GateRecord, "gate_id"> & { gate_id: "zero_unauthorized_egress" },
+  ];
+};
 
 type GenericAssetRuntimeForbiddenFieldName =
   | "absolute_path"
@@ -4348,6 +4382,9 @@ async function verifyContractSchemas() {
         "agent-event",
         "agent-execution-receipt",
         "agent-memory-projection",
+        "codebase-memory-benchmark-plan",
+        "codebase-memory-benchmark-observation",
+        "codebase-memory-benchmark-report",
     ];
     const ajv = new Ajv2020({
         allErrors: true,
@@ -4480,6 +4517,13 @@ async function verifyContractSchemas() {
                           ? "projection"
                         : "grant",
             ),
+    });
+    ajv.addKeyword({
+        keyword: "x-world-forge-codebase-memory-benchmark-coherent",
+        schemaType: "boolean",
+        type: "object",
+        validate: (required, data) =>
+            !required || hasCoherentCodebaseMemoryBenchmarkContract(data),
     });
     ajv.addKeyword({
         keyword: "x-world-forge-generic-assetpack-coherent",
@@ -4631,6 +4675,16 @@ async function verifyContractSchemas() {
             contractSchema["x-world-forge-agent-harness-coherent"] !== true
         ) {
             throw new Error(`${name} does not enforce Agent Harness coherence`);
+        }
+        if (
+            name.startsWith("codebase-memory-benchmark-") &&
+            contractSchema[
+                "x-world-forge-codebase-memory-benchmark-coherent"
+            ] !== true
+        ) {
+            throw new Error(
+                `${name} does not enforce codebase-memory benchmark coherence`,
+            );
         }
         if (
             name === "generic-assetpack" &&
@@ -4884,6 +4938,104 @@ async function verifyContractSchemas() {
         );
         documents.set(fixtureKey, document);
     }
+
+    const memoryBenchmarkPlan = documents.get(
+        "codebase-memory-benchmark-minimal/plan.json",
+    );
+    const memoryBenchmarkObservation = documents.get(
+        "codebase-memory-benchmark-minimal/observation-navigation-01-a-01.json",
+    );
+    const memoryBenchmarkCandidateObservation = documents.get(
+        "codebase-memory-benchmark-minimal/observation-navigation-01-c-01.json",
+    );
+    const memoryBenchmarkIncompleteCandidateObservation = documents.get(
+        "codebase-memory-benchmark-minimal/observation-other-01-c-01.json",
+    );
+    const memoryBenchmarkReport = documents.get(
+        "codebase-memory-benchmark-minimal/report.json",
+    );
+    const rejectMemoryBenchmarkMutation = (document, message) => {
+        const schemaId = schemaByFormat.get(document.format);
+        if (schemaId === undefined || ajv.validate(schemaId, document)) {
+            throw new Error(message);
+        }
+    };
+    const badMemoryBenchmarkHash = structuredClone(memoryBenchmarkPlan);
+    badMemoryBenchmarkHash.content_hash = "0".repeat(64);
+    rejectMemoryBenchmarkMutation(
+        badMemoryBenchmarkHash,
+        "codebase-memory benchmark accepted a tampered hash",
+    );
+    const weakenedMemoryBenchmarkGate = structuredClone(memoryBenchmarkPlan);
+    weakenedMemoryBenchmarkGate.gates.maximum_critical_omissions = 1;
+    reseal(weakenedMemoryBenchmarkGate);
+    rejectMemoryBenchmarkMutation(
+        weakenedMemoryBenchmarkGate,
+        "codebase-memory benchmark accepted a weakened gate",
+    );
+    const reorderedMemoryBenchmarkArms = structuredClone(memoryBenchmarkPlan);
+    reorderedMemoryBenchmarkArms.arms.reverse();
+    reseal(reorderedMemoryBenchmarkArms);
+    rejectMemoryBenchmarkMutation(
+        reorderedMemoryBenchmarkArms,
+        "codebase-memory benchmark accepted reordered arms",
+    );
+    const wrongMemoryBenchmarkSource = structuredClone(memoryBenchmarkObservation);
+    wrongMemoryBenchmarkSource.source_mode = "existing_memory";
+    reseal(wrongMemoryBenchmarkSource);
+    rejectMemoryBenchmarkMutation(
+        wrongMemoryBenchmarkSource,
+        "codebase-memory benchmark accepted mismatched arm/source mode",
+    );
+    const wrongMemoryBenchmarkCandidate = structuredClone(
+        memoryBenchmarkCandidateObservation,
+    );
+    wrongMemoryBenchmarkCandidate.candidate_index_identity_hash = "1".repeat(64);
+    reseal(wrongMemoryBenchmarkCandidate);
+    rejectMemoryBenchmarkMutation(
+        wrongMemoryBenchmarkCandidate,
+        "codebase-memory benchmark accepted an absent candidate identity",
+    );
+    const partialMemoryBenchmarkCandidateIdentity = structuredClone(
+        memoryBenchmarkIncompleteCandidateObservation,
+    );
+    partialMemoryBenchmarkCandidateIdentity.candidate_index_identity_hash = null;
+    reseal(partialMemoryBenchmarkCandidateIdentity);
+    rejectMemoryBenchmarkMutation(
+        partialMemoryBenchmarkCandidateIdentity,
+        "codebase-memory benchmark accepted a partial candidate identity",
+    );
+    const wrongMemoryBenchmarkCache = structuredClone(memoryBenchmarkObservation);
+    wrongMemoryBenchmarkCache.measurements.cached_input_tokens =
+        wrongMemoryBenchmarkCache.measurements.input_tokens + 1;
+    reseal(wrongMemoryBenchmarkCache);
+    rejectMemoryBenchmarkMutation(
+        wrongMemoryBenchmarkCache,
+        "codebase-memory benchmark accepted cached tokens above input tokens",
+    );
+    const booleanMemoryBenchmarkCounter = structuredClone(memoryBenchmarkObservation);
+    booleanMemoryBenchmarkCounter.measurements.input_tokens = true;
+    reseal(booleanMemoryBenchmarkCounter);
+    rejectMemoryBenchmarkMutation(
+        booleanMemoryBenchmarkCounter,
+        "codebase-memory benchmark accepted a boolean numeric counter",
+    );
+    const duplicateMemoryBenchmarkGate = structuredClone(memoryBenchmarkReport);
+    duplicateMemoryBenchmarkGate.gates[1].gate_id =
+        duplicateMemoryBenchmarkGate.gates[0].gate_id;
+    reseal(duplicateMemoryBenchmarkGate);
+    rejectMemoryBenchmarkMutation(
+        duplicateMemoryBenchmarkGate,
+        "codebase-memory benchmark accepted duplicate report gate IDs",
+    );
+    const falseAdoptMemoryBenchmark = structuredClone(memoryBenchmarkReport);
+    falseAdoptMemoryBenchmark.decision = "adopt";
+    falseAdoptMemoryBenchmark.reason_codes = [];
+    reseal(falseAdoptMemoryBenchmark);
+    rejectMemoryBenchmarkMutation(
+        falseAdoptMemoryBenchmark,
+        "codebase-memory benchmark accepted adopt with failed gates",
+    );
 
     const harnessActivation = documents.get(
         "agent-harness-minimal/worker-activation.json",

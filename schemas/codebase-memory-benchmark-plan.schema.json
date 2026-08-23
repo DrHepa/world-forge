@@ -1,0 +1,168 @@
+{
+  "$defs": {
+    "id": {
+      "maxLength": 64,
+      "minLength": 2,
+      "pattern": "^[a-z][a-z0-9_]{1,63}$",
+      "type": "string"
+    },
+    "revision": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+      "type": "string"
+    },
+    "sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    }
+  },
+  "$id": "https://world-forge.local/schemas/codebase-memory-benchmark-plan.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "arms": {
+      "const": [
+        "A_direct_reads",
+        "B_existing_memory",
+        "C_memory_candidate_index"
+      ]
+    },
+    "authorized_egress_policy_hash": {
+      "$ref": "#/$defs/sha256"
+    },
+    "benchmark_id": {
+      "$ref": "#/$defs/id"
+    },
+    "content_hash": {
+      "$ref": "#/$defs/sha256"
+    },
+    "format": {
+      "const": "world-forge.codebase_memory_benchmark_plan"
+    },
+    "format_version": {
+      "const": 1
+    },
+    "gates": {
+      "additionalProperties": false,
+      "properties": {
+        "full_net_token_reduction_basis_points": {
+          "const": 3000
+        },
+        "maximum_critical_omissions": {
+          "const": 0
+        },
+        "maximum_incremental_p95_ms": {
+          "const": 5000
+        },
+        "maximum_quality_loss_basis_points": {
+          "const": 200
+        },
+        "require_tree_unchanged": {
+          "const": true
+        },
+        "require_zero_unauthorized_egress": {
+          "const": true
+        },
+        "structural_net_token_reduction_basis_points": {
+          "const": 5000
+        }
+      },
+      "required": [
+        "full_net_token_reduction_basis_points",
+        "structural_net_token_reduction_basis_points",
+        "maximum_quality_loss_basis_points",
+        "maximum_critical_omissions",
+        "maximum_incremental_p95_ms",
+        "require_tree_unchanged",
+        "require_zero_unauthorized_egress"
+      ],
+      "type": "object"
+    },
+    "latency_percentile_method": {
+      "const": "nearest_rank"
+    },
+    "source_binding": {
+      "additionalProperties": false,
+      "properties": {
+        "checkout_id_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "revision": {
+          "$ref": "#/$defs/revision"
+        },
+        "tree_hash": {
+          "$ref": "#/$defs/sha256"
+        }
+      },
+      "required": [
+        "revision",
+        "tree_hash",
+        "checkout_id_hash"
+      ],
+      "type": "object"
+    },
+    "task_set": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "category": {
+            "enum": [
+              "structural_navigation",
+              "other"
+            ]
+          },
+          "repetitions": {
+            "maximum": 64,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "rubric_hash": {
+            "$ref": "#/$defs/sha256"
+          },
+          "task_id": {
+            "$ref": "#/$defs/id"
+          },
+          "task_spec_hash": {
+            "$ref": "#/$defs/sha256"
+          }
+        },
+        "required": [
+          "task_id",
+          "category",
+          "task_spec_hash",
+          "rubric_hash",
+          "repetitions"
+        ],
+        "type": "object"
+      },
+      "maxItems": 64,
+      "minItems": 1,
+      "type": "array",
+      "uniqueItems": true
+    },
+    "token_accounting_version": {
+      "$ref": "#/$defs/id"
+    },
+    "tree_guard_policy_hash": {
+      "$ref": "#/$defs/sha256"
+    }
+  },
+  "required": [
+    "format",
+    "format_version",
+    "benchmark_id",
+    "source_binding",
+    "task_set",
+    "arms",
+    "gates",
+    "token_accounting_version",
+    "latency_percentile_method",
+    "authorized_egress_policy_hash",
+    "tree_guard_policy_hash",
+    "content_hash"
+  ],
+  "title": "World Forge Codebase Memory Benchmark Plan v1",
+  "type": "object",
+  "x-world-forge-codebase-memory-benchmark-coherent": true
+}

@@ -1,6 +1,5 @@
 # World Forge
 
-[![CI](https://github.com/DrHepa/rpg-world-forge/actions/workflows/ci.yml/badge.svg)](https://github.com/DrHepa/rpg-world-forge/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-lilac.svg)](LICENSE)
 
 A deterministic authoring-to-execution toolkit for typed multi-genre creation
@@ -23,6 +22,36 @@ Its output is never accepted directly: GPT orchestrates, a human or authorized
 lead reviews, `worldforge` validates, and deterministic compilation/sealing
 creates runtime artifacts. Prompts, providers, models, credentials, and mutable
 authoring source never enter a distributed game.
+
+## Planned foundation: Harness, Studio, Engine Lines, and Tool Center
+
+Slice 1 records architecture and vocabulary only; it does **not** add an agent
+harness, Team Mode, Engine Lines, `gamepack_runtime` SDK/ABI changes, a Tool
+Center, provider execution, discovery, installation, or a new UI. Existing
+Studio, gamepack, worldpack, runtime, and game contracts remain unchanged.
+
+Team Mode requires exactly three distinct model lineages; if they are
+unavailable, it must show a visible degraded mode and cannot claim consensus.
+The Forge-independent `gamepack_runtime` kernel already exists. Slice 5 plans
+only its additive formal SDK/ABI role and evolution. Its target materialized
+external-game layout is editable `src/engine/` and `src/game/`, an exact
+`engine.lock.json`, and an immutable `src/isoworld/` snapshot where the legacy
+snapshot applies; the current scaffold remains unchanged until that slice.
+The pyray boundary applies only within editable `src/engine/`; immutable legacy
+`src/isoworld/` retains its published compatibility imports.
+
+The baseline is `8334f2536ee03f541cbee7f729379139e70241df`. GitHub Actions are
+intentionally absent. Each future slice is governed by applicable local
+verification and an independent fresh review. `hosted_evidence` remains
+`PENDING` and native evidence remains `UNTESTED` unless exact real evidence
+exists; a local result never becomes a hosted or native pass. Returning CI is
+separate, explicitly authorized, time-boxed work.
+
+The planned authority and vocabulary are recorded in
+[ADR-0026](docs/decisions/0026-world-forge-agent-harness.md),
+[ADR-0027](docs/decisions/0027-virtual-studio-governance.md),
+[ADR-0028](docs/decisions/0028-project-owned-engine-lines.md), and
+[ADR-0029](docs/decisions/0029-tool-center-capability-workflow-run-model.md).
 
 ## Architecture lanes
 
@@ -155,7 +184,9 @@ hash-locked releases.
 ## Current M6 slice (partial)
 
 **PARTIAL — local implementation evidence only. Self-contained Studio release
-remains blocked; hosted and native evidence is pending until the final push.**
+remains blocked; a push alone cannot create hosted or native evidence. Those
+states remain `PENDING`/`UNTESTED` until a separately authorized real
+hosted/native evidence process exists and passes.**
 
 The canonical generic release-lineage command is
 `python -m scripts.verify_multigenre_release --native off --report <external>`.
@@ -165,12 +196,11 @@ deterministic compile, real PNG/TTF processing and QA, sealing,
 runtime/materialization, standalone verification, headless save/replay, package
 reproducibility, and extraction. `off` truthfully records native execution as
 untested. ARM64 hosts can run lower-level logic/unit checks, but cannot mint v1
-headless/release evidence or publish a passed deterministic release report. The
-mandatory hosted
-workflow uses `--native required` on Ubuntu 24.04 and Windows Server 2022 with
-Python 3.11 and 3.12, then aggregates all four reports. This hosted result is
-**PENDING** until that exact revision runs green; workflow definition is not
-evidence. The authoritative machine-readable status is
+headless/release evidence or publish a passed deterministic release report.
+GitHub Actions are intentionally absent at the Slice 1 baseline. Existing hosted
+evidence remains **PENDING**; local results and workflow definitions are
+not hosted or native evidence. Returning CI requires separately authorized,
+time-boxed work. The authoritative machine-readable status is
 `docs/evidence/multigenre-release-status.json`.
 
 The executable end-to-end fixtures are `abstract-puzzle` and
@@ -726,8 +756,9 @@ the narrative-neutral renderpack/assetpack paths, exercises offline standalone
 bundle/replay/package behavior, builds reproducible wheel and sdist artifacts,
 and audits clean isolated installs. Exact dependency versions are pinned, but
 the requirement files do not provide hashes for every dependency and are not
-described as fully hash-locked. GitHub Actions are pinned by full commit SHA;
-hosted Ubuntu/Windows results exist only after the corresponding push.
+described as fully hash-locked. GitHub Actions are intentionally absent at the
+Slice 1 baseline. Hosted Ubuntu/Windows evidence remains `PENDING` until
+separately authorized CI work produces exact real evidence.
 
 ## Repository layout
 

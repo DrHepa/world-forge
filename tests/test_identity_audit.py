@@ -482,14 +482,11 @@ class IdentityAuditTests(unittest.TestCase):
             ):
                 refresh_identity_allowlist_evidence(root, reviewed_policy=policy)
 
-    def test_generator_reviewed_policy_accepts_hosted_workflow_bridge_only(self) -> None:
+    def test_generator_reviewed_policy_does_not_restore_deleted_hosted_workflow(self) -> None:
         from scripts.generate_identity_allowlist import REVIEWED_ADDITIONS
 
         key = (".github/workflows/ci.yml", "rpg-world-forge")
-        policy = REVIEWED_ADDITIONS[key]
-        self.assertEqual(policy.category, "migration")
-        self.assertIn("trusted main pushes", policy.justification)
-        self.assertIn("stable GitHub repository ID", policy.justification)
+        self.assertNotIn(key, REVIEWED_ADDITIONS)
 
     def test_generator_reviewed_policy_accepts_hosted_receipt_bridge_only(self) -> None:
         from scripts.generate_identity_allowlist import REVIEWED_ADDITIONS

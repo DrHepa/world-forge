@@ -405,6 +405,65 @@ IDs/files/hashes, and output filename/role/media lineage. Manifest validation
 passes its own asset root explicitly. Receipt v1 remains readable as an
 identity-only legacy record; it never gains inferred recipe authorization.
 
+## Planned Slice 1 foundation vocabulary
+
+Slice 1 establishes only architectural vocabulary. None of the following is an
+implemented Studio feature, public schema, runtime claim, provider integration,
+or generated-game requirement. It preserves all published contracts and the
+existing provider-free Studio boundaries.
+
+The future World Forge-owned, provider-neutral Agent Harness has an append-only
+event log and replay, isolated killable worker lifecycle, capability grants,
+execution receipts, and approved memory projections. Studio alone retains
+project, canon, asset, and release authority. DeepSeek Harness is reference
+material, never a dependency or fork. `codebase-memory-mcp` is an optional,
+read-only development benchmark only: it is not a source authority, product
+dependency, or runtime input. See
+[ADR-0026](decisions/0026-world-forge-agent-harness.md).
+
+The future Virtual Studio vocabulary is `DepartmentDefinition`,
+`WorkerProfile`, `StudioRoster`, `WorkOrder`, `TaskLease`, `Handoff`,
+`DefectRecord`, `ConsultantEngagement`, `CompetencyAttestation`,
+`UserDecision`, `TeamSession`, `ParticipantBinding`, and `DeliberationReport`.
+V1 has one human director; stable profiles receive fresh task context; owners
+repair defects and independent QA verifies them. Consultants require user
+approval. Team Mode requires exactly three distinct model lineages; if they are
+unavailable, the Studio shows a visible degraded mode and does not claim
+consensus.
+See [ADR-0027](decisions/0027-virtual-studio-governance.md).
+
+The implemented Forge-independent `gamepack_runtime` kernel is the neutral
+runtime boundary. Slice 5 plans an additive formal SDK/ABI role and evolution,
+not its future existence. Each Slice 5 materialized external game will own
+editable `src/engine/` and `src/game/`, an exact `engine.lock.json`, and an
+immutable `src/isoworld/` snapshot where the legacy snapshot applies.
+`EngineProfile`,
+`EngineLine`, `EngineRelease`, `EnginePackage`, `EngineLock`,
+`EngineCompatibilityReport`, `EngineMigrationPlan`, and
+`EngineMigrationReceipt` name lineage, immutable releases, locking,
+compatibility, and change evidence.
+Only within editable `src/engine/` may declared `src/engine/adapters/` code
+import pyray; immutable legacy `src/isoworld/` retains its published
+compatibility imports. A development-only `GameControlPort` is excluded from
+releases. The current scaffold remains unchanged until Slice 5. See
+[ADR-0028](decisions/0028-project-owned-engine-lines.md).
+
+The future Tool Center has exactly `Capabilities`, `Workflows`, and `Runs`.
+Setup/Health is an auxiliary drawer, Node Catalog is within Workflows, and
+Outputs/QA belongs to a run and Creation > Assets. It will use capability,
+workflow, dependency, run, receipt, and output-candidate contracts; Modly and
+ComfyUI remain provider-specific adapters. A logical schema-approved DAG does
+not authorize arbitrary frontend code. Slice 1 provides no discovery,
+installation, execution, or Tool Center UI. See
+[ADR-0029](decisions/0029-tool-center-capability-workflow-run-model.md).
+
+GitHub Actions are intentionally absent at baseline
+`8334f2536ee03f541cbee7f729379139e70241df`. Applicable local verification and
+independent fresh review govern future implementation. `hosted_evidence` stays
+`PENDING` and native evidence stays `UNTESTED` without exact real evidence;
+local results never become hosted or native passes. CI restoration is separate,
+explicitly authorized, time-boxed work.
+
 ## Creative-process control plane
 
 Every generated **world-authoring repository** contains `.worldforge/` and a

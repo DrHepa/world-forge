@@ -80,13 +80,6 @@ REVIEWED_ADDITIONS.update(
         for path in _REGRESSION_FIXTURE_ADDITIONS
     }
 )
-REVIEWED_ADDITIONS[(".github/workflows/ci.yml", _LEGACY_DASHED)] = ReviewedIdentityPolicy(
-    category="migration",
-    justification=(
-        "Restricts the hosted native authority workflow old/new repository bridge "
-        "to trusted main pushes and the stable GitHub repository ID."
-    ),
-)
 REVIEWED_ADDITIONS[("tests/test_hosted_native_release_authority.py", _LEGACY_DASHED)] = (
     ReviewedIdentityPolicy(
         category="regression_fixture",

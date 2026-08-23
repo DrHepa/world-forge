@@ -12,20 +12,6 @@
     },
     {
       "category": "migration",
-      "file_sha256": "12c0acbea5ad177e46ccd2c1d2c91008740816450f3fa00781cdcf2e23ad077a",
-      "justification": "Restricts the hosted native authority workflow old/new repository bridge to trusted main pushes and the stable GitHub repository ID.",
-      "offsets": [
-        37910,
-        39430,
-        40907,
-        41432,
-        43938
-      ],
-      "path": ".github/workflows/ci.yml",
-      "pattern": "rpg-world-forge"
-    },
-    {
-      "category": "migration",
       "file_sha256": "a6715173f889209699fd6d41b05bf6198289b7c295bc59803020b88b2019ceb3",
       "justification": "Source distributions retain the legacy installed public-data path during the compatibility bridge.",
       "offsets": [
@@ -36,14 +22,12 @@
     },
     {
       "category": "migration",
-      "file_sha256": "b67ab4f97b25ddee619d71473ee657ee83906170e22bec15436034386e895daa",
+      "file_sha256": "940a956162e8d3cb271b95f021fdec2220b18ae7f7ca519e976ac3aa2aa1b8f6",
       "justification": "The compatibility bridge retains this old public location until the authorized cutover.",
       "offsets": [
-        48,
-        127,
-        2500,
-        17413,
-        27389
+        4147,
+        19162,
+        29138
       ],
       "path": "README.md",
       "pattern": "rpg-world-forge"
@@ -1015,7 +999,7 @@
     },
     {
       "category": "legacy_contract",
-      "file_sha256": "dd3d8f17b901065aba2d9d568f6e74c9c2c0bbbd59208de9e2e9ddc35d5f71ad",
+      "file_sha256": "5e38c22b34191ac7ceb05aae7a58e4ca28d4e7397bb5523e5fef38ee1a76bcb1",
       "justification": "Published legacy format, schema, protocol, or storage identity remains immutable.",
       "offsets": [
         6882,
@@ -3085,7 +3069,7 @@
     },
     {
       "category": "regression_fixture",
-      "file_sha256": "7d753f5f3389358124d2214cbe6784ca7c84b6200a30b8b81a91078fae32e6c9",
+      "file_sha256": "0e503b7e36c22c0ef4e09be580e023d2724e9cc8ad0b7a1896eef56e65b4aefe",
       "justification": "Regression evidence preserves legacy identity input and reader behavior.",
       "offsets": [
         6027,
@@ -3095,14 +3079,14 @@
         12673,
         18476,
         19962,
-        29843
+        29660
       ],
       "path": "tests/test_identity_audit.py",
       "pattern": "RPG World Forge"
     },
     {
       "category": "regression_fixture",
-      "file_sha256": "7d753f5f3389358124d2214cbe6784ca7c84b6200a30b8b81a91078fae32e6c9",
+      "file_sha256": "0e503b7e36c22c0ef4e09be580e023d2724e9cc8ad0b7a1896eef56e65b4aefe",
       "justification": "Regression evidence preserves legacy identity input and reader behavior.",
       "offsets": [
         5866,
@@ -3131,15 +3115,15 @@
         18142,
         18958,
         19110,
-        20454,
-        21144,
-        23432,
-        25565,
-        26238,
-        27615,
-        28160,
-        28803,
-        29386
+        20459,
+        20961,
+        23249,
+        25382,
+        26055,
+        27432,
+        27977,
+        28620,
+        29203
       ],
       "path": "tests/test_identity_audit.py",
       "pattern": "rpg-world-forge"

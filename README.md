@@ -840,6 +840,13 @@ Slice 1B.1 publishes the closed canonical JSON v1 `AgentWorkerActivation` and
 execution, Studio, replay, runtime capability, or memory-truth inference.
 See [ADR-0030](docs/decisions/0030-agent-harness-contract-foundation.md).
 
+The internal provider-free kernel foundation now validates those existing
+activation/grant documents and proves deterministic execution records only
+with in-memory fakes. It adds no provider/model, durable recovery, isolated
+worker or hard kill, external MCP safety, memory projection, artifact
+promotion, Studio job/UI/Team Mode, replay, or hosted/native/release evidence.
+See [ADR-0031](docs/decisions/0031-provider-free-agent-execution-kernel.md).
+
 Slice 2B adds a pure deterministic evaluator and explicit-input, atomic
 no-replace CLI for the closed recorded-result plan, observation, and report
 documents. They evaluate supplied evidence only; they do not execute a

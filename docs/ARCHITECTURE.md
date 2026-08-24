@@ -595,6 +595,16 @@ preference entries. It stores no memory text, prompt, transcript, rationale,
 provider payload, executable content, or operational path. The artifact neither
 mutates Engram nor infers that projected content is true.
 
+The provider-free Agent Execution Kernel foundation is an internal synchronous
+state machine and default-deny capability broker over those unchanged public
+contracts. In-memory fake tests prove canonical event/receipt chains, bounded
+accounting, cooperative cancellation, and atomic journal finalization only.
+Durable Studio persistence/recovery, process isolation and hard kill, real
+providers/models/billing, external MCP safety, memory approval/projection,
+artifact promotion, Studio jobs/UI/Team Mode, provider replay, and
+hosted/native/release evidence remain unimplemented and unproven. See
+[ADR-0031](decisions/0031-provider-free-agent-execution-kernel.md).
+
 Slice 2B retains the closed, identity/evidence-only plan, observation, and report
 boundary for an optional codebase-memory comparison and adds a pure evaluator
 plus an explicit-input, atomic no-replace CLI. Validators resolve the exact plan

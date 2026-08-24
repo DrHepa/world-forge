@@ -597,13 +597,27 @@ mutates Engram nor infers that projected content is true.
 
 The provider-free Agent Execution Kernel foundation is an internal synchronous
 state machine and default-deny capability broker over those unchanged public
-contracts. In-memory fake tests prove canonical event/receipt chains, bounded
-accounting, cooperative cancellation, and atomic journal finalization only.
-Durable Studio persistence/recovery, process isolation and hard kill, real
+contracts. A dedicated, host-supplied private SQLite `AgentEventLog` implements
+the journal boundary independently of `StudioStore`: it durably begins an exact
+request, appends a bounded hash chain with generation/sequence/head CAS,
+atomically records the receipt and terminal event, and revalidates immutable
+audit records after reopen. Ordinary stores hold a shared retained one-byte OS
+lock before SQLite opens; only a dedicated exclusive offline recovery store can
+mark an orphaned or indeterminate open prefix `recovery_required`. Lock identity
+is bound into the exact private v1 schema, whose canonical DDL, relational
+shape, and startup foreign-key projection are fail-closed. Unsealable private
+input has a null non-replayable fingerprint; a retry conflicts rather than
+deduplicating. Replay performs no adapter side effects and never resumes work
+or synthesizes a receipt/private output. Local spawned-process evidence covers
+the POSIX fence; Windows shared/exclusive and remote-drive policy is seam-tested
+but has no native evidence in this slice. Public receipt
+`replay_support` remains `not_claimed` because audit reread is not provider
+replay. Durable Studio job recovery, process isolation and hard kill, real
 providers/models/billing, external MCP safety, memory approval/projection,
-artifact promotion, Studio jobs/UI/Team Mode, provider replay, and
-hosted/native/release evidence remain unimplemented and unproven. See
-[ADR-0031](decisions/0031-provider-free-agent-execution-kernel.md).
+artifact promotion, Studio jobs/UI/Team Mode, deterministic provider replay,
+and hosted/native/release evidence remain unimplemented and unproven. See
+[ADR-0031](decisions/0031-provider-free-agent-execution-kernel.md) and
+[ADR-0032](decisions/0032-private-durable-agent-event-log.md).
 
 Slice 2B retains the closed, identity/evidence-only plan, observation, and report
 boundary for an optional codebase-memory comparison and adds a pure evaluator

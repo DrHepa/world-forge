@@ -840,12 +840,25 @@ Slice 1B.1 publishes the closed canonical JSON v1 `AgentWorkerActivation` and
 execution, Studio, replay, runtime capability, or memory-truth inference.
 See [ADR-0030](docs/decisions/0030-agent-harness-contract-foundation.md).
 
-The internal provider-free kernel foundation now validates those existing
-activation/grant documents and proves deterministic execution records only
-with in-memory fakes. It adds no provider/model, durable recovery, isolated
-worker or hard kill, external MCP safety, memory projection, artifact
-promotion, Studio job/UI/Team Mode, replay, or hosted/native/release evidence.
-See [ADR-0031](docs/decisions/0031-provider-free-agent-execution-kernel.md).
+The internal provider-free kernel validates those existing activation/grant
+documents and produces deterministic execution records. A separate,
+host-supplied private SQLite `AgentEventLog` can durably bind an exact request,
+append its bounded event chain, atomically record its terminal receipt, and
+audit the canonical bytes after reopen. Ordinary sessions retain a shared
+one-byte OS lock; only an exclusive offline recovery session can mark an
+interrupted prefix `recovery_required`, and it is never resumed or given a
+synthetic receipt. Unsealable private input receives no replay identity, so its
+failure receipt cannot be deduplicated on retry. The private SQLite v1 schema
+and startup foreign-key projection are checked exactly. Local evidence proves
+the POSIX process fence; Windows lock behavior is seam-tested but not natively
+proven by this slice.
+
+The five public v1 contracts remain unchanged and receipts still state
+`replay_support: not_claimed`. This adds no provider/model, Studio job/UI,
+isolated worker or hard kill, external MCP safety, memory projection, artifact
+promotion, deterministic provider replay, or hosted/native/release evidence.
+See [ADR-0031](docs/decisions/0031-provider-free-agent-execution-kernel.md) and
+[ADR-0032](docs/decisions/0032-private-durable-agent-event-log.md).
 
 Slice 2B adds a pure deterministic evaluator and explicit-input, atomic
 no-replace CLI for the closed recorded-result plan, observation, and report

@@ -6,7 +6,7 @@ import copy
 import hashlib
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from worldforge.agent_harness_contracts import (
     AGENT_CAPABILITY_GRANT_FORMAT,
@@ -44,6 +44,7 @@ _TOOL_ID_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}(?:\.[a-z][a-z0-9_]{1,63})+$")
 _MAX_PRIVATE_FIELD_BYTES = 64 * 1024
 _MAX_ARTIFACT_PROPOSALS = 64
 _MAX_MEMORY_PROPOSALS = 64
+_INVALID_PRIVATE_INPUT = object()
 
 
 class KernelError(ValueError):
@@ -208,29 +209,61 @@ def _prepared_execution_request(
 
 
 def _private_bytes(value: object) -> bytes:
-    try:
-        encoded = json.dumps(
-            value,
+    _, encoded = _private_snapshot(value)
+    return encoded
+
+
+def _private_snapshot(value: object) -> tuple[object, bytes]:
+    closed, encoded = _exact_json_snapshot(value, reason_code="private_field_invalid")
+    if len(encoded) > _MAX_PRIVATE_FIELD_BYTES:
+        raise KernelError("private_field_invalid")
+    return closed, encoded
+
+
+def _execution_request_fingerprint(
+    request: ExecutionRequest,
+    activation: dict[str, object],
+    grant: dict[str, object],
+    private_input_bytes: bytes,
+) -> str:
+    limits = request.limits
+    controls = {
+        "format": "world-forge.private.agent_execution_request_fingerprint",
+        "format_version": 1,
+        "execution_id": activation["execution_id"],
+        "activation_hash": activation["content_hash"],
+        "grant_hash": grant["content_hash"],
+        "log_id": request.log_id,
+        "receipt_id": request.receipt_id,
+        "event_id_prefix": request.event_id_prefix,
+        "invocation_id_prefix": request.invocation_id_prefix,
+        "limits": {
+            "max_turns": limits.max_turns,
+            "max_tool_calls": limits.max_tool_calls,
+            "max_total_tokens": limits.max_total_tokens,
+            "max_cost_minor_units": limits.max_cost_minor_units,
+            "currency": limits.currency,
+            "max_duration_ms": limits.max_duration_ms,
+            "deadline_ms": limits.deadline_ms,
+        },
+        "private_input_hash": hashlib.sha256(private_input_bytes).hexdigest(),
+    }
+    return hashlib.sha256(
+        json.dumps(
+            controls,
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
             allow_nan=False,
         ).encode("utf-8")
-    except (TypeError, ValueError, UnicodeError, RecursionError):
-        raise KernelError("private_field_invalid") from None
-    if len(encoded) > _MAX_PRIVATE_FIELD_BYTES:
-        raise KernelError("private_field_invalid")
-    return encoded
+    ).hexdigest()
 
 
 def _sealed_private_value(value: object) -> object:
     """Return a plain JSON-owned snapshot with no aliases to untrusted objects."""
 
-    encoded = _private_bytes(value)
-    try:
-        return json.loads(encoded.decode("utf-8"))
-    except (TypeError, ValueError, UnicodeError):
-        raise KernelError("private_field_invalid") from None
+    closed, _ = _private_snapshot(value)
+    return closed
 
 
 def _request_hash(call: ToolCall) -> str:
@@ -374,6 +407,66 @@ class AgentExecutionKernel:
         try:
             start_ms = self._safe_now()
             initial_reason = self._cancellation_reason(request.limits, start_ms)
+            try:
+                private_input, private_input_bytes = _private_snapshot(request.private_input)
+            except KernelError:
+                private_input = _INVALID_PRIVATE_INPUT
+                request_fingerprint = None
+            else:
+                request_fingerprint = _execution_request_fingerprint(
+                    request,
+                    activation,
+                    grant,
+                    private_input_bytes,
+                )
+            request = replace(request, private_input=private_input)
+            journal_activation = copy.deepcopy(activation)
+            journal_grant = copy.deepcopy(grant)
+            expected_journal_activation = _journal_record_bytes(
+                journal_activation, expected_format=AGENT_WORKER_ACTIVATION_FORMAT
+            )
+            expected_journal_grant = _journal_record_bytes(
+                journal_grant, expected_format=AGENT_CAPABILITY_GRANT_FORMAT
+            )
+            try:
+                begun = self.journal.begin_execution(
+                    execution_id,
+                    request.log_id,
+                    journal_activation,
+                    journal_grant,
+                    request_fingerprint=request_fingerprint,
+                )
+            except Exception:
+                actual_activation = _journal_record_bytes(
+                    journal_activation, expected_format=AGENT_WORKER_ACTIVATION_FORMAT
+                )
+                actual_grant = _journal_record_bytes(
+                    journal_grant, expected_format=AGENT_CAPABILITY_GRANT_FORMAT
+                )
+                if (
+                    actual_activation != expected_journal_activation
+                    or actual_grant != expected_journal_grant
+                ):
+                    raise KernelError("journal_corrupt") from None
+                raise KernelError("journal_begin_ambiguous") from None
+            actual_activation = _journal_record_bytes(
+                journal_activation, expected_format=AGENT_WORKER_ACTIVATION_FORMAT
+            )
+            actual_grant = _journal_record_bytes(
+                journal_grant, expected_format=AGENT_CAPABILITY_GRANT_FORMAT
+            )
+            if (
+                actual_activation != expected_journal_activation
+                or actual_grant != expected_journal_grant
+            ):
+                raise KernelError("journal_corrupt")
+            if type(begun) is not bool:
+                raise KernelError("journal_begin_ambiguous")
+            if not begun:
+                raise KernelError("execution_already_recorded")
+            after_begin_reason = self._cancellation_reason(request.limits, start_ms)
+            if initial_reason is None:
+                initial_reason = after_begin_reason
             if initial_reason is None:
                 try:
                     lease = self.broker.activate(execution_id)
@@ -827,23 +920,21 @@ class AgentExecutionKernel:
                 journal_event,
                 expected_sequence=sequence,
                 expected_previous_hash=previous,
+                expected_generation=sequence,
             )
         except Exception:
-            after = self._cancellation_reason(request.limits, start_ms)
             actual_journal_event = _journal_record_bytes(
                 journal_event, expected_format=AGENT_EVENT_FORMAT
             )
             if actual_journal_event != expected_journal_event:
                 raise KernelError("journal_corrupt") from None
-            if after is not None and not allow_cancelled:
-                return after
-            raise KernelError("journal_conflict") from None
-        after = self._cancellation_reason(request.limits, start_ms)
+            raise KernelError("journal_append_ambiguous") from None
         actual_journal_event = _journal_record_bytes(
             journal_event, expected_format=AGENT_EVENT_FORMAT
         )
         if actual_journal_event != expected_journal_event:
             raise KernelError("journal_corrupt") from None
+        after = self._cancellation_reason(request.limits, start_ms)
         events.append(event)
         try:
             validate_agent_harness_documents(activation, grant, events)
@@ -963,9 +1054,9 @@ class AgentExecutionKernel:
                 journal_event,
                 expected_sequence=sequence,
                 expected_previous_hash=previous,
+                expected_generation=sequence,
             )
         except Exception:
-            post_reason = self._cancellation_reason(request.limits, start_ms)
             actual_journal_receipt = _journal_record_bytes(
                 journal_receipt, expected_format=AGENT_EXECUTION_RECEIPT_FORMAT
             )
@@ -977,11 +1068,8 @@ class AgentExecutionKernel:
                 or actual_journal_event != expected_journal_event
             ):
                 raise KernelError("journal_corrupt") from None
-            if outcome == "succeeded" and post_reason is not None:
-                raise KernelError("journal_finalization_ambiguous") from None
-            raise KernelError("journal_conflict") from None
+            raise KernelError("journal_finalization_ambiguous") from None
 
-        post_reason = self._cancellation_reason(request.limits, start_ms)
         actual_journal_receipt = _journal_record_bytes(
             journal_receipt, expected_format=AGENT_EXECUTION_RECEIPT_FORMAT
         )
@@ -993,6 +1081,7 @@ class AgentExecutionKernel:
             or actual_journal_event != expected_journal_event
         ):
             raise KernelError("journal_corrupt") from None
+        post_reason = self._cancellation_reason(request.limits, start_ms)
         if outcome == "succeeded" and post_reason is not None:
             raise KernelError("journal_finalization_ambiguous")
         events.append(receipt_event)

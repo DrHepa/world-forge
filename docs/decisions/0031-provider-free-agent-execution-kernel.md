@@ -3,6 +3,10 @@
 - Status: accepted
 - Date: 2026-08-24
 
+ADR-0032 later adds the private durable journal boundary and supersedes only
+the failed-journal follow-up rule: any begin, append, or finalization exception
+is treated as ambiguous and causes no further journal write.
+
 ## Context
 
 ADR-0030 publishes five immutable Agent Harness lineage contracts but does not

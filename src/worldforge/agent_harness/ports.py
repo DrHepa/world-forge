@@ -105,6 +105,16 @@ class MemoryProposalPort(Protocol):
 
 
 class ExecutionJournal(Protocol):
+    def begin_execution(
+        self,
+        execution_id: str,
+        log_id: str,
+        activation: dict[str, object],
+        grant: dict[str, object],
+        *,
+        request_fingerprint: str | None,
+    ) -> bool: ...
+
     def append_event(
         self,
         execution_id: str,
@@ -112,6 +122,7 @@ class ExecutionJournal(Protocol):
         *,
         expected_sequence: int,
         expected_previous_hash: str | None,
+        expected_generation: int,
     ) -> None: ...
 
     def finalize(
@@ -122,6 +133,7 @@ class ExecutionJournal(Protocol):
         *,
         expected_sequence: int,
         expected_previous_hash: str | None,
+        expected_generation: int,
     ) -> None: ...
 
 

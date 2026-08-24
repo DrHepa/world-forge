@@ -141,6 +141,8 @@ class AgentExecutionKernelTests(unittest.TestCase):
         self.assertEqual(
             {
                 "AgentExecutionKernel",
+                "AgentExecutionCoordinator",
+                "AgentEventLog",
                 "CapabilityBroker",
                 "ExecutionLimits",
                 "ExecutionRequest",
@@ -171,6 +173,106 @@ class AgentExecutionKernelTests(unittest.TestCase):
         self.assertEqual("receipt_kernel_01", aggregate.receipt["receipt_id"])
         self.assertEqual(journal.receipt, result.receipt)
         self.assertEqual("PRIVATE_RESULT", result.private_output)
+
+    def test_journal_begin_is_first_and_binds_only_closed_request_evidence(self) -> None:
+        activation, grant = _documents()
+        provider = FakeProvider(
+            [ProviderTurnResult(private_output="PRIVATE_RESULT", usage=_usage(), completed=True)]
+        )
+        kernel, journal = _kernel(provider)
+        result = kernel.execute(_request(activation, grant))
+        self.assertEqual("succeeded", result.outcome)
+        self.assertEqual("begin", journal.operations[0])
+        self.assertEqual(
+            (str(activation["execution_id"]), "log_kernel_01"),
+            journal.begin_calls[0][:2],
+        )
+        self.assertEqual(activation, journal.begin_calls[0][2])
+        self.assertEqual(grant, journal.begin_calls[0][3])
+        self.assertRegex(journal.begin_calls[0][4], r"^[0-9a-f]{64}$")
+        self.assertNotIn("PRIVATE_INPUT", json.dumps(journal.begin_calls[0]))
+
+    def test_cancellation_after_durable_begin_precedes_broker_and_provider(self) -> None:
+        activation, grant = _documents()
+        token = FakeCancellation()
+
+        class CancellingBeginJournal(FakeJournal):
+            def begin_execution(self, *args, **kwargs):
+                result = super().begin_execution(*args, **kwargs)
+                token.cancelled = True
+                return result
+
+        provider = FakeProvider([])
+        journal = CancellingBeginJournal()
+        kernel, _ = _kernel(provider, cancellation=token, journal=journal)
+        result = kernel.execute(_request(activation, grant))
+        self.assertEqual("cancelled", result.outcome)
+        self.assertEqual([], provider.requests)
+        self.assertEqual(
+            ["begin", "append", "finalize"],
+            journal.operations,
+        )
+
+    def test_duplicate_or_ambiguous_begin_never_reexecutes_or_writes_later_records(self) -> None:
+        activation, grant = _documents()
+        for begin_result, expected in (
+            (False, "execution_already_recorded"),
+            (ValueError(), "journal_begin_ambiguous"),
+        ):
+            with self.subTest(expected=expected):
+                journal = FakeJournal()
+                journal.begin_result = begin_result
+                provider = FakeProvider(
+                    [ProviderTurnResult("PRIVATE_RESULT", _usage(), completed=True)]
+                )
+                kernel, _ = _kernel(provider, journal=journal)
+                with self.assertRaisesRegex(KernelError, expected):
+                    kernel.execute(_request(activation, grant))
+                self.assertEqual([], provider.requests)
+                self.assertEqual(["begin"], journal.operations)
+                self.assertEqual([], journal.events)
+                self.assertIsNone(journal.receipt)
+
+    def test_begin_mutation_is_detected_and_request_fingerprint_binds_private_hash(self) -> None:
+        activation, grant = _documents()
+
+        class MutatingJournal(FakeJournal):
+            def begin_execution(self, execution_id, log_id, activation, grant, **kwargs):
+                activation["execution_id"] = "execution_forged"
+                return super().begin_execution(execution_id, log_id, activation, grant, **kwargs)
+
+        kernel, journal = _kernel(FakeProvider([]), journal=MutatingJournal())
+        with self.assertRaisesRegex(KernelError, "journal_corrupt"):
+            kernel.execute(_request(activation, grant))
+        self.assertEqual(["begin"], journal.operations)
+
+        fingerprints = []
+        for private_input in ({"secret": "first"}, {"secret": "second"}):
+            local_journal = FakeJournal()
+            local_kernel, _ = _kernel(
+                FakeProvider([ProviderTurnResult("done", _usage(), completed=True)]),
+                journal=local_journal,
+            )
+            local_kernel.execute(replace(_request(activation, grant), private_input=private_input))
+            fingerprints.append(local_journal.begin_calls[0][4])
+        self.assertNotEqual(*fingerprints)
+
+        private_input = {"value": "original"}
+
+        class InputMutatingBeginJournal(FakeJournal):
+            def begin_execution(self, *args, **kwargs):
+                result = super().begin_execution(*args, **kwargs)
+                private_input["value"] = "MUTATED_DURING_BEGIN"
+                return result
+
+        mutating_journal = InputMutatingBeginJournal()
+        mutating_provider = FakeProvider([ProviderTurnResult("done", _usage(), completed=True)])
+        mutating_kernel, _ = _kernel(
+            mutating_provider,
+            journal=mutating_journal,
+        )
+        mutating_kernel.execute(replace(_request(activation, grant), private_input=private_input))
+        self.assertEqual({"value": "original"}, mutating_provider.requests[0].private_input)
 
     def test_fresh_history_and_caller_isolation_hold_across_reuse(self) -> None:
         activation, grant = _documents()
@@ -723,7 +825,7 @@ class AgentExecutionKernelTests(unittest.TestCase):
             self.assertIn("execution.cancel_requested", public)
             self.assertNotIn("PRIVATE_", public)
 
-    def test_journal_exception_then_cancellation_records_cancel_when_journal_recovers(
+    def test_journal_exception_then_cancellation_stops_without_further_unsafe_writes(
         self,
     ) -> None:
         activation, grant = _documents()
@@ -739,17 +841,16 @@ class AgentExecutionKernelTests(unittest.TestCase):
                     raise ValueError("PRIVATE_TRANSIENT_APPEND")
                 super().append_event(execution_id, event, **kwargs)
 
-        result = _kernel(
+        kernel, journal = _kernel(
             FakeProvider([ProviderTurnResult("unused", _usage(), completed=True)]),
             cancellation=token,
             journal=CancellingFailOnceJournal(),
-        )[0].execute(_request(activation, grant))
-        self.assertEqual("cancelled", result.outcome)
-        self.assertEqual(
-            ["execution.cancel_requested", "execution.receipt_recorded"],
-            [event["event_type"] for event in result.events],
         )
-        self.assertNotIn("PRIVATE_TRANSIENT_APPEND", json.dumps(result.receipt))
+        with self.assertRaisesRegex(KernelError, "journal_append_ambiguous"):
+            kernel.execute(_request(activation, grant))
+        self.assertEqual(["begin"], journal.operations)
+        self.assertEqual([], journal.events)
+        self.assertIsNone(journal.receipt)
 
     def test_provider_exception_then_exact_deadline_records_deadline_cancellation(self) -> None:
         activation, grant = _documents()
@@ -977,6 +1078,8 @@ class AgentExecutionKernelTests(unittest.TestCase):
                 )
                 self.assertEqual(result.receipt, journal.receipt)
                 self.assertEqual(list(result.events), journal.events)
+                if label == "invalid_private_input":
+                    self.assertIsNone(journal.begin_calls[0][4])
                 self.assertEqual(
                     canonical_agent_harness_hash(result.receipt),
                     result.receipt["content_hash"],
@@ -2013,8 +2116,133 @@ class AgentExecutionKernelTests(unittest.TestCase):
         )
         with self.assertRaises(KernelError) as raised:
             kernel.execute(_request(activation, grant))
-        self.assertEqual("journal_conflict", raised.exception.reason_code)
+        self.assertEqual("journal_append_ambiguous", raised.exception.reason_code)
         self.assertIsNone(journal.receipt)
+
+    def test_journal_ambiguity_wins_over_secondary_clock_failure(self) -> None:
+        activation, grant = _documents()
+
+        class SecondaryFailClock(FakeClock):
+            def __init__(self) -> None:
+                super().__init__()
+                self.fail = False
+
+            def now_ms(self) -> int:
+                if self.fail:
+                    raise RuntimeError("PRIVATE_SECONDARY_CLOCK_FAILURE")
+                return super().now_ms()
+
+        append_clock = SecondaryFailClock()
+
+        class FailingAppendJournal(FakeJournal):
+            def append_event(self, execution_id, event, **kwargs):
+                append_clock.fail = True
+                super().append_event(execution_id, event, **kwargs)
+
+        append_journal = FailingAppendJournal()
+        append_journal.fail_next = True
+        append_provider = FakeProvider(
+            [ProviderTurnResult("must_not_run", _usage(), completed=True)]
+        )
+        append_kernel, _ = _kernel(
+            append_provider,
+            journal=append_journal,
+            clock=append_clock,
+        )
+        with self.assertRaises(KernelError) as raised:
+            append_kernel.execute(_request(activation, grant))
+        self.assertEqual("journal_append_ambiguous", raised.exception.reason_code)
+        self.assertEqual(["begin", "append"], append_journal.operations)
+        self.assertEqual([], append_journal.events)
+        self.assertIsNone(append_journal.receipt)
+        self.assertEqual([], append_provider.requests)
+
+        finalize_clock = SecondaryFailClock()
+
+        class FailingFinalizeJournal(FakeJournal):
+            def finalize(self, execution_id, receipt, event, **kwargs):
+                self.operations.append("finalize")
+                finalize_clock.fail = True
+                raise ValueError("PRIVATE_FINALIZATION_FAILURE")
+
+        finalize_journal = FailingFinalizeJournal()
+        finalize_provider = FakeProvider(
+            [ProviderTurnResult("must_not_return", _usage(), completed=True)]
+        )
+        finalize_kernel, _ = _kernel(
+            finalize_provider,
+            journal=finalize_journal,
+            clock=finalize_clock,
+        )
+        with self.assertRaises(KernelError) as raised:
+            finalize_kernel.execute(_request(activation, grant))
+        self.assertEqual("journal_finalization_ambiguous", raised.exception.reason_code)
+        self.assertEqual("finalize", finalize_journal.operations[-1])
+        self.assertEqual(1, finalize_journal.operations.count("finalize"))
+        self.assertIsNone(finalize_journal.receipt)
+        self.assertEqual(1, len(finalize_provider.requests))
+
+    def test_successful_journal_mutation_is_checked_before_a_failing_clock(self) -> None:
+        activation, grant = _documents()
+
+        class SecondaryFailClock(FakeClock):
+            def __init__(self) -> None:
+                super().__init__()
+                self.fail = False
+
+            def now_ms(self) -> int:
+                if self.fail:
+                    raise RuntimeError("PRIVATE_SECONDARY_CLOCK_FAILURE")
+                return super().now_ms()
+
+        append_clock = SecondaryFailClock()
+
+        class MutatingAppendJournal(FakeJournal):
+            def append_event(self, execution_id, event, **kwargs):
+                super().append_event(execution_id, event, **kwargs)
+                event["subject"]["id"] = "private_mutation"
+                append_clock.fail = True
+
+        append_journal = MutatingAppendJournal()
+        append_provider = FakeProvider(
+            [ProviderTurnResult("must_not_run", _usage(), completed=True)]
+        )
+        append_kernel, _ = _kernel(
+            append_provider,
+            journal=append_journal,
+            clock=append_clock,
+        )
+        with self.assertRaises(KernelError) as raised:
+            append_kernel.execute(_request(activation, grant))
+        self.assertEqual("journal_corrupt", raised.exception.reason_code)
+        self.assertEqual(["begin", "append"], append_journal.operations)
+        self.assertEqual([], append_provider.requests)
+        self.assertIsNone(append_journal.receipt)
+
+        finalize_clock = SecondaryFailClock()
+
+        class MutatingFinalizeJournal(FakeJournal):
+            def finalize(self, execution_id, receipt, event, **kwargs):
+                super().finalize(execution_id, receipt, event, **kwargs)
+                receipt["outcome"] = "failed"
+                event["subject"]["content_hash"] = "f" * 64
+                finalize_clock.fail = True
+
+        finalize_journal = MutatingFinalizeJournal()
+        finalize_provider = FakeProvider(
+            [ProviderTurnResult("must_not_return", _usage(), completed=True)]
+        )
+        finalize_kernel, _ = _kernel(
+            finalize_provider,
+            journal=finalize_journal,
+            clock=finalize_clock,
+        )
+        with self.assertRaises(KernelError) as raised:
+            finalize_kernel.execute(_request(activation, grant))
+        self.assertEqual("journal_corrupt", raised.exception.reason_code)
+        self.assertEqual("finalize", finalize_journal.operations[-1])
+        self.assertEqual(1, finalize_journal.operations.count("finalize"))
+        self.assertEqual(1, len(finalize_provider.requests))
 
     def test_journal_append_mutation_cannot_hide_behind_overloaded_equality(self) -> None:
         activation, grant = _documents()
@@ -2173,7 +2401,7 @@ class AgentExecutionKernelTests(unittest.TestCase):
         )
         with self.assertRaises(KernelError) as raised:
             kernel.execute(_request(activation, grant))
-        self.assertEqual("journal_conflict", raised.exception.reason_code)
+        self.assertEqual("journal_finalization_ambiguous", raised.exception.reason_code)
         self.assertNotIn(
             "PRIVATE_ATOMIC_FAILURE",
             "".join(traceback.format_exception_only(raised.exception)),

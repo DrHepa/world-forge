@@ -106,6 +106,34 @@ class FakeJournal(ExecutionJournal):
         self.events: list[dict[str, object]] = []
         self.receipt: dict[str, object] | None = None
         self.fail_next = False
+        self.operations: list[str] = []
+        self.begin_calls: list[
+            tuple[str, str, dict[str, object], dict[str, object], str | None]
+        ] = []
+        self.begin_result: bool | BaseException = True
+
+    def begin_execution(
+        self,
+        execution_id: str,
+        log_id: str,
+        activation: dict[str, object],
+        grant: dict[str, object],
+        *,
+        request_fingerprint: str | None,
+    ) -> bool:
+        self.operations.append("begin")
+        self.begin_calls.append(
+            (
+                execution_id,
+                log_id,
+                copy.deepcopy(activation),
+                copy.deepcopy(grant),
+                request_fingerprint,
+            )
+        )
+        if isinstance(self.begin_result, BaseException):
+            raise self.begin_result
+        return self.begin_result
 
     def append_event(
         self,
@@ -114,11 +142,13 @@ class FakeJournal(ExecutionJournal):
         *,
         expected_sequence: int,
         expected_previous_hash: str | None,
+        expected_generation: int,
     ) -> None:
+        self.operations.append("append")
         if self.fail_next:
             self.fail_next = False
             raise ValueError("private tampered journal head")
-        if expected_sequence != len(self.events):
+        if expected_sequence != len(self.events) or expected_generation != len(self.events):
             raise ValueError("private sequence mismatch")
         actual = None if not self.events else self.events[-1]["content_hash"]
         if expected_previous_hash != actual:
@@ -135,8 +165,14 @@ class FakeJournal(ExecutionJournal):
         *,
         expected_sequence: int,
         expected_previous_hash: str | None,
+        expected_generation: int,
     ) -> None:
-        if self.receipt is not None or expected_sequence != len(self.events):
+        self.operations.append("finalize")
+        if (
+            self.receipt is not None
+            or expected_sequence != len(self.events)
+            or expected_generation != len(self.events)
+        ):
             raise ValueError("private finalization conflict")
         actual = None if not self.events else self.events[-1]["content_hash"]
         if expected_previous_hash != actual or event["execution_id"] != execution_id:

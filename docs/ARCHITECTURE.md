@@ -595,10 +595,13 @@ preference entries. It stores no memory text, prompt, transcript, rationale,
 provider payload, executable content, or operational path. The artifact neither
 mutates Engram nor infers that projected content is true.
 
-Slice 2A adds only closed, identity/evidence-only plan, observation, and report
-documents for an optional codebase-memory comparison. Their validators resolve
-the exact plan and complete task/repetition/arm observation inventory, but do not
-run the benchmark, query or refresh an index, compute report metrics, evaluate
-gates, or authorize adoption. The fixtures are synthetic and `not_evaluable`;
-no actual benchmark or adoption decision has been run. See
+Slice 2B retains the closed, identity/evidence-only plan, observation, and report
+boundary for an optional codebase-memory comparison and adds a pure evaluator
+plus an explicit-input, atomic no-replace CLI. Validators resolve the exact plan
+and complete task/repetition/arm observation inventory. The evaluator computes
+only deterministic metrics and immutable gates from supplied recorded evidence;
+it does not run the benchmark, query or refresh an index, inspect a checkout,
+score content, or contact an MCP/provider. The fixtures are synthetic and
+`not_evaluable`; no actual A/B/C benchmark has been run and no candidate has
+been adopted. See
 [`CODEBASE_MEMORY_BENCHMARK.md`](CODEBASE_MEMORY_BENCHMARK.md).

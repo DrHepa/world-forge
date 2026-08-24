@@ -5,6 +5,12 @@ import { fileURLToPath } from "node:url";
 
 const MAX_DOCUMENT_BYTES = 1024 * 1024;
 const MAX_JSON_DEPTH = 64;
+const MAX_BENCHMARK_TRIALS_PER_ARM = 256;
+const MAX_TOKEN_COUNTER = 10_000_000;
+const MAX_CRITICAL_OMISSIONS_PER_OBSERVATION = 1_000_000;
+const MAX_NET_TOKENS_PER_ARM = 5_120_000_000;
+const MAX_CRITICAL_OMISSIONS_PER_ARM = 256_000_000;
+const MIN_REDUCTION_BASIS_POINTS = -51_199_999_990_000;
 const ARMS = Object.freeze([
   "A_direct_reads",
   "B_existing_memory",
@@ -211,7 +217,9 @@ function hasCoherentPlan(value) {
         Number.isSafeInteger(task.repetitions) &&
         task.repetitions >= 1 &&
         task.repetitions <= 64,
-    )
+    ) &&
+    value.task_set.reduce((total, task) => total + task.repetitions, 0) <=
+      MAX_BENCHMARK_TRIALS_PER_ARM
   );
 }
 
@@ -222,14 +230,16 @@ function hasCoherentObservation(value) {
     value.source_mode !== SOURCE_MODES[value.arm] ||
     !["completed", "failed", "incomplete", "invalid"].includes(value.state) ||
     !isRecord(measurements) ||
+    ![measurements.input_tokens, measurements.output_tokens, measurements.cached_input_tokens].every(
+      (item) => Number.isSafeInteger(item) && item >= 0 && item <= MAX_TOKEN_COUNTER,
+    ) ||
     ![
-      measurements.input_tokens,
-      measurements.output_tokens,
-      measurements.cached_input_tokens,
       measurements.task_wall_ms,
       measurements.quality_basis_points,
-      measurements.critical_omission_count,
     ].every((item) => Number.isSafeInteger(item) && item >= 0) ||
+    !Number.isSafeInteger(measurements.critical_omission_count) ||
+    measurements.critical_omission_count < 0 ||
+    measurements.critical_omission_count > MAX_CRITICAL_OMISSIONS_PER_OBSERVATION ||
     measurements.quality_basis_points > 10000 ||
     measurements.cached_input_tokens > measurements.input_tokens
   ) {
@@ -238,12 +248,11 @@ function hasCoherentObservation(value) {
   const completed = value.state === "completed";
   if (
     !reasonCodesAreCoherent(value.reason_codes, !completed) ||
-    (completed &&
-      [
-        measurements.final_direct_verification,
-        measurements.tree_guard,
-        measurements.egress_guard,
-      ].some((guard) => guard !== "pass"))
+    [
+      measurements.final_direct_verification,
+      measurements.tree_guard,
+      measurements.egress_guard,
+    ].some((guard) => !["pass", "fail", "unobserved"].includes(guard))
   ) {
     return false;
   }
@@ -287,7 +296,7 @@ function hasCoherentObservation(value) {
 function hasCoherentReport(value) {
   if (
     !Array.isArray(value.observation_refs) ||
-    !sortedUnique(value.observation_refs.map((item) => item?.id), 1, 12288) ||
+    !sortedUnique(value.observation_refs.map((item) => item?.id), 1, 768) ||
     !Array.isArray(value.arm_summaries) ||
     !equalArrays(
       value.arm_summaries.map((summary) => summary?.arm),
@@ -305,6 +314,15 @@ function hasCoherentReport(value) {
     value.arm_summaries.some(
       (summary) =>
         !isRecord(summary) ||
+        !Number.isSafeInteger(summary.observation_count) ||
+        summary.observation_count < 1 ||
+        summary.observation_count > MAX_BENCHMARK_TRIALS_PER_ARM ||
+        !Number.isSafeInteger(summary.total_net_tokens) ||
+        summary.total_net_tokens < 0 ||
+        summary.total_net_tokens > MAX_NET_TOKENS_PER_ARM ||
+        !Number.isSafeInteger(summary.critical_omission_count) ||
+        summary.critical_omission_count < 0 ||
+        summary.critical_omission_count > MAX_CRITICAL_OMISSIONS_PER_ARM ||
         (summary.arm !== "C_memory_candidate_index" &&
           summary.incremental_refresh_p95_ms !== null),
     ) ||
@@ -322,11 +340,54 @@ function hasCoherentReport(value) {
   if (!reportReasons || !["adopt", "reject", "not_evaluable"].includes(value.decision)) {
     return false;
   }
+  if (value.decision === "not_evaluable") {
+    return (
+      value.reason_codes.length > 0 &&
+      value.gates.every(
+        (gate) =>
+          gate.measured_value === null &&
+          gate.passed === false &&
+          equalArrays(gate.reason_codes, ["not_measured"]),
+      )
+    );
+  }
+  const measuredDomainsValid = value.gates.every((gate, index) => {
+    const measured = gate.measured_value;
+    if (index === 0 || index === 4) {
+      return (
+        Number.isSafeInteger(measured) &&
+        measured >= MIN_REDUCTION_BASIS_POINTS &&
+        measured <= 10000
+      );
+    }
+    if (index === 1 || index === 2) {
+      return Number.isSafeInteger(measured) && measured >= 0;
+    }
+    if (index === 3) {
+      return Number.isSafeInteger(measured) && measured >= -10000 && measured <= 10000;
+    }
+    return typeof measured === "boolean";
+  });
+  if (!measuredDomainsValid) {
+    return false;
+  }
+  const expectedPasses = value.gates.map((gate, index) => {
+    const measured = gate.measured_value;
+    if (index >= 5) return measured;
+    if (index === 0) return measured >= 3000;
+    if (index === 1) return measured <= 0;
+    if (index === 2) return measured <= 5000;
+    if (index === 3) return measured <= 200;
+    return measured >= 5000;
+  });
+  if (
+    value.gates.some((gate, index) => gate.passed !== expectedPasses[index])
+  ) {
+    return false;
+  }
   return value.decision === "adopt"
     ? allPassed && value.reason_codes.length === 0
-    : value.decision === "reject"
-      ? !allPassed
-      : value.reason_codes.length > 0;
+    : !allPassed;
 }
 
 export function hasCoherentCodebaseMemoryBenchmarkContract(value) {
@@ -372,7 +433,157 @@ async function selfTest() {
       throw new Error(`semantic helper accepted tampered fixture ${name}`);
     }
   }
+  const overTrialPlan = JSON.parse(
+    await readFile(path.join(fixtureRoot, "plan.json"), "utf8"),
+  );
+  const taskTemplate = overTrialPlan.task_set[0];
+  const maximumTrialTasks = [64, 64, 64, 64].map((repetitions, index) => ({
+    ...taskTemplate,
+    task_id: `task_${String(index).padStart(2, "0")}`,
+    repetitions,
+  }));
+  overTrialPlan.task_set = maximumTrialTasks;
+  overTrialPlan.content_hash = canonicalCodebaseMemoryBenchmarkHash(overTrialPlan);
+  if (!hasCoherentCodebaseMemoryBenchmarkContract(overTrialPlan)) {
+    throw new Error("semantic helper rejected exactly 256 trials per arm");
+  }
+  overTrialPlan.task_set = [
+    ...maximumTrialTasks,
+    { ...taskTemplate, task_id: "task_04", repetitions: 1 },
+  ];
+  overTrialPlan.content_hash = canonicalCodebaseMemoryBenchmarkHash(overTrialPlan);
+  if (hasCoherentCodebaseMemoryBenchmarkContract(overTrialPlan)) {
+    throw new Error("semantic helper accepted more than 256 trials per arm");
+  }
   const report = JSON.parse(await readFile(path.join(fixtureRoot, "report.json"), "utf8"));
+  const maximumSummaryReport = structuredClone(report);
+  for (const summary of maximumSummaryReport.arm_summaries) {
+    summary.observation_count = 256;
+    summary.total_net_tokens = 5_120_000_000;
+    summary.critical_omission_count = 256_000_000;
+  }
+  maximumSummaryReport.content_hash =
+    canonicalCodebaseMemoryBenchmarkHash(maximumSummaryReport);
+  if (!hasCoherentCodebaseMemoryBenchmarkContract(maximumSummaryReport)) {
+    throw new Error("semantic helper rejected exact arm-summary maxima");
+  }
+  for (const [field, value] of [
+    ["observation_count", 257],
+    ["total_net_tokens", 5_120_000_001],
+    ["critical_omission_count", 256_000_001],
+  ]) {
+    const oversizedSummary = structuredClone(maximumSummaryReport);
+    oversizedSummary.arm_summaries[0][field] = value;
+    oversizedSummary.content_hash = canonicalCodebaseMemoryBenchmarkHash(oversizedSummary);
+    if (hasCoherentCodebaseMemoryBenchmarkContract(oversizedSummary)) {
+      throw new Error(`semantic helper accepted oversized arm-summary ${field}`);
+    }
+  }
+  const overReferenceReport = structuredClone(report);
+  const referenceTemplate = report.observation_refs[0];
+  const maximumReferences = Array.from({ length: 768 }, (_, index) => ({
+    ...referenceTemplate,
+    id: `observation_${String(index).padStart(4, "0")}`,
+  }));
+  overReferenceReport.observation_refs = maximumReferences;
+  overReferenceReport.content_hash = canonicalCodebaseMemoryBenchmarkHash(overReferenceReport);
+  if (!hasCoherentCodebaseMemoryBenchmarkContract(overReferenceReport)) {
+    throw new Error("semantic helper rejected exactly 768 observation references");
+  }
+  overReferenceReport.observation_refs = [
+    ...maximumReferences,
+    { ...referenceTemplate, id: "observation_0768" },
+  ];
+  overReferenceReport.content_hash = canonicalCodebaseMemoryBenchmarkHash(overReferenceReport);
+  if (hasCoherentCodebaseMemoryBenchmarkContract(overReferenceReport)) {
+    throw new Error("semantic helper accepted more than 768 observation references");
+  }
+  const measuredNotEvaluable = structuredClone(report);
+  measuredNotEvaluable.gates[0].measured_value = 0;
+  measuredNotEvaluable.content_hash = canonicalCodebaseMemoryBenchmarkHash(measuredNotEvaluable);
+  if (hasCoherentCodebaseMemoryBenchmarkContract(measuredNotEvaluable)) {
+    throw new Error("semantic helper accepted a measured not_evaluable gate");
+  }
+  const adopt = structuredClone(report);
+  adopt.decision = "adopt";
+  adopt.reason_codes = [];
+  const measuredValues = [3000, 0, 5000, 200, 5000, true, true];
+  adopt.gates.forEach((gate, index) => {
+    gate.measured_value = measuredValues[index];
+    gate.passed = true;
+    gate.reason_codes = [];
+  });
+  adopt.content_hash = canonicalCodebaseMemoryBenchmarkHash(adopt);
+  if (!hasCoherentCodebaseMemoryBenchmarkContract(adopt)) {
+    throw new Error("semantic helper rejected exact-threshold adoption");
+  }
+  adopt.gates[0].measured_value = 2999;
+  adopt.content_hash = canonicalCodebaseMemoryBenchmarkHash(adopt);
+  if (hasCoherentCodebaseMemoryBenchmarkContract(adopt)) {
+    throw new Error("semantic helper accepted a gate result that contradicted its threshold");
+  }
+  adopt.gates[0].measured_value = 3000;
+  adopt.content_hash = canonicalCodebaseMemoryBenchmarkHash(adopt);
+  const negativeOmissions = structuredClone(report);
+  negativeOmissions.decision = "reject";
+  negativeOmissions.reason_codes = ["critical_omissions_exceeded"];
+  negativeOmissions.gates.forEach((gate, index) => {
+    gate.measured_value = measuredValues[index];
+    gate.passed = true;
+    gate.reason_codes = [];
+  });
+  negativeOmissions.gates[1].measured_value = -1;
+  negativeOmissions.gates[1].passed = false;
+  negativeOmissions.gates[1].reason_codes = ["critical_omissions_exceeded"];
+  negativeOmissions.content_hash = canonicalCodebaseMemoryBenchmarkHash(negativeOmissions);
+  if (hasCoherentCodebaseMemoryBenchmarkContract(negativeOmissions)) {
+    throw new Error("semantic helper accepted negative critical omissions");
+  }
+  const invalidGateValues = new Map([
+    [0, [MIN_REDUCTION_BASIS_POINTS - 1, 10001]],
+    [1, [-1]],
+    [2, [-1]],
+    [3, [-10001, 10001]],
+    [4, [MIN_REDUCTION_BASIS_POINTS - 1, 10001]],
+    [5, [1]],
+    [6, [0]],
+  ]);
+  for (const [gateIndex, invalidValues] of invalidGateValues) {
+    for (const invalidValue of invalidValues) {
+      const invalidGate = structuredClone(adopt);
+      invalidGate.gates[gateIndex].measured_value = invalidValue;
+      invalidGate.content_hash = canonicalCodebaseMemoryBenchmarkHash(invalidGate);
+      if (hasCoherentCodebaseMemoryBenchmarkContract(invalidGate)) {
+        throw new Error(`semantic helper accepted invalid gate ${gateIndex} measurement`);
+      }
+    }
+  }
+  const completedObservation = JSON.parse(
+    await readFile(path.join(fixtureRoot, "observation-navigation-01-a-01.json"), "utf8"),
+  );
+  completedObservation.measurements.tree_guard = "fail";
+  completedObservation.content_hash = canonicalCodebaseMemoryBenchmarkHash(completedObservation);
+  if (!hasCoherentCodebaseMemoryBenchmarkContract(completedObservation)) {
+    throw new Error("semantic helper rejected explicit completed tree failure evidence");
+  }
+  completedObservation.measurements.input_tokens = MAX_TOKEN_COUNTER + 1;
+  completedObservation.content_hash = canonicalCodebaseMemoryBenchmarkHash(completedObservation);
+  if (hasCoherentCodebaseMemoryBenchmarkContract(completedObservation)) {
+    throw new Error("semantic helper accepted an oversized token counter");
+  }
+  completedObservation.measurements.input_tokens = MAX_TOKEN_COUNTER;
+  completedObservation.measurements.critical_omission_count =
+    MAX_CRITICAL_OMISSIONS_PER_OBSERVATION;
+  completedObservation.content_hash = canonicalCodebaseMemoryBenchmarkHash(completedObservation);
+  if (!hasCoherentCodebaseMemoryBenchmarkContract(completedObservation)) {
+    throw new Error("semantic helper rejected maximum critical omission count");
+  }
+  completedObservation.measurements.critical_omission_count =
+    MAX_CRITICAL_OMISSIONS_PER_OBSERVATION + 1;
+  completedObservation.content_hash = canonicalCodebaseMemoryBenchmarkHash(completedObservation);
+  if (hasCoherentCodebaseMemoryBenchmarkContract(completedObservation)) {
+    throw new Error("semantic helper accepted an oversized critical omission count");
+  }
   const oversized = structuredClone(report);
   oversized.reason_codes = [`a${"b".repeat(MAX_DOCUMENT_BYTES)}`];
   oversized.content_hash = canonicalCodebaseMemoryBenchmarkHash(oversized);

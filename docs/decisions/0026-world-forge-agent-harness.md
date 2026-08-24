@@ -39,11 +39,13 @@ omissions; incremental p95 latency of at most five seconds; zero tracked
 changes; and zero unauthorized egress.
 
 This ADR defines no executable provider adapter, event store, worker, Studio
-protocol, or UI. Slice 2A later publishes only closed recorded-result plan,
-observation, and report schemas for the optional codebase-memory benchmark.
-Those documents do not run or evaluate a benchmark, contact the candidate, or
-authorize adoption. The committed evidence is synthetic and `not_evaluable`;
-no actual benchmark or adoption decision has been run.
+protocol, or UI. Slice 2B retains the closed recorded-result plan, observation,
+and report schemas for the optional codebase-memory benchmark and adds only a
+pure deterministic evaluator plus an explicit-input atomic no-replace CLI.
+Those surfaces evaluate supplied evidence only: they do not run a benchmark,
+contact the candidate, inspect the checkout, or independently authorize
+adoption. The committed evidence is synthetic and `not_evaluable`; no actual
+A/B/C benchmark has been run and no candidate has been adopted.
 
 ## Consequences
 

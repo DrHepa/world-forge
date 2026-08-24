@@ -540,7 +540,9 @@
       "version": 1
     },
     {
-      "cli_commands": [],
+      "cli_commands": [
+        "evaluate-codebase-memory-benchmark"
+      ],
       "docs": [
         "README.md",
         "docs/ARCHITECTURE.md",
@@ -560,6 +562,7 @@
       "kind": "json-schema",
       "m5_phases": [],
       "python_symbols": [
+        "worldforge.codebase_memory_benchmark:evaluate_codebase_memory_benchmark",
         "worldforge.codebase_memory_benchmark:validate_codebase_memory_benchmark_document",
         "worldforge.codebase_memory_benchmark:validate_codebase_memory_benchmark_documents"
       ],
@@ -571,7 +574,9 @@
       "version": 1
     },
     {
-      "cli_commands": [],
+      "cli_commands": [
+        "evaluate-codebase-memory-benchmark"
+      ],
       "docs": [
         "README.md",
         "docs/ARCHITECTURE.md",
@@ -586,6 +591,7 @@
       "kind": "json-schema",
       "m5_phases": [],
       "python_symbols": [
+        "worldforge.codebase_memory_benchmark:evaluate_codebase_memory_benchmark",
         "worldforge.codebase_memory_benchmark:validate_codebase_memory_benchmark_document",
         "worldforge.codebase_memory_benchmark:validate_codebase_memory_benchmark_documents"
       ],
@@ -597,7 +603,9 @@
       "version": 1
     },
     {
-      "cli_commands": [],
+      "cli_commands": [
+        "evaluate-codebase-memory-benchmark"
+      ],
       "docs": [
         "README.md",
         "docs/ARCHITECTURE.md",
@@ -612,6 +620,7 @@
       "kind": "json-schema",
       "m5_phases": [],
       "python_symbols": [
+        "worldforge.codebase_memory_benchmark:evaluate_codebase_memory_benchmark",
         "worldforge.codebase_memory_benchmark:validate_codebase_memory_benchmark_document",
         "worldforge.codebase_memory_benchmark:validate_codebase_memory_benchmark_documents"
       ],

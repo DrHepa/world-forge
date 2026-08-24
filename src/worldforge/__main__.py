@@ -33,7 +33,7 @@ from worldforge import (
 )
 from worldforge.asset_contracts import validate_asset_bibles
 from worldforge.asset_inventory import derive_asset_inventory
-from worldforge.asset_io import AssetContractError, read_json_object
+from worldforge.asset_io import AssetContractError, read_json_object, write_bytes_atomic
 from worldforge.asset_manifest_v3 import bind_asset_plan, finalize_asset_release
 from worldforge.asset_processing import process_asset_recipe, verify_processing_receipt
 from worldforge.asset_production import create_production_request, validate_production_receipt
@@ -46,6 +46,20 @@ from worldforge.bundle import (
     verify_runtime_bundle,
 )
 from worldforge.claims import validate_claims
+from worldforge.codebase_memory_benchmark import (
+    CODEBASE_MEMORY_BENCHMARK_ARMS,
+    CODEBASE_MEMORY_BENCHMARK_OBSERVATION_FORMAT,
+    CODEBASE_MEMORY_BENCHMARK_PLAN_FORMAT,
+    MAX_CODEBASE_MEMORY_BENCHMARK_OBSERVATION_REFERENCES,
+    CodebaseMemoryBenchmarkError,
+    canonical_codebase_memory_benchmark_bytes,
+    evaluate_codebase_memory_benchmark,
+    validate_codebase_memory_benchmark_document,
+)
+from worldforge.codebase_memory_benchmark_input import (
+    CodebaseMemoryBenchmarkInputError,
+    read_codebase_memory_benchmark_json_object,
+)
 from worldforge.compiler import CompilationError, compile_project
 from worldforge.composed_game import ComposedGameError, import_composed_bundle
 from worldforge.contract_catalog import ContractCatalogError, audit_contracts
@@ -1059,6 +1073,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     audit = commands.add_parser("audit-runtime", help="reject AI SDK imports in runtime")
     audit.add_argument("runtime_root", type=Path)
+    evaluate_memory = commands.add_parser(
+        "evaluate-codebase-memory-benchmark",
+        help="evaluate explicit recorded benchmark evidence without executing a benchmark",
+    )
+    evaluate_memory.add_argument("plan", type=Path)
+    evaluate_memory.add_argument(
+        "--observation",
+        action="append",
+        type=Path,
+        required=True,
+        help="explicit observation JSON path; repeat for the complete inventory",
+    )
+    evaluate_memory.add_argument("--output", type=Path, required=True)
     audit_contracts_cmd = commands.add_parser(
         "audit-contracts",
         help="audit the machine-readable public contract catalog",
@@ -2231,6 +2258,130 @@ def main() -> int:
             print(
                 f"OK game={args.game_root} runtime={manifest['runtime_version']} "
                 f"hash={manifest['content_hash']}"
+            )
+            return 0
+
+        if args.command == "evaluate-codebase-memory-benchmark":
+            try:
+                plan = validate_codebase_memory_benchmark_document(
+                    read_codebase_memory_benchmark_json_object(args.plan),
+                    expected_format=CODEBASE_MEMORY_BENCHMARK_PLAN_FORMAT,
+                )
+                task_repetitions = {
+                    task["task_id"]: task["repetitions"] for task in plan["task_set"]
+                }
+                expected_observation_count = len(CODEBASE_MEMORY_BENCHMARK_ARMS) * sum(
+                    task_repetitions.values()
+                )
+                if (
+                    expected_observation_count
+                    > MAX_CODEBASE_MEMORY_BENCHMARK_OBSERVATION_REFERENCES
+                    or len(args.observation) != expected_observation_count
+                ):
+                    raise CodebaseMemoryBenchmarkInputError(
+                        "explicit benchmark observation count does not match the plan"
+                    )
+                observation_path_strings: set[str] = set()
+                for path in args.observation:
+                    path_string = str(path)
+                    if path_string in observation_path_strings:
+                        raise CodebaseMemoryBenchmarkInputError(
+                            "explicit benchmark observation paths must be unique"
+                        )
+                    observation_path_strings.add(path_string)
+
+                expected_plan_ref = {
+                    "format": CODEBASE_MEMORY_BENCHMARK_PLAN_FORMAT,
+                    "format_version": plan["format_version"],
+                    "id": plan["benchmark_id"],
+                    "content_hash": plan["content_hash"],
+                }
+                observations = []
+                observation_ids: set[str] = set()
+                observation_keys: set[tuple[str, int, str]] = set()
+                for path in args.observation:
+                    observation = validate_codebase_memory_benchmark_document(
+                        read_codebase_memory_benchmark_json_object(path),
+                        expected_format=CODEBASE_MEMORY_BENCHMARK_OBSERVATION_FORMAT,
+                    )
+                    if observation["plan"] != expected_plan_ref:
+                        raise CodebaseMemoryBenchmarkInputError(
+                            "benchmark observation plan reference does not resolve"
+                        )
+                    task_id = observation["task_id"]
+                    repetition_index = observation["repetition_index"]
+                    if task_id not in task_repetitions:
+                        raise CodebaseMemoryBenchmarkInputError(
+                            "benchmark observation task is not planned"
+                        )
+                    if repetition_index > task_repetitions[task_id]:
+                        raise CodebaseMemoryBenchmarkInputError(
+                            "benchmark observation repetition is not planned"
+                        )
+                    observation_key = (task_id, repetition_index, observation["arm"])
+                    if observation_key in observation_keys:
+                        raise CodebaseMemoryBenchmarkInputError(
+                            "benchmark observation task identity is duplicated"
+                        )
+                    if observation["observation_id"] in observation_ids:
+                        raise CodebaseMemoryBenchmarkInputError(
+                            "benchmark observation identity is duplicated"
+                        )
+                    observation_keys.add(observation_key)
+                    observation_ids.add(observation["observation_id"])
+                    observations.append(observation)
+                report = evaluate_codebase_memory_benchmark(plan, observations)
+            except (
+                CodebaseMemoryBenchmarkError,
+                CodebaseMemoryBenchmarkInputError,
+                MemoryError,
+                OSError,
+            ):
+                print(
+                    json.dumps(
+                        {
+                            "reason_code": "codebase_memory_benchmark_input_invalid",
+                            "status": "error",
+                        },
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                    file=sys.stderr,
+                )
+                return 1
+            try:
+                write_bytes_atomic(
+                    args.output,
+                    canonical_codebase_memory_benchmark_bytes(report),
+                    durable_parent=True,
+                )
+            except (AssetContractError, OSError):
+                print(
+                    json.dumps(
+                        {
+                            "reason_code": "codebase_memory_benchmark_publication_failed",
+                            "status": "error",
+                        },
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                    file=sys.stderr,
+                )
+                return 1
+            print(
+                json.dumps(
+                    {
+                        "content_hash": report["content_hash"],
+                        "decision": report["decision"],
+                        "reason_codes": report["reason_codes"],
+                        "status": "ok",
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
             )
             return 0
 

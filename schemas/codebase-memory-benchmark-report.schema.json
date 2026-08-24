@@ -11,6 +11,55 @@
       "minimum": 0,
       "type": "integer"
     },
+    "signed": {
+      "maximum": 9007199254740991,
+      "minimum": -9007199254740991,
+      "type": "integer"
+    },
+    "reduction_measurement": {
+      "anyOf": [
+        {
+          "maximum": 10000,
+          "minimum": -51199999990000,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "nonnegative_measurement": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/nonnegative"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "quality_measurement": {
+      "anyOf": [
+        {
+          "maximum": 10000,
+          "minimum": -10000,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "boolean_measurement": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "reason_codes": {
       "items": {
         "$ref": "#/$defs/id"
@@ -58,7 +107,9 @@
           ]
         },
         "critical_omission_count": {
-          "$ref": "#/$defs/nonnegative"
+          "maximum": 256000000,
+          "minimum": 0,
+          "type": "integer"
         },
         "incremental_refresh_p95_ms": {
           "anyOf": [
@@ -70,6 +121,11 @@
             }
           ]
         },
+        "observation_count": {
+          "maximum": 256,
+          "minimum": 1,
+          "type": "integer"
+        },
         "quality_basis_points": {
           "maximum": 10000,
           "minimum": 0,
@@ -79,11 +135,14 @@
           "$ref": "#/$defs/nonnegative"
         },
         "total_net_tokens": {
-          "$ref": "#/$defs/nonnegative"
+          "maximum": 5120000000,
+          "minimum": 0,
+          "type": "integer"
         }
       },
       "required": [
         "arm",
+        "observation_count",
         "total_net_tokens",
         "quality_basis_points",
         "critical_omission_count",
@@ -106,6 +165,19 @@
             "zero_unauthorized_egress"
           ]
         },
+        "measured_value": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/signed"
+            },
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "passed": {
           "type": "boolean"
         },
@@ -115,6 +187,7 @@
       },
       "required": [
         "gate_id",
+        "measured_value",
         "passed",
         "reason_codes"
       ],
@@ -214,6 +287,9 @@
               "properties": {
                 "gate_id": {
                   "const": "full_net_token_reduction"
+                },
+                "measured_value": {
+                  "$ref": "#/$defs/reduction_measurement"
                 }
               },
               "required": [
@@ -232,6 +308,9 @@
               "properties": {
                 "gate_id": {
                   "const": "maximum_critical_omissions"
+                },
+                "measured_value": {
+                  "$ref": "#/$defs/nonnegative_measurement"
                 }
               },
               "required": [
@@ -250,6 +329,9 @@
               "properties": {
                 "gate_id": {
                   "const": "maximum_incremental_p95"
+                },
+                "measured_value": {
+                  "$ref": "#/$defs/nonnegative_measurement"
                 }
               },
               "required": [
@@ -268,6 +350,9 @@
               "properties": {
                 "gate_id": {
                   "const": "maximum_quality_loss"
+                },
+                "measured_value": {
+                  "$ref": "#/$defs/quality_measurement"
                 }
               },
               "required": [
@@ -286,6 +371,9 @@
               "properties": {
                 "gate_id": {
                   "const": "structural_net_token_reduction"
+                },
+                "measured_value": {
+                  "$ref": "#/$defs/reduction_measurement"
                 }
               },
               "required": [
@@ -304,6 +392,9 @@
               "properties": {
                 "gate_id": {
                   "const": "tree_unchanged"
+                },
+                "measured_value": {
+                  "$ref": "#/$defs/boolean_measurement"
                 }
               },
               "required": [
@@ -322,6 +413,9 @@
               "properties": {
                 "gate_id": {
                   "const": "zero_unauthorized_egress"
+                },
+                "measured_value": {
+                  "$ref": "#/$defs/boolean_measurement"
                 }
               },
               "required": [
@@ -353,7 +447,7 @@
           }
         ]
       },
-      "maxItems": 12288,
+      "maxItems": 768,
       "minItems": 1,
       "type": "array",
       "uniqueItems": true

@@ -638,13 +638,13 @@ export type WorldForgeCodebaseMemoryBenchmarkReportV1 = Omit<
     Omit<ArmSummary, "arm"> & { arm: "C_memory_candidate_index" },
   ];
   gates: [
-    Omit<GateRecord, "gate_id"> & { gate_id: "full_net_token_reduction" },
-    Omit<GateRecord, "gate_id"> & { gate_id: "maximum_critical_omissions" },
-    Omit<GateRecord, "gate_id"> & { gate_id: "maximum_incremental_p95" },
-    Omit<GateRecord, "gate_id"> & { gate_id: "maximum_quality_loss" },
-    Omit<GateRecord, "gate_id"> & { gate_id: "structural_net_token_reduction" },
-    Omit<GateRecord, "gate_id"> & { gate_id: "tree_unchanged" },
-    Omit<GateRecord, "gate_id"> & { gate_id: "zero_unauthorized_egress" },
+    Omit<GateRecord, "gate_id" | "measured_value"> & { gate_id: "full_net_token_reduction"; measured_value: number | null },
+    Omit<GateRecord, "gate_id" | "measured_value"> & { gate_id: "maximum_critical_omissions"; measured_value: number | null },
+    Omit<GateRecord, "gate_id" | "measured_value"> & { gate_id: "maximum_incremental_p95"; measured_value: number | null },
+    Omit<GateRecord, "gate_id" | "measured_value"> & { gate_id: "maximum_quality_loss"; measured_value: number | null },
+    Omit<GateRecord, "gate_id" | "measured_value"> & { gate_id: "structural_net_token_reduction"; measured_value: number | null },
+    Omit<GateRecord, "gate_id" | "measured_value"> & { gate_id: "tree_unchanged"; measured_value: boolean | null },
+    Omit<GateRecord, "gate_id" | "measured_value"> & { gate_id: "zero_unauthorized_egress"; measured_value: boolean | null },
   ];
 };
 

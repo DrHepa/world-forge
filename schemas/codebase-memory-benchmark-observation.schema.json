@@ -11,6 +11,16 @@
       "minimum": 0,
       "type": "integer"
     },
+    "critical_omission_counter": {
+      "maximum": 1000000,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "token_counter": {
+      "maximum": 10000000,
+      "minimum": 0,
+      "type": "integer"
+    },
     "plan_ref": {
       "additionalProperties": false,
       "properties": {
@@ -101,10 +111,10 @@
       "additionalProperties": false,
       "properties": {
         "cached_input_tokens": {
-          "$ref": "#/$defs/nonnegative"
+          "$ref": "#/$defs/token_counter"
         },
         "critical_omission_count": {
-          "$ref": "#/$defs/nonnegative"
+          "$ref": "#/$defs/critical_omission_counter"
         },
         "egress_guard": {
           "enum": [
@@ -131,10 +141,10 @@
           ]
         },
         "input_tokens": {
-          "$ref": "#/$defs/nonnegative"
+          "$ref": "#/$defs/token_counter"
         },
         "output_tokens": {
-          "$ref": "#/$defs/nonnegative"
+          "$ref": "#/$defs/token_counter"
         },
         "quality_basis_points": {
           "maximum": 10000,

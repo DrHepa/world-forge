@@ -1,7 +1,7 @@
 """Closed recorded-result contracts for optional codebase-memory benchmarks.
 
-This module validates identities and supplied evidence only.  It never executes a
-benchmark, computes report metrics, makes an adoption decision, or contacts a tool.
+This module validates identities and supplied evidence, and can deterministically
+evaluate that recorded evidence.  It never executes a benchmark or contacts a tool.
 """
 
 from __future__ import annotations
@@ -22,6 +22,20 @@ CODEBASE_MEMORY_BENCHMARK_REPORT_FORMAT = "world-forge.codebase_memory_benchmark
 MAX_CODEBASE_MEMORY_BENCHMARK_DOCUMENT_BYTES = 1024 * 1024
 MAX_CODEBASE_MEMORY_BENCHMARK_JSON_DEPTH = 64
 MAX_SAFE_INTEGER = 9_007_199_254_740_991
+MAX_BENCHMARK_TRIALS_PER_ARM = 256
+MAX_CODEBASE_MEMORY_BENCHMARK_TOKEN_COUNTER = 10_000_000
+MAX_CRITICAL_OMISSIONS_PER_OBSERVATION = 1_000_000
+_MAX_OBSERVATIONS_PER_ARM = MAX_BENCHMARK_TRIALS_PER_ARM
+MAX_CODEBASE_MEMORY_BENCHMARK_OBSERVATION_REFERENCES = 3 * MAX_BENCHMARK_TRIALS_PER_ARM
+MAX_CODEBASE_MEMORY_BENCHMARK_NET_TOKENS_PER_ARM = (
+    _MAX_OBSERVATIONS_PER_ARM * 2 * MAX_CODEBASE_MEMORY_BENCHMARK_TOKEN_COUNTER
+)
+MAX_CODEBASE_MEMORY_BENCHMARK_CRITICAL_OMISSIONS_PER_ARM = (
+    _MAX_OBSERVATIONS_PER_ARM * MAX_CRITICAL_OMISSIONS_PER_OBSERVATION
+)
+MAX_CODEBASE_MEMORY_BENCHMARK_REDUCTION_BASIS_POINTS = (
+    MAX_CODEBASE_MEMORY_BENCHMARK_NET_TOKENS_PER_ARM - 1
+) * 10_000
 
 CODEBASE_MEMORY_BENCHMARK_ARMS = (
     "A_direct_reads",
@@ -140,6 +154,7 @@ _REPORT_FIELDS = frozenset(
 _ARM_SUMMARY_FIELDS = frozenset(
     {
         "arm",
+        "observation_count",
         "total_net_tokens",
         "quality_basis_points",
         "critical_omission_count",
@@ -147,7 +162,7 @@ _ARM_SUMMARY_FIELDS = frozenset(
         "incremental_refresh_p95_ms",
     }
 )
-_GATE_RECORD_FIELDS = frozenset({"gate_id", "passed", "reason_codes"})
+_GATE_RECORD_FIELDS = frozenset({"gate_id", "measured_value", "passed", "reason_codes"})
 _SOURCE_MODES = {
     "A_direct_reads": "direct_reads",
     "B_existing_memory": "existing_memory",
@@ -304,6 +319,12 @@ def canonical_codebase_memory_benchmark_hash(value: Mapping[str, object]) -> str
     return hashlib.sha256(_canonical_bytes(value, omit_content_hash=True)).hexdigest()
 
 
+def canonical_codebase_memory_benchmark_bytes(value: Mapping[str, object]) -> bytes:
+    """Return canonical compact sorted UTF-8 file bytes with one final newline."""
+
+    return _canonical_bytes(value, omit_content_hash=False) + b"\n"
+
+
 def _object(value: object, context: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         _error(f"{context} must be an object")
@@ -437,6 +458,10 @@ def _validate_plan(document: dict[str, Any]) -> None:
         _integer(task.get("repetitions"), f"task_set/{index}.repetitions", minimum=1, maximum=64)
     if task_ids != sorted(set(task_ids), key=lambda item: item.encode("utf-8")):
         _error("task_set must be sorted unique by task_id")
+    if sum(task["repetitions"] for task in tasks) > MAX_BENCHMARK_TRIALS_PER_ARM:
+        _error(
+            f"task_set repetitions must total at most {MAX_BENCHMARK_TRIALS_PER_ARM} trials per arm"
+        )
     if document.get("arms") != list(CODEBASE_MEMORY_BENCHMARK_ARMS):
         _error("benchmark arms must be the exact immutable canonical arms")
     gates = _object(document.get("gates"), "gates")
@@ -499,10 +524,20 @@ def _validate_observation(document: dict[str, Any]) -> None:
             _error("completed candidate observation requires an available candidate")
     measurements = _object(document.get("measurements"), "measurements")
     _exact(measurements, _MEASUREMENT_FIELDS, "measurements")
-    input_tokens = _integer(measurements.get("input_tokens"), "measurements.input_tokens")
-    _integer(measurements.get("output_tokens"), "measurements.output_tokens")
+    input_tokens = _integer(
+        measurements.get("input_tokens"),
+        "measurements.input_tokens",
+        maximum=MAX_CODEBASE_MEMORY_BENCHMARK_TOKEN_COUNTER,
+    )
+    _integer(
+        measurements.get("output_tokens"),
+        "measurements.output_tokens",
+        maximum=MAX_CODEBASE_MEMORY_BENCHMARK_TOKEN_COUNTER,
+    )
     cached_tokens = _integer(
-        measurements.get("cached_input_tokens"), "measurements.cached_input_tokens"
+        measurements.get("cached_input_tokens"),
+        "measurements.cached_input_tokens",
+        maximum=MAX_CODEBASE_MEMORY_BENCHMARK_TOKEN_COUNTER,
     )
     if cached_tokens > input_tokens:
         _error("measurements.cached_input_tokens cannot exceed input_tokens")
@@ -527,15 +562,11 @@ def _validate_observation(document: dict[str, Any]) -> None:
     _integer(
         measurements.get("critical_omission_count"),
         "measurements.critical_omission_count",
+        maximum=MAX_CRITICAL_OMISSIONS_PER_OBSERVATION,
     )
     for field in ("final_direct_verification", "tree_guard", "egress_guard"):
         if measurements.get(field) not in {"pass", "fail", "unobserved"}:
             _error(f"measurements.{field} is unsupported")
-    if state == "completed" and any(
-        measurements[field] != "pass"
-        for field in ("final_direct_verification", "tree_guard", "egress_guard")
-    ):
-        _error("completed observations require passed verification, tree, and egress guards")
     for field in (
         "recorder_identity_hash",
         "rubric_evidence_hash",
@@ -553,8 +584,9 @@ def _validate_report(document: dict[str, Any]) -> None:
     _id(document.get("report_id"), "report_id")
     _reference(document.get("plan"), "plan", expected_format=CODEBASE_MEMORY_BENCHMARK_PLAN_FORMAT)
     references = _array(document.get("observation_refs"), "observation_refs")
-    if not 1 <= len(references) <= 12_288:
-        _error("observation_refs must contain between 1 and 12288 references")
+    maximum_references = MAX_CODEBASE_MEMORY_BENCHMARK_OBSERVATION_REFERENCES
+    if not 1 <= len(references) <= maximum_references:
+        _error(f"observation_refs must contain between 1 and {maximum_references} references")
     reference_ids = []
     for index, item in enumerate(references):
         reference = _reference(
@@ -575,7 +607,17 @@ def _validate_report(document: dict[str, Any]) -> None:
         _exact(summary, _ARM_SUMMARY_FIELDS, f"arm_summaries/{index}")
         if summary.get("arm") != expected_arm:
             _error("arm_summaries must use the exact canonical arm order")
-        _integer(summary.get("total_net_tokens"), f"arm_summaries/{index}.total_net_tokens")
+        _integer(
+            summary.get("observation_count"),
+            f"arm_summaries/{index}.observation_count",
+            minimum=1,
+            maximum=MAX_BENCHMARK_TRIALS_PER_ARM,
+        )
+        _integer(
+            summary.get("total_net_tokens"),
+            f"arm_summaries/{index}.total_net_tokens",
+            maximum=MAX_CODEBASE_MEMORY_BENCHMARK_NET_TOKENS_PER_ARM,
+        )
         _integer(
             summary.get("quality_basis_points"),
             f"arm_summaries/{index}.quality_basis_points",
@@ -584,6 +626,7 @@ def _validate_report(document: dict[str, Any]) -> None:
         _integer(
             summary.get("critical_omission_count"),
             f"arm_summaries/{index}.critical_omission_count",
+            maximum=MAX_CODEBASE_MEMORY_BENCHMARK_CRITICAL_OMISSIONS_PER_ARM,
         )
         _integer(summary.get("task_wall_p95_ms"), f"arm_summaries/{index}.task_wall_p95_ms")
         refresh = _nullable_integer(
@@ -596,6 +639,7 @@ def _validate_report(document: dict[str, Any]) -> None:
     if len(gates) != len(CODEBASE_MEMORY_BENCHMARK_GATE_IDS):
         _error("report gates must contain the exact seven canonical gate IDs")
     passed: list[bool] = []
+    measured_values: list[int | bool | None] = []
     for index, (raw_gate, expected_id) in enumerate(
         zip(gates, CODEBASE_MEMORY_BENCHMARK_GATE_IDS, strict=True)
     ):
@@ -603,16 +647,55 @@ def _validate_report(document: dict[str, Any]) -> None:
         _exact(gate, _GATE_RECORD_FIELDS, f"gates/{index}")
         if gate.get("gate_id") != expected_id:
             _error("report gates must use the exact canonical gate ID order")
+        measured_value = gate.get("measured_value")
+        if expected_id in {"tree_unchanged", "zero_unauthorized_egress"}:
+            if measured_value is not None and not isinstance(measured_value, bool):
+                _error(f"gates/{index}.measured_value must be a boolean or null")
+        elif measured_value is not None:
+            minimum, maximum = (
+                -MAX_CODEBASE_MEMORY_BENCHMARK_REDUCTION_BASIS_POINTS,
+                10_000,
+            )
+            if expected_id in {"maximum_critical_omissions", "maximum_incremental_p95"}:
+                minimum, maximum = 0, MAX_SAFE_INTEGER
+            if expected_id == "maximum_quality_loss":
+                minimum, maximum = -10_000, 10_000
+            _integer(
+                measured_value,
+                f"gates/{index}.measured_value",
+                minimum=minimum,
+                maximum=maximum,
+            )
         if not isinstance(gate.get("passed"), bool):
             _error(f"gates/{index}.passed must be a boolean")
         reasons = _reason_codes(gate.get("reason_codes"), f"gates/{index}.reason_codes")
         if gate["passed"] == bool(reasons):
             _error("passed gates require no reasons and failed gates require reason codes")
         passed.append(gate["passed"])
+        measured_values.append(measured_value)
     decision = document.get("decision")
     if decision not in {"adopt", "reject", "not_evaluable"}:
         _error("report decision is unsupported")
     reasons = _reason_codes(document.get("reason_codes"), "reason_codes")
+    if decision == "not_evaluable":
+        if any(value is not None for value in measured_values):
+            _error("not_evaluable gates require null measured values")
+        if any(gate["passed"] or gate["reason_codes"] != ["not_measured"] for gate in gates):
+            _error("not_evaluable gates must be failed with only not_measured")
+    else:
+        if any(value is None for value in measured_values):
+            _error("evaluable reports require every gate measured value")
+        expected_passes = (
+            measured_values[0] >= _FIXED_GATE_POLICY["full_net_token_reduction_basis_points"],
+            measured_values[1] <= _FIXED_GATE_POLICY["maximum_critical_omissions"],
+            measured_values[2] <= _FIXED_GATE_POLICY["maximum_incremental_p95_ms"],
+            measured_values[3] <= _FIXED_GATE_POLICY["maximum_quality_loss_basis_points"],
+            measured_values[4] >= _FIXED_GATE_POLICY["structural_net_token_reduction_basis_points"],
+            measured_values[5] is True,
+            measured_values[6] is True,
+        )
+        if tuple(passed) != expected_passes:
+            _error("gate pass states do not match immutable thresholds")
     if decision == "adopt" and (not all(passed) or reasons):
         _error("adopt requires every gate passed and no report reason codes")
     if decision == "reject" and all(passed):
@@ -626,22 +709,25 @@ def validate_codebase_memory_benchmark_document(
 ) -> dict[str, Any]:
     """Validate one closed recorded-result document without external effects."""
 
-    normalized = _normalize_json_numbers(value, context="codebase-memory benchmark document")
-    document = _object(normalized, "codebase-memory benchmark document")
-    _reject_forbidden_fields(document)
-    _canonical_bytes(document, omit_content_hash=False)
-    format_name = document.get("format")
-    if expected_format is not None and format_name != expected_format:
-        _error(f"codebase-memory benchmark document format must be {expected_format}")
-    if format_name not in _FORMAT_SET:
-        _error("codebase-memory benchmark format or format_version is unsupported")
-    validators = {
-        CODEBASE_MEMORY_BENCHMARK_PLAN_FORMAT: _validate_plan,
-        CODEBASE_MEMORY_BENCHMARK_OBSERVATION_FORMAT: _validate_observation,
-        CODEBASE_MEMORY_BENCHMARK_REPORT_FORMAT: _validate_report,
-    }
-    validators[format_name](document)
-    return copy.deepcopy(document)
+    try:
+        normalized = _normalize_json_numbers(value, context="codebase-memory benchmark document")
+        document = _object(normalized, "codebase-memory benchmark document")
+        _reject_forbidden_fields(document)
+        _canonical_bytes(document, omit_content_hash=False)
+        format_name = document.get("format")
+        if expected_format is not None and format_name != expected_format:
+            _error(f"codebase-memory benchmark document format must be {expected_format}")
+        if format_name not in _FORMAT_SET:
+            _error("codebase-memory benchmark format or format_version is unsupported")
+        validators = {
+            CODEBASE_MEMORY_BENCHMARK_PLAN_FORMAT: _validate_plan,
+            CODEBASE_MEMORY_BENCHMARK_OBSERVATION_FORMAT: _validate_observation,
+            CODEBASE_MEMORY_BENCHMARK_REPORT_FORMAT: _validate_report,
+        }
+        validators[format_name](document)
+        return copy.deepcopy(document)
+    except MemoryError:
+        _error("codebase-memory benchmark document exceeds available validation memory")
 
 
 def _expected_plan_reference(plan: Mapping[str, object]) -> dict[str, object]:
@@ -662,61 +748,325 @@ def _expected_observation_reference(observation: Mapping[str, object]) -> dict[s
     }
 
 
-def validate_codebase_memory_benchmark_documents(
-    plan: object, observations: Sequence[object], report: object
-) -> CodebaseMemoryBenchmarkDocuments:
-    """Resolve exact document lineage and inventory without evaluating metrics."""
-
+def _validated_plan_and_observation_inventory(
+    plan: object, observations: Sequence[object]
+) -> tuple[dict[str, Any], tuple[dict[str, Any], ...], list[dict[str, object]]]:
     plan_value = validate_codebase_memory_benchmark_document(
         plan, expected_format=CODEBASE_MEMORY_BENCHMARK_PLAN_FORMAT
     )
     if isinstance(observations, (str, bytes, bytearray)) or not isinstance(observations, Sequence):
         _error("observations must be a sequence")
-    observation_values = tuple(
-        validate_codebase_memory_benchmark_document(
-            item, expected_format=CODEBASE_MEMORY_BENCHMARK_OBSERVATION_FORMAT
+    try:
+        task_repetitions = {task["task_id"]: task["repetitions"] for task in plan_value["task_set"]}
+        remaining_expected = {
+            (task_id, repetition, arm)
+            for task_id, repetitions in task_repetitions.items()
+            for repetition in range(1, repetitions + 1)
+            for arm in CODEBASE_MEMORY_BENCHMARK_ARMS
+        }
+        expected_count = len(remaining_expected)
+        try:
+            reported_count = len(observations)
+        except Exception as exc:
+            raise CodebaseMemoryBenchmarkError(
+                "could not inspect the observation inventory"
+            ) from exc
+        # Exact built-ins cannot lie about length. Custom Sequence lengths are hints only.
+        if type(observations) in (list, tuple) and reported_count != expected_count:
+            _error("observation count does not match the planned inventory")
+        expected_plan_ref = _expected_plan_reference(plan_value)
+        observation_values: list[dict[str, Any]] = []
+        actual_inventory: set[tuple[str, int, str]] = set()
+        observation_ids: set[str] = set()
+        references: list[dict[str, object]] = []
+        actual_count = 0
+        try:
+            iterator = iter(observations)
+        except Exception as exc:
+            raise CodebaseMemoryBenchmarkError(
+                "could not iterate the observation inventory"
+            ) from exc
+        while True:
+            try:
+                item = next(iterator)
+            except StopIteration:
+                break
+            except Exception as exc:
+                raise CodebaseMemoryBenchmarkError(
+                    "could not iterate the observation inventory"
+                ) from exc
+            actual_count += 1
+            if actual_count > expected_count:
+                _error("observation count exceeds the planned inventory")
+            observation = validate_codebase_memory_benchmark_document(
+                item, expected_format=CODEBASE_MEMORY_BENCHMARK_OBSERVATION_FORMAT
+            )
+            if observation["plan"] != expected_plan_ref:
+                _error("observation plan reference does not resolve exactly")
+            task_id = observation["task_id"]
+            repetition = observation["repetition_index"]
+            arm = observation["arm"]
+            key = (task_id, repetition, arm)
+            if observation["observation_id"] in observation_ids:
+                _error("observation_id is duplicated")
+            if key in actual_inventory:
+                _error("observation task, repetition, and arm identity is duplicated")
+            if key not in remaining_expected:
+                _error("observation task, repetition, and arm identity is not planned")
+            actual_inventory.add(key)
+            observation_ids.add(observation["observation_id"])
+            remaining_expected.remove(key)
+            references.append(_expected_observation_reference(observation))
+            observation_values.append(observation)
+        if actual_count != expected_count or remaining_expected:
+            _error("observation inventory does not cover every planned task, repetition, and arm")
+        return (
+            plan_value,
+            tuple(observation_values),
+            sorted(references, key=lambda item: str(item["id"]).encode("utf-8")),
         )
-        for item in observations
+    except MemoryError:
+        _error("observation inventory exceeds available validation memory")
+
+
+def _nearest_rank_95(values: Sequence[int]) -> int:
+    ordered = sorted(values)
+    return ordered[(95 * len(ordered) + 99) // 100 - 1]
+
+
+def _mean_half_up(values: Sequence[int]) -> int:
+    return (2 * sum(values) + len(values)) // (2 * len(values))
+
+
+def _report_id(plan: Mapping[str, object]) -> str:
+    return f"report_{str(plan['content_hash'])[:32]}"
+
+
+def _evaluate_validated_codebase_memory_benchmark(
+    plan_value: dict[str, Any],
+    observation_values: Sequence[dict[str, Any]],
+    references: list[dict[str, object]],
+) -> dict[str, Any]:
+    by_arm = {
+        arm: tuple(item for item in observation_values if item["arm"] == arm)
+        for arm in CODEBASE_MEMORY_BENCHMARK_ARMS
+    }
+    summaries: list[dict[str, object]] = []
+    totals: dict[str, int] = {}
+    for arm in CODEBASE_MEMORY_BENCHMARK_ARMS:
+        arm_observations = by_arm[arm]
+        net_tokens = [
+            item["measurements"]["input_tokens"] + item["measurements"]["output_tokens"]
+            for item in arm_observations
+        ]
+        total = sum(net_tokens)
+        if total > MAX_SAFE_INTEGER:
+            _error("aggregate total_net_tokens exceeds the JavaScript-safe range")
+        omissions = sum(
+            item["measurements"]["critical_omission_count"] for item in arm_observations
+        )
+        if omissions > MAX_SAFE_INTEGER:
+            _error("aggregate critical omissions exceed the JavaScript-safe range")
+        refresh_values = [
+            item["measurements"]["incremental_refresh_ms"]
+            for item in arm_observations
+            if item["measurements"]["incremental_refresh_ms"] is not None
+        ]
+        totals[arm] = total
+        summaries.append(
+            {
+                "arm": arm,
+                "observation_count": len(arm_observations),
+                "total_net_tokens": total,
+                "quality_basis_points": _mean_half_up(
+                    [item["measurements"]["quality_basis_points"] for item in arm_observations]
+                ),
+                "critical_omission_count": omissions,
+                "task_wall_p95_ms": _nearest_rank_95(
+                    [item["measurements"]["task_wall_ms"] for item in arm_observations]
+                ),
+                "incremental_refresh_p95_ms": (
+                    _nearest_rank_95(refresh_values)
+                    if arm == "C_memory_candidate_index"
+                    and len(refresh_values) == len(arm_observations)
+                    else None
+                ),
+            }
+        )
+
+    not_evaluable: set[str] = set()
+    candidate_identity: set[tuple[str, str]] = set()
+    for observation in observation_values:
+        state = observation["state"]
+        if state != "completed":
+            not_evaluable.add(f"observation_state_{state}")
+        measurements = observation["measurements"]
+        direct = measurements["final_direct_verification"]
+        if direct != "pass":
+            not_evaluable.add(
+                "final_direct_verification_failed"
+                if direct == "fail"
+                else "final_direct_verification_unobserved"
+            )
+        for field in ("tree_guard", "egress_guard"):
+            if measurements[field] == "unobserved":
+                not_evaluable.add(f"{field}_unobserved")
+        if observation["arm"] == "C_memory_candidate_index":
+            candidate_state = observation["candidate_state"]
+            if candidate_state != "available":
+                not_evaluable.add(f"candidate_evidence_{candidate_state}")
+            else:
+                candidate_identity.add(
+                    (
+                        observation["candidate_index_identity_hash"],
+                        observation["candidate_index_content_hash"],
+                    )
+                )
+    if len(candidate_identity) > 1:
+        not_evaluable.add("candidate_identity_mismatch")
+    full_denominator = totals["A_direct_reads"]
+    if full_denominator == 0:
+        not_evaluable.add("zero_full_baseline_denominator")
+    task_categories = {task["task_id"]: task["category"] for task in plan_value["task_set"]}
+    structural_a = sum(
+        item["measurements"]["input_tokens"] + item["measurements"]["output_tokens"]
+        for item in by_arm["A_direct_reads"]
+        if task_categories[item["task_id"]] == "structural_navigation"
+    )
+    structural_c = sum(
+        item["measurements"]["input_tokens"] + item["measurements"]["output_tokens"]
+        for item in by_arm["C_memory_candidate_index"]
+        if task_categories[item["task_id"]] == "structural_navigation"
+    )
+    if structural_a == 0:
+        not_evaluable.add("zero_structural_baseline_denominator")
+
+    if not_evaluable:
+        gates = [
+            {
+                "gate_id": gate_id,
+                "measured_value": None,
+                "passed": False,
+                "reason_codes": ["not_measured"],
+            }
+            for gate_id in CODEBASE_MEMORY_BENCHMARK_GATE_IDS
+        ]
+        decision = "not_evaluable"
+        report_reasons = sorted(not_evaluable, key=lambda item: item.encode("utf-8"))
+    else:
+        full_reduction = (
+            (full_denominator - totals["C_memory_candidate_index"]) * 10_000 // full_denominator
+        )
+        structural_reduction = (structural_a - structural_c) * 10_000 // structural_a
+        quality_loss = summaries[0]["quality_basis_points"] - summaries[2]["quality_basis_points"]
+        measured_values: tuple[int | bool, ...] = (
+            full_reduction,
+            summaries[2]["critical_omission_count"],
+            summaries[2]["incremental_refresh_p95_ms"],
+            quality_loss,
+            structural_reduction,
+            all(item["measurements"]["tree_guard"] == "pass" for item in observation_values),
+            all(item["measurements"]["egress_guard"] == "pass" for item in observation_values),
+        )
+        thresholds = (
+            full_reduction >= _FIXED_GATE_POLICY["full_net_token_reduction_basis_points"],
+            summaries[2]["critical_omission_count"]
+            <= _FIXED_GATE_POLICY["maximum_critical_omissions"],
+            summaries[2]["incremental_refresh_p95_ms"]
+            <= _FIXED_GATE_POLICY["maximum_incremental_p95_ms"],
+            quality_loss <= _FIXED_GATE_POLICY["maximum_quality_loss_basis_points"],
+            structural_reduction
+            >= _FIXED_GATE_POLICY["structural_net_token_reduction_basis_points"],
+            measured_values[5] is True,
+            measured_values[6] is True,
+        )
+        failure_reasons = (
+            "full_token_reduction_below_threshold",
+            "critical_omissions_exceeded",
+            "incremental_p95_exceeded",
+            "quality_loss_exceeded",
+            "structural_token_reduction_below_threshold",
+            "tree_changed",
+            "unauthorized_egress",
+        )
+        gates = [
+            {
+                "gate_id": gate_id,
+                "measured_value": measured_value,
+                "passed": passed,
+                "reason_codes": [] if passed else [failure_reason],
+            }
+            for gate_id, measured_value, passed, failure_reason in zip(
+                CODEBASE_MEMORY_BENCHMARK_GATE_IDS,
+                measured_values,
+                thresholds,
+                failure_reasons,
+                strict=True,
+            )
+        ]
+        report_reasons = sorted(
+            (gate["reason_codes"][0] for gate in gates if not gate["passed"]),
+            key=lambda item: item.encode("utf-8"),
+        )
+        decision = "adopt" if not report_reasons else "reject"
+
+    report: dict[str, Any] = {
+        "format": CODEBASE_MEMORY_BENCHMARK_REPORT_FORMAT,
+        "format_version": CODEBASE_MEMORY_BENCHMARK_VERSION,
+        "report_id": _report_id(plan_value),
+        "plan": _expected_plan_reference(plan_value),
+        "observation_refs": references,
+        "arm_summaries": summaries,
+        "gates": gates,
+        "decision": decision,
+        "reason_codes": report_reasons,
+        "content_hash": "0" * 64,
+    }
+    report["content_hash"] = canonical_codebase_memory_benchmark_hash(report)
+    return validate_codebase_memory_benchmark_document(
+        report, expected_format=CODEBASE_MEMORY_BENCHMARK_REPORT_FORMAT
+    )
+
+
+def evaluate_codebase_memory_benchmark(
+    plan: object, observations: Sequence[object]
+) -> dict[str, Any]:
+    """Purely evaluate a complete inventory of supplied recorded evidence."""
+
+    plan_value, observation_values, references = _validated_plan_and_observation_inventory(
+        plan, observations
+    )
+    try:
+        return _evaluate_validated_codebase_memory_benchmark(
+            plan_value,
+            observation_values,
+            references,
+        )
+    except MemoryError:
+        _error("benchmark evaluation exceeds available validation memory")
+
+
+def validate_codebase_memory_benchmark_documents(
+    plan: object, observations: Sequence[object], report: object
+) -> CodebaseMemoryBenchmarkDocuments:
+    """Resolve exact lineage, inventory, and deterministic report authority."""
+
+    plan_value, observation_values, expected_refs = _validated_plan_and_observation_inventory(
+        plan, observations
     )
     report_value = validate_codebase_memory_benchmark_document(
         report, expected_format=CODEBASE_MEMORY_BENCHMARK_REPORT_FORMAT
     )
-    expected_plan_ref = _expected_plan_reference(plan_value)
-    if report_value["plan"] != expected_plan_ref:
-        _error("report plan reference does not resolve exactly")
-    task_repetitions = {task["task_id"]: task["repetitions"] for task in plan_value["task_set"]}
-    expected_inventory = {
-        (task_id, repetition, arm)
-        for task_id, repetitions in task_repetitions.items()
-        for repetition in range(1, repetitions + 1)
-        for arm in CODEBASE_MEMORY_BENCHMARK_ARMS
-    }
-    actual_inventory: set[tuple[str, int, str]] = set()
-    observation_ids: set[str] = set()
-    references: list[dict[str, object]] = []
-    for observation in observation_values:
-        if observation["plan"] != expected_plan_ref:
-            _error("observation plan reference does not resolve exactly")
-        task_id = observation["task_id"]
-        repetition = observation["repetition_index"]
-        arm = observation["arm"]
-        if task_id not in task_repetitions:
-            _error("observation task_id is not present in the plan")
-        if repetition > task_repetitions[task_id]:
-            _error("observation repetition_index exceeds its planned bound")
-        key = (task_id, repetition, arm)
-        if key in actual_inventory:
-            _error("observation task, repetition, and arm identity is duplicated")
-        if observation["observation_id"] in observation_ids:
-            _error("observation_id is duplicated")
-        actual_inventory.add(key)
-        observation_ids.add(observation["observation_id"])
-        references.append(_expected_observation_reference(observation))
-    if actual_inventory != expected_inventory:
-        _error("observation inventory does not cover every planned task, repetition, and arm")
-    expected_refs = sorted(references, key=lambda item: str(item["id"]).encode("utf-8"))
-    if report_value["observation_refs"] != expected_refs:
-        _error("report observation inventory does not resolve exactly")
+    try:
+        expected_report = _evaluate_validated_codebase_memory_benchmark(
+            plan_value,
+            observation_values,
+            expected_refs,
+        )
+    except MemoryError:
+        _error("benchmark evaluation exceeds available validation memory")
+    if report_value != expected_report:
+        _error("report does not equal the deterministic evaluator output")
     return CodebaseMemoryBenchmarkDocuments(
         plan=plan_value,
         observations=observation_values,
@@ -733,8 +1083,17 @@ __all__ = [
     "CODEBASE_MEMORY_BENCHMARK_VERSION",
     "CodebaseMemoryBenchmarkDocuments",
     "CodebaseMemoryBenchmarkError",
+    "MAX_BENCHMARK_TRIALS_PER_ARM",
+    "MAX_CODEBASE_MEMORY_BENCHMARK_CRITICAL_OMISSIONS_PER_ARM",
     "MAX_CODEBASE_MEMORY_BENCHMARK_DOCUMENT_BYTES",
+    "MAX_CODEBASE_MEMORY_BENCHMARK_NET_TOKENS_PER_ARM",
+    "MAX_CODEBASE_MEMORY_BENCHMARK_OBSERVATION_REFERENCES",
+    "MAX_CODEBASE_MEMORY_BENCHMARK_REDUCTION_BASIS_POINTS",
+    "MAX_CODEBASE_MEMORY_BENCHMARK_TOKEN_COUNTER",
+    "MAX_CRITICAL_OMISSIONS_PER_OBSERVATION",
+    "canonical_codebase_memory_benchmark_bytes",
     "canonical_codebase_memory_benchmark_hash",
+    "evaluate_codebase_memory_benchmark",
     "validate_codebase_memory_benchmark_document",
     "validate_codebase_memory_benchmark_documents",
 ]

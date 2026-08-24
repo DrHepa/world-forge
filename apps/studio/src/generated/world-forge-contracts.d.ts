@@ -49390,12 +49390,12 @@ export interface WorldForgeCodebaseMemoryBenchmarkObservationV1 {
   measurements: {
     /**
      * This interface was referenced by `WorldForgeCodebaseMemoryBenchmarkObservationV1`'s JSON-Schema
-     * via the `definition` "nonnegative".
+     * via the `definition` "token_counter".
      */
     cached_input_tokens: number;
     /**
      * This interface was referenced by `WorldForgeCodebaseMemoryBenchmarkObservationV1`'s JSON-Schema
-     * via the `definition` "nonnegative".
+     * via the `definition` "critical_omission_counter".
      */
     critical_omission_count: number;
     egress_guard: "pass" | "fail" | "unobserved";
@@ -49403,12 +49403,12 @@ export interface WorldForgeCodebaseMemoryBenchmarkObservationV1 {
     incremental_refresh_ms: number | null;
     /**
      * This interface was referenced by `WorldForgeCodebaseMemoryBenchmarkObservationV1`'s JSON-Schema
-     * via the `definition` "nonnegative".
+     * via the `definition` "token_counter".
      */
     input_tokens: number;
     /**
      * This interface was referenced by `WorldForgeCodebaseMemoryBenchmarkObservationV1`'s JSON-Schema
-     * via the `definition` "nonnegative".
+     * via the `definition` "token_counter".
      */
     output_tokens: number;
     quality_basis_points: number;
@@ -49489,7 +49489,7 @@ interface WorldForgeCodebaseMemoryBenchmarkReportV1Generated {
   gates: never[];
   /**
    * @minItems 1
-   * @maxItems 12288
+   * @maxItems 768
    */
   observation_refs: [
     Reference & {
@@ -49533,22 +49533,15 @@ export interface Reference {
  */
 export interface ArmSummary {
   arm: "A_direct_reads" | "B_existing_memory" | "C_memory_candidate_index";
-  /**
-   * This interface was referenced by `WorldForgeCodebaseMemoryBenchmarkReportV1`'s JSON-Schema
-   * via the `definition` "nonnegative".
-   */
   critical_omission_count: number;
   incremental_refresh_p95_ms: number | null;
+  observation_count: number;
   quality_basis_points: number;
   /**
    * This interface was referenced by `WorldForgeCodebaseMemoryBenchmarkReportV1`'s JSON-Schema
    * via the `definition` "nonnegative".
    */
   task_wall_p95_ms: number;
-  /**
-   * This interface was referenced by `WorldForgeCodebaseMemoryBenchmarkReportV1`'s JSON-Schema
-   * via the `definition` "nonnegative".
-   */
   total_net_tokens: number;
 }
 /**
@@ -49564,6 +49557,7 @@ export interface GateRecord {
     | "structural_net_token_reduction"
     | "tree_unchanged"
     | "zero_unauthorized_egress";
+  measured_value: number | boolean | null;
   passed: boolean;
   reason_codes: ReasonCodes2;
 }
@@ -49579,13 +49573,13 @@ export type WorldForgeCodebaseMemoryBenchmarkReportV1 = Omit<
     Omit<ArmSummary, "arm"> & { arm: "C_memory_candidate_index" },
   ];
   gates: [
-    Omit<GateRecord, "gate_id"> & { gate_id: "full_net_token_reduction" },
-    Omit<GateRecord, "gate_id"> & { gate_id: "maximum_critical_omissions" },
-    Omit<GateRecord, "gate_id"> & { gate_id: "maximum_incremental_p95" },
-    Omit<GateRecord, "gate_id"> & { gate_id: "maximum_quality_loss" },
-    Omit<GateRecord, "gate_id"> & { gate_id: "structural_net_token_reduction" },
-    Omit<GateRecord, "gate_id"> & { gate_id: "tree_unchanged" },
-    Omit<GateRecord, "gate_id"> & { gate_id: "zero_unauthorized_egress" },
+    Omit<GateRecord, "gate_id" | "measured_value"> & { gate_id: "full_net_token_reduction"; measured_value: number | null },
+    Omit<GateRecord, "gate_id" | "measured_value"> & { gate_id: "maximum_critical_omissions"; measured_value: number | null },
+    Omit<GateRecord, "gate_id" | "measured_value"> & { gate_id: "maximum_incremental_p95"; measured_value: number | null },
+    Omit<GateRecord, "gate_id" | "measured_value"> & { gate_id: "maximum_quality_loss"; measured_value: number | null },
+    Omit<GateRecord, "gate_id" | "measured_value"> & { gate_id: "structural_net_token_reduction"; measured_value: number | null },
+    Omit<GateRecord, "gate_id" | "measured_value"> & { gate_id: "tree_unchanged"; measured_value: boolean | null },
+    Omit<GateRecord, "gate_id" | "measured_value"> & { gate_id: "zero_unauthorized_egress"; measured_value: boolean | null },
   ];
 };
 

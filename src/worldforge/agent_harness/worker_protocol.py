@@ -16,12 +16,7 @@ from .ports import (
     ProviderUsage,
     ToolCall,
 )
-from .worker_registry import (
-    CONFORMANCE_RUNTIME_HASH,
-    CONFORMANCE_RUNTIME_ID,
-    CONFORMANCE_RUNTIME_REVISION,
-    fixed_runtime_identity,
-)
+from .worker_registry import _matches_fixed_runtime, fixed_runtime_identity
 
 MAX_WORKER_REQUEST_BYTES = 256 * 1024
 MAX_WORKER_RESPONSE_BYTES = 32 * 1024 * 1024
@@ -172,16 +167,7 @@ def _mac(document: dict[str, object], key: bytes) -> str:
 
 
 def _validate_runtime(value: object) -> dict[str, object]:
-    if (
-        type(value) is not dict
-        or set(value) != {"id", "revision", "content_hash"}
-        or type(value["id"]) is not str
-        or value["id"] != CONFORMANCE_RUNTIME_ID
-        or type(value["revision"]) is not int
-        or value["revision"] != CONFORMANCE_RUNTIME_REVISION
-        or type(value["content_hash"]) is not str
-        or value["content_hash"] != CONFORMANCE_RUNTIME_HASH
-    ):
+    if not _matches_fixed_runtime(value):
         raise WorkerProtocolError("worker_protocol_runtime_mismatch")
     return fixed_runtime_identity()
 

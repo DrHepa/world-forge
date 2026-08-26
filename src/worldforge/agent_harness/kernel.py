@@ -6,6 +6,7 @@ import copy
 import hashlib
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 
 from worldforge.agent_harness_contracts import (
@@ -42,7 +43,9 @@ from .process_supervisor import ProviderBoundaryIndeterminate, ProviderBoundaryS
 from .records import build_event, build_receipt
 
 _PORTABLE_ID_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _TOOL_ID_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}(?:\.[a-z][a-z0-9_]{1,63})+$")
+_RUNTIME_BINDING_FIELDS = frozenset({"id", "revision", "content_hash"})
 _MAX_PRIVATE_FIELD_BYTES = 64 * 1024
 _MAX_ARTIFACT_PROPOSALS = 64
 _MAX_MEMORY_PROPOSALS = 64
@@ -53,6 +56,74 @@ class KernelError(ValueError):
     def __init__(self, reason_code: str) -> None:
         self.reason_code = reason_code
         super().__init__(reason_code)
+
+
+@dataclass(frozen=True, slots=True)
+class _ProviderRuntimeBinding:
+    identifier: str
+    revision: int
+    content_hash: str
+
+    def as_document(self) -> dict[str, object]:
+        return {
+            "id": self.identifier,
+            "revision": self.revision,
+            "content_hash": self.content_hash,
+        }
+
+    def matches(self, value: object) -> bool:
+        return type(value) is dict and value == self.as_document()
+
+
+@dataclass(frozen=True, slots=True)
+class _ProviderAuthority:
+    adapter: ProviderAdapter
+    runtime_binding: _ProviderRuntimeBinding
+    turn: Callable[..., object]
+
+
+def _snapshot_provider_runtime_binding(provider: object) -> _ProviderRuntimeBinding:
+    try:
+        value = provider.runtime_binding
+    except Exception:
+        raise KernelError("provider_runtime_binding_invalid") from None
+    if type(value) is not dict:
+        raise KernelError("provider_runtime_binding_invalid")
+    try:
+        items = tuple(dict.items(value))
+    except Exception:
+        raise KernelError("provider_runtime_binding_invalid") from None
+    if (
+        len(items) != len(_RUNTIME_BINDING_FIELDS)
+        or any(type(key) is not str for key, _item in items)
+        or frozenset(key for key, _item in items) != _RUNTIME_BINDING_FIELDS
+    ):
+        raise KernelError("provider_runtime_binding_invalid")
+    values = {key: item for key, item in items}
+    identifier = values["id"]
+    revision = values["revision"]
+    content_hash = values["content_hash"]
+    if (
+        type(identifier) is not str
+        or _PORTABLE_ID_RE.fullmatch(identifier) is None
+        or type(revision) is not int
+        or not 1 <= revision <= MAX_SAFE_INTEGER
+        or type(content_hash) is not str
+        or _SHA256_RE.fullmatch(content_hash) is None
+    ):
+        raise KernelError("provider_runtime_binding_invalid")
+    return _ProviderRuntimeBinding(identifier, revision, content_hash)
+
+
+def _snapshot_provider_authority(provider: object) -> _ProviderAuthority:
+    runtime_binding = _snapshot_provider_runtime_binding(provider)
+    try:
+        turn = provider.turn
+    except Exception:
+        raise KernelError("provider_runtime_binding_invalid") from None
+    if not callable(turn):
+        raise KernelError("provider_runtime_binding_invalid")
+    return _ProviderAuthority(provider, runtime_binding, turn)
 
 
 def _bounded_integer(value: object, *, minimum: int = 0) -> int:
@@ -381,6 +452,21 @@ class BudgetLedger:
 
 
 class AgentExecutionKernel:
+    def __setattr__(self, name: str, value: object) -> None:
+        if name == "_provider_authority":
+            try:
+                object.__getattribute__(self, name)
+            except AttributeError:
+                pass
+            else:
+                raise AttributeError("provider authority is immutable")
+        object.__setattr__(self, name, value)
+
+    def __delattr__(self, name: str) -> None:
+        if name == "_provider_authority":
+            raise AttributeError("provider authority is immutable")
+        object.__delattr__(self, name)
+
     def __init__(
         self,
         *,
@@ -390,12 +476,20 @@ class AgentExecutionKernel:
         clock: Clock,
         cancellation: CancellationToken,
     ) -> None:
-        self.provider = provider
+        self._provider_authority = _snapshot_provider_authority(provider)
         self.broker = broker
         self.journal = journal
         self.clock = clock
         self.cancellation = cancellation
         self._active_execution_id: str | None = None
+
+    @property
+    def provider(self) -> ProviderAdapter:
+        return self._provider_authority.adapter
+
+    @property
+    def _provider(self) -> ProviderAdapter:
+        return self._provider_authority.adapter
 
     def execute(self, request: ExecutionRequest) -> ExecutionResult:
         if type(request) is not ExecutionRequest:
@@ -403,6 +497,8 @@ class AgentExecutionKernel:
         if self._active_execution_id is not None:
             raise KernelError("execution_reentrant")
         request, activation, grant = _prepared_execution_request(request)
+        provider_authority = self._provider_authority
+        provider_runtime_matches = provider_authority.runtime_binding.matches(activation["runtime"])
         execution_id = activation["execution_id"]
         self._active_execution_id = execution_id
         lease: object | None = None
@@ -469,7 +565,7 @@ class AgentExecutionKernel:
             after_begin_reason = self._cancellation_reason(request.limits, start_ms)
             if initial_reason is None:
                 initial_reason = after_begin_reason
-            if initial_reason is None:
+            if initial_reason is None and provider_runtime_matches:
                 try:
                     lease = self.broker.activate(execution_id)
                 except BrokerError:
@@ -482,6 +578,8 @@ class AgentExecutionKernel:
                 grant,
                 start_ms=start_ms,
                 initial_reason=initial_reason,
+                provider_runtime_matches=provider_runtime_matches,
+                provider_turn=provider_authority.turn,
             )
         finally:
             try:
@@ -498,6 +596,8 @@ class AgentExecutionKernel:
         *,
         start_ms: int,
         initial_reason: str | None,
+        provider_runtime_matches: bool,
+        provider_turn: Callable[..., object],
     ) -> ExecutionResult:
         ledger = BudgetLedger(request.limits)
         events: list[dict[str, object]] = []
@@ -512,6 +612,8 @@ class AgentExecutionKernel:
 
         if initial_reason is not None:
             outcome, failure_codes = "cancelled", [initial_reason]
+        elif not provider_runtime_matches:
+            outcome, failure_codes = "failed", ["provider_failed"]
         else:
             try:
                 private_input = _sealed_private_value(request.private_input)
@@ -565,6 +667,7 @@ class AgentExecutionKernel:
                         effective_tools,
                         private_input,
                         start_ms,
+                        provider_turn,
                     )
 
         return self._finalize_result(
@@ -594,6 +697,7 @@ class AgentExecutionKernel:
         effective_tools: frozenset[str],
         private_input: object,
         start_ms: int,
+        provider_turn: Callable[..., object],
     ) -> tuple[str, list[str], object]:
         execution_id = str(activation["execution_id"])
         private_output: object = None
@@ -615,7 +719,7 @@ class AgentExecutionKernel:
             if reason is not None:
                 return "cancelled", [reason], None
             try:
-                turn = self.provider.turn(
+                turn = provider_turn(
                     turn_request,
                     boundary=ProviderBoundaryControl(
                         lambda: self._cancellation_reason(request.limits, start_ms)

@@ -48,6 +48,7 @@ from worldforge.agent_harness.ports import (
     ToolResult,
 )
 from worldforge.agent_harness.records import build_event, build_receipt
+from worldforge.agent_harness.worker_registry import fixed_runtime_identity
 from worldforge.agent_harness_contracts import (
     AGENT_CAPABILITY_GRANT_FORMAT,
     AGENT_EXECUTION_RECEIPT_FORMAT,
@@ -180,6 +181,14 @@ os._exit(0)
 def _documents() -> tuple[dict[str, object], dict[str, object]]:
     activation = json.loads((FIXTURES / "worker-activation.json").read_text("utf-8"))
     grant = json.loads((FIXTURES / "capability-grant.json").read_text("utf-8"))
+    activation["runtime"] = fixed_runtime_identity()
+    activation["content_hash"] = canonical_agent_harness_hash(activation)
+    grant["runtime"] = fixed_runtime_identity()
+    grant["activation"] = {
+        "id": activation["activation_id"],
+        "content_hash": activation["content_hash"],
+    }
+    grant["content_hash"] = canonical_agent_harness_hash(grant)
     return activation, grant
 
 
@@ -1012,11 +1021,13 @@ class AgentEventLogTests(unittest.TestCase):
             self.assertEqual("executed", first.disposition)
             self.assertIsNotNone(first.result)
             self.assertEqual(1, len(provider.requests))
+            self.assertEqual(1, provider.runtime_binding_reads)
             second = coordinator.execute(request)
             self.assertEqual("existing_terminal", second.disposition)
             self.assertIsNone(second.result)
             self.assertEqual(first.records, second.records)
             self.assertEqual(1, len(provider.requests))
+            self.assertEqual(1, provider.runtime_binding_reads)
             with self.assertRaisesRegex(KernelError, "execution_already_recorded"):
                 kernel.execute(request)
             self.assertEqual(1, len(provider.requests))
@@ -2088,6 +2099,7 @@ from tests.test_agent_execution_kernel import _documents, _request, _usage
 from worldforge.agent_harness import AgentExecutionKernel, CapabilityBroker
 from worldforge.agent_harness.event_log import AgentEventLog
 from worldforge.agent_harness.ports import ProviderTurnResult
+from worldforge.agent_harness.worker_registry import fixed_runtime_identity
 
 root, ready, release, provider_marker = map(Path, sys.argv[1:])
 
@@ -2100,6 +2112,10 @@ class PausingBroker(CapabilityBroker):
         return lease
 
 class MarkerProvider:
+    @property
+    def runtime_binding(self):
+        return fixed_runtime_identity()
+
     def turn(self, _request, *, boundary):
         del boundary
         provider_marker.write_bytes(b"called")

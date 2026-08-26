@@ -12,6 +12,9 @@ from worldforge.agent_harness.ports import (
     ToolCall,
     ToolResult,
 )
+from worldforge.agent_harness.worker_registry import fixed_runtime_identity
+
+_DEFAULT_RUNTIME_BINDING = object()
 
 
 class FakeClock:
@@ -39,9 +42,25 @@ class FakeCancellation:
 
 
 class FakeProvider:
-    def __init__(self, script: Sequence[object]) -> None:
+    def __init__(
+        self,
+        script: Sequence[object],
+        *,
+        runtime_binding: object = _DEFAULT_RUNTIME_BINDING,
+    ) -> None:
         self.script = list(script)
         self.requests: list[ProviderTurnRequest] = []
+        self._runtime_binding = (
+            fixed_runtime_identity()
+            if runtime_binding is _DEFAULT_RUNTIME_BINDING
+            else runtime_binding
+        )
+        self.runtime_binding_reads = 0
+
+    @property
+    def runtime_binding(self) -> object:
+        self.runtime_binding_reads += 1
+        return self._runtime_binding
 
     def turn(
         self,

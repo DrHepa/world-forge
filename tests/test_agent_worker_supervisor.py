@@ -22,6 +22,7 @@ from tests.test_agent_execution_kernel import _documents, _kernel, _request
 from worldforge.agent_harness import OneShotProviderSupervisor
 from worldforge.agent_harness import process_supervisor as process_supervisor_module
 from worldforge.agent_harness import worker as worker_module
+from worldforge.agent_harness import worker_registry as worker_registry_module
 from worldforge.agent_harness.event_log import AgentEventLog, AgentExecutionCoordinator
 from worldforge.agent_harness.kernel import AgentExecutionKernel
 from worldforge.agent_harness.ports import (
@@ -45,7 +46,7 @@ from worldforge.agent_harness.worker_protocol import (
     parse_request_frame,
     parse_result_frame,
 )
-from worldforge.agent_harness.worker_registry import CONFORMANCE_RUNTIME
+from worldforge.agent_harness.worker_registry import fixed_runtime_identity
 
 
 def _turn_request(private_input: object) -> ProviderTurnRequest:
@@ -160,6 +161,48 @@ class _RealtimeCancellation:
 
 @unittest.skipUnless(sys.platform.startswith("linux"), "real containment probe is Linux-only")
 class LinuxOneShotProviderSupervisorTests(unittest.TestCase):
+    def test_supervisor_exposes_fresh_exact_bootstrap_runtime_binding(self) -> None:
+        supervisor = OneShotProviderSupervisor(turn_timeout_ms=2_000)
+        first = supervisor.runtime_binding
+        self.assertEqual(fixed_runtime_identity(), first)
+        first["id"] = "caller_mutation"
+        self.assertEqual(fixed_runtime_identity(), supervisor.runtime_binding)
+
+    def test_mutated_runtime_results_cannot_retarget_actual_worker_receipt(self) -> None:
+        expected = fixed_runtime_identity()
+        supervisor = OneShotProviderSupervisor(turn_timeout_ms=2_000)
+        key = b"k" * 32
+        parsed = parse_request_frame(
+            build_request_frame(_turn_request({"value": 1}), key=key, nonce="ab" * 32),
+            key=key,
+        )
+        exposed_documents = [
+            fixed_runtime_identity(),
+            supervisor.runtime_binding,
+            parsed.runtime,
+        ]
+        for document in exposed_documents:
+            document.clear()
+            document.update(
+                id="caller_selected_runtime",
+                revision=2,
+                content_hash="f" * 64,
+            )
+
+        activation, grant = _documents()
+        result = _kernel(supervisor)[0].execute(
+            replace(
+                _request(activation, grant),
+                private_input=_case("echo", payload="actual_runtime"),
+            )
+        )
+
+        self.assertEqual("succeeded", result.outcome)
+        self.assertEqual(expected, result.receipt["runtime_binding"])
+        result.receipt["runtime_binding"].clear()
+        self.assertEqual(expected, fixed_runtime_identity())
+        self.assertEqual(expected, supervisor.runtime_binding)
+
     def test_request_protocol_is_canonical_authenticated_bounded_and_exact(self) -> None:
         key = b"k" * 32
         nonce = "ab" * 32
@@ -169,7 +212,7 @@ class LinuxOneShotProviderSupervisorTests(unittest.TestCase):
         parsed = parse_request_frame(frame, key=key)
         self.assertEqual(request, parsed.request)
         self.assertEqual(nonce, parsed.nonce)
-        self.assertEqual(CONFORMANCE_RUNTIME, parsed.runtime)
+        self.assertEqual(fixed_runtime_identity(), parsed.runtime)
 
         payload = frame[4:]
         mutated = len(payload + b" ").to_bytes(4, "big") + payload + b" "
@@ -327,6 +370,7 @@ class LinuxOneShotProviderSupervisorTests(unittest.TestCase):
             5,
             result.receipt["usage"]["input_tokens"] + result.receipt["usage"]["output_tokens"],
         )
+        self.assertEqual(supervisor.runtime_binding, result.receipt["runtime_binding"])
 
         cost_supervisor = OneShotProviderSupervisor(turn_timeout_ms=2_000)
         cost_result = _kernel(cost_supervisor)[0].execute(
@@ -1812,15 +1856,55 @@ if __name__ == "__main__":
         )
 
     def test_fixed_runtime_identity_and_bootstrap_are_not_caller_injectable(self) -> None:
-        self.assertEqual(
-            {
-                "id": "worldforge.conformance.provider",
-                "revision": 1,
-                "content_hash": hashlib.sha256(
-                    worker_module.WORKER_BOOTSTRAP_TEMPLATE.encode("utf-8")
-                ).hexdigest(),
-            },
-            CONFORMANCE_RUNTIME,
+        expected = {
+            "id": "worldforge_conformance_provider",
+            "revision": 1,
+            "content_hash": hashlib.sha256(
+                worker_module.WORKER_BOOTSTRAP_TEMPLATE.encode("utf-8")
+            ).hexdigest(),
+        }
+        mutable_source = worker_registry_module.__dict__.get("CONFORMANCE_RUNTIME")
+        if type(mutable_source) is dict:
+            saved_source = dict(mutable_source)
+            mutable_source.clear()
+            mutable_source.update(
+                id="caller_selected_runtime",
+                revision=2,
+                content_hash="f" * 64,
+            )
+            try:
+                self.assertEqual(expected, fixed_runtime_identity())
+            finally:
+                mutable_source.clear()
+                mutable_source.update(saved_source)
+        self.assertNotIn("CONFORMANCE_RUNTIME", worker_registry_module.__dict__)
+        exposed = fixed_runtime_identity()
+        exposed.clear()
+        exposed.update(
+            id="caller_selected_runtime",
+            revision=2,
+            content_hash="f" * 64,
+        )
+        self.assertEqual(expected, fixed_runtime_identity())
+        with self.assertRaises(TypeError):
+            fixed_runtime_identity(  # type: ignore[call-arg]
+                type(
+                    "CallerBinding",
+                    (),
+                    {
+                        "identifier": "caller_selected_runtime",
+                        "revision": 2,
+                        "content_hash": "f" * 64,
+                    },
+                )()
+            )
+        self.assertIn(
+            '"id": "worldforge_conformance_provider"',
+            worker_module.WORKER_BOOTSTRAP_TEMPLATE,
+        )
+        self.assertNotIn(
+            '"id": "worldforge.conformance.provider"',
+            worker_module.WORKER_BOOTSTRAP_TEMPLATE,
         )
         supervisor = OneShotProviderSupervisor(turn_timeout_ms=2_000)
         with self.assertRaises(TypeError):
@@ -2731,7 +2815,7 @@ class WorkerRequestDecoderHardeningTests(unittest.TestCase):
     def test_runtime_hash_is_pinned_to_the_actual_bootstrap_template(self) -> None:
         material = worker_module.WORKER_BOOTSTRAP_TEMPLATE.encode("utf-8")
         expected = hashlib.sha256(material).hexdigest()
-        self.assertEqual(expected, CONFORMANCE_RUNTIME["content_hash"])
+        self.assertEqual(expected, fixed_runtime_identity()["content_hash"])
         self.assertNotIn(worker_module.RUNTIME_CONTENT_HASH_TOKEN, worker_module.WORKER_BOOTSTRAP)
         self.assertIn(expected, worker_module.WORKER_BOOTSTRAP)
 

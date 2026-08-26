@@ -878,6 +878,25 @@ See [ADR-0031](docs/decisions/0031-provider-free-agent-execution-kernel.md) and
 [ADR-0032](docs/decisions/0032-private-durable-agent-event-log.md), and
 [ADR-0033](docs/decisions/0033-one-shot-isolated-provider-worker.md).
 
+The host-injected provider now exposes the exact existing activation-runtime
+binding. The kernel strictly snapshots that binding and the selected bound turn
+callable once before any durable or execution authority exists. Ordinary
+attribute assignment or later mutation of an adapter's endpoint selector cannot
+redirect that kernel to a replacement adapter. This is in-process API hardening,
+not protection against `object.__setattr__`, malicious private/module reflection,
+or memory corruption in a hostile host. A newly begun activation mismatch
+records the existing `failed` / `provider_failed` receipt without activating the
+broker, provider, worker, tools, or proposals; cancellation and deadline keep
+their precedence. Matching execution binds the receipt to the same runtime, and
+an exact terminal duplicate performs no new binding read or worker spawn. The
+Harness still has no provider registry or selection authority. The fixed
+conformance runtime uses the activation-compatible private ID
+`worldforge_conformance_provider`; its frozen private scalars produce fresh
+caller-owned identity documents, and its hash remains pinned to the bootstrap
+template built from those same scalars. Public schemas and canonical fixtures
+are unchanged. See
+[ADR-0034](docs/decisions/0034-exact-provider-runtime-attestation.md).
+
 Slice 2B adds a pure deterministic evaluator and explicit-input, atomic
 no-replace CLI for the closed recorded-result plan, observation, and report
 documents. They evaluate supplied evidence only; they do not execute a

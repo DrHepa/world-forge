@@ -35,6 +35,7 @@ from worldforge.agent_harness.ports import (
     ToolCall,
     ToolResult,
 )
+from worldforge.agent_harness.worker_registry import fixed_runtime_identity
 from worldforge.agent_harness_contracts import (
     MAX_SAFE_INTEGER,
     canonical_agent_harness_hash,
@@ -51,6 +52,8 @@ BASELINE = {
 def _documents(*, capabilities: list[str] | None = None, tools: list[str] | None = None):
     activation = json.loads((FIXTURES / "worker-activation.json").read_text())
     grant = json.loads((FIXTURES / "capability-grant.json").read_text())
+    activation["runtime"] = fixed_runtime_identity()
+    grant["runtime"] = fixed_runtime_identity()
     if capabilities is not None or tools is not None:
         capabilities = (
             capabilities if capabilities is not None else activation["work_order"]["capability_ids"]
@@ -62,18 +65,18 @@ def _documents(*, capabilities: list[str] | None = None, tools: list[str] | None
         activation["work_order"]["tool_ids"] = tools
         activation["requested_capability_ids"] = capabilities
         activation["requested_tool_ids"] = tools
-        activation["content_hash"] = canonical_agent_harness_hash(activation)
-        grant["activation"] = {
-            "id": activation["activation_id"],
-            "content_hash": activation["content_hash"],
-        }
         grant["work_order"] = copy.deepcopy(activation["work_order"])
         grant["policy"] = {"capability_ids": capabilities, "tool_ids": tools}
         grant["role_capability_ids"] = capabilities
         grant["role_tool_ids"] = tools
         grant["effective_capability_ids"] = capabilities
         grant["effective_tool_ids"] = tools
-        grant["content_hash"] = canonical_agent_harness_hash(grant)
+    activation["content_hash"] = canonical_agent_harness_hash(activation)
+    grant["activation"] = {
+        "id": activation["activation_id"],
+        "content_hash": activation["content_hash"],
+    }
+    grant["content_hash"] = canonical_agent_harness_hash(grant)
     return activation, grant
 
 
@@ -174,6 +177,295 @@ class AgentExecutionKernelTests(unittest.TestCase):
         self.assertEqual("receipt_kernel_01", aggregate.receipt["receipt_id"])
         self.assertEqual(journal.receipt, result.receipt)
         self.assertEqual("PRIVATE_RESULT", result.private_output)
+        self.assertEqual(fixed_runtime_identity(), result.receipt["runtime_binding"])
+
+    def test_provider_runtime_binding_is_exact_before_any_execution_authority(self) -> None:
+        activation, grant = _documents()
+
+        class HostileBinding(dict):
+            def __init__(self) -> None:
+                super().__init__(fixed_runtime_identity())
+                self.touched: list[str] = []
+
+            def __iter__(self):
+                self.touched.append("iter")
+                raise AssertionError("hostile runtime binding iterated")
+
+            def __getitem__(self, key):
+                self.touched.append("getitem")
+                raise AssertionError("hostile runtime binding indexed")
+
+            def keys(self):
+                self.touched.append("keys")
+                raise AssertionError("hostile runtime binding keys read")
+
+        class HostileString(str):
+            def __eq__(self, _other: object) -> bool:
+                raise AssertionError("hostile runtime string compared")
+
+        class HostileInt(int):
+            def __le__(self, _other: object) -> bool:
+                raise AssertionError("hostile runtime revision compared")
+
+        hostile = HostileBinding()
+        cases: tuple[tuple[str, object], ...] = (
+            ("mapping_subclass", hostile),
+            ("missing_field", {"id": "runtime", "revision": 1}),
+            (
+                "extra_field",
+                {**fixed_runtime_identity(), "provider": "PRIVATE_PROVIDER"},
+            ),
+            (
+                "bool_revision",
+                {**fixed_runtime_identity(), "revision": True},
+            ),
+            (
+                "invalid_id",
+                {**fixed_runtime_identity(), "id": "Invalid-Runtime"},
+            ),
+            (
+                "invalid_hash",
+                {**fixed_runtime_identity(), "content_hash": "f" * 63},
+            ),
+            (
+                "id_subclass",
+                {**fixed_runtime_identity(), "id": HostileString("portable_runtime")},
+            ),
+            (
+                "revision_subclass",
+                {**fixed_runtime_identity(), "revision": HostileInt(1)},
+            ),
+            (
+                "hash_subclass",
+                {**fixed_runtime_identity(), "content_hash": HostileString("f" * 64)},
+            ),
+        )
+        for label, binding in cases:
+            with self.subTest(binding=label):
+                journal = FakeJournal()
+                provider = FakeProvider([], runtime_binding=binding)
+                with self.assertRaises(KernelError) as raised:
+                    AgentExecutionKernel(
+                        provider=provider,
+                        broker=CapabilityBroker(),
+                        journal=journal,
+                        clock=FakeClock(),
+                        cancellation=FakeCancellation(),
+                    )
+                self.assertEqual("provider_runtime_binding_invalid", raised.exception.reason_code)
+                self.assertEqual([], journal.operations)
+                self.assertEqual([], provider.requests)
+                self.assertEqual(1, provider.runtime_binding_reads)
+        self.assertEqual([], hostile.touched)
+
+        class RaisingProvider(FakeProvider):
+            @property
+            def runtime_binding(self) -> object:
+                raise RuntimeError("PRIVATE_RUNTIME_BINDING_FAILURE")
+
+        with self.assertRaises(KernelError) as raised:
+            AgentExecutionKernel(
+                provider=RaisingProvider([]),
+                broker=CapabilityBroker(),
+                journal=FakeJournal(),
+                clock=FakeClock(),
+                cancellation=FakeCancellation(),
+            )
+        self.assertEqual("provider_runtime_binding_invalid", raised.exception.reason_code)
+        self.assertNotIn("PRIVATE", str(raised.exception))
+
+    def test_provider_runtime_mismatch_is_durable_provider_failure_without_authority(
+        self,
+    ) -> None:
+        activation, grant = _documents(
+            capabilities=["artifact.propose", "tool.invoke"], tools=["source.read"]
+        )
+        provider = FakeProvider(
+            [
+                ProviderTurnResult(
+                    "MUST_NOT_RETURN",
+                    _usage(),
+                    tool_calls=(ToolCall("source.read", {"private": 1}),),
+                    artifact_proposals=(ArtifactProposal("PRIVATE_PROPOSAL"),),
+                    completed=True,
+                )
+            ],
+            runtime_binding={
+                "id": "different_runtime",
+                "revision": 1,
+                "content_hash": "f" * 64,
+            },
+        )
+
+        class ObservingBroker(CapabilityBroker):
+            def __init__(self) -> None:
+                super().__init__(
+                    tools=(FakeTool("source.read", "tool.invoke", ToolResult("unused")),),
+                    artifact_port=FakeArtifactPort(
+                        [{"id": "artifact_unused", "content_hash": "a" * 64}]
+                    ),
+                )
+                self.activation_calls = 0
+
+            def activate(self, execution_id):
+                self.activation_calls += 1
+                return super().activate(execution_id)
+
+        broker = ObservingBroker()
+        journal = FakeJournal()
+        kernel = AgentExecutionKernel(
+            provider=provider,
+            broker=broker,
+            journal=journal,
+            clock=FakeClock(),
+            cancellation=FakeCancellation(),
+        )
+        result = kernel.execute(_request(activation, grant))
+        self.assertEqual("failed", result.outcome)
+        self.assertEqual(["provider_failed"], result.receipt["failure_codes"])
+        self.assertEqual(activation["runtime"], result.receipt["runtime_binding"])
+        self.assertEqual(["begin", "finalize"], journal.operations)
+        self.assertEqual(0, broker.activation_calls)
+        self.assertEqual([], provider.requests)
+        self.assertEqual(1, provider.runtime_binding_reads)
+
+    def test_new_runtime_mismatch_preserves_cancel_and_deadline_precedence(self) -> None:
+        activation, grant = _documents()
+        binding = {
+            "id": "different_runtime",
+            "revision": 1,
+            "content_hash": "f" * 64,
+        }
+        cases = (
+            (
+                "execution_cancelled",
+                FakeClock(),
+                FakeCancellation(cancel_on_check=2),
+                {},
+            ),
+            (
+                "execution_deadline_exceeded",
+                FakeClock(now_ms=2_000),
+                FakeCancellation(),
+                {"deadline_ms": 2_000},
+            ),
+        )
+        for code, clock, cancellation, limits in cases:
+            with self.subTest(code=code):
+                provider = FakeProvider([], runtime_binding=dict(binding))
+                kernel, journal = _kernel(
+                    provider,
+                    clock=clock,
+                    cancellation=cancellation,
+                )
+                result = kernel.execute(_request(activation, grant, **limits))
+                self.assertEqual("cancelled", result.outcome)
+                self.assertEqual([code], result.receipt["failure_codes"])
+                self.assertEqual("begin", journal.operations[0])
+                self.assertEqual([], provider.requests)
+
+    def test_provider_runtime_binding_is_snapshotted_once_against_later_mutation(
+        self,
+    ) -> None:
+        activation, grant = _documents()
+        exposed = fixed_runtime_identity()
+        provider = FakeProvider(
+            [ProviderTurnResult("ran", _usage(), completed=True)],
+            runtime_binding=exposed,
+        )
+        kernel, _ = _kernel(provider)
+        exposed.clear()
+        exposed.update(
+            id="mutated_runtime",
+            revision=2,
+            content_hash="f" * 64,
+        )
+        with self.assertRaises(AttributeError):
+            kernel.provider = FakeProvider(  # type: ignore[misc]
+                [ProviderTurnResult("replacement", _usage(), completed=True)]
+            )
+        result = kernel.execute(_request(activation, grant))
+        self.assertEqual("succeeded", result.outcome)
+        self.assertEqual(fixed_runtime_identity(), result.receipt["runtime_binding"])
+        self.assertEqual(1, provider.runtime_binding_reads)
+
+    def test_provider_endpoint_is_frozen_with_its_validated_runtime_binding(self) -> None:
+        activation, grant = _documents()
+        endpoint: dict[str, object] = {}
+        original_calls: list[object] = []
+        replacement_calls: list[object] = []
+
+        def original_turn(request, *, boundary):
+            del boundary
+            original_calls.append(request)
+            return ProviderTurnResult("original", _usage(), completed=True)
+
+        def replacement_turn(request, *, boundary):
+            del boundary
+            replacement_calls.append(request)
+            return ProviderTurnResult("replacement", _usage(), completed=True)
+
+        endpoint["turn"] = original_turn
+
+        class MutableEndpointProvider:
+            def __init__(self) -> None:
+                self.binding_reads = 0
+                self.turn_reads = 0
+
+            @property
+            def runtime_binding(self) -> object:
+                self.binding_reads += 1
+                return fixed_runtime_identity()
+
+            @property
+            def turn(self):
+                self.turn_reads += 1
+                return endpoint["turn"]
+
+        provider = MutableEndpointProvider()
+        kernel = AgentExecutionKernel(
+            provider=provider,  # type: ignore[arg-type]
+            broker=CapabilityBroker(),
+            journal=FakeJournal(),
+            clock=FakeClock(),
+            cancellation=FakeCancellation(),
+        )
+        replacement = FakeProvider(
+            [replacement_turn],
+            runtime_binding={
+                "id": "replacement_runtime",
+                "revision": 1,
+                "content_hash": "f" * 64,
+            },
+        )
+        endpoint["turn"] = replacement_turn
+        with self.assertRaises(AttributeError):
+            kernel._provider = replacement  # type: ignore[misc]
+        with self.assertRaises(AttributeError):
+            kernel.provider = replacement  # type: ignore[misc]
+
+        result = kernel.execute(_request(activation, grant))
+
+        self.assertEqual("succeeded", result.outcome)
+        self.assertEqual("original", result.private_output)
+        self.assertEqual(1, provider.binding_reads)
+        self.assertEqual(1, provider.turn_reads)
+        self.assertEqual(1, len(original_calls))
+        self.assertEqual([], replacement_calls)
+        self.assertEqual([], replacement.requests)
+        self.assertEqual(0, replacement.runtime_binding_reads)
+
+    def test_private_provider_authority_rejects_ordinary_replacement(self) -> None:
+        kernel, _ = _kernel(
+            FakeProvider([ProviderTurnResult("original", _usage(), completed=True)])
+        )
+
+        with self.assertRaises(AttributeError):
+            kernel._provider_authority = object()  # type: ignore[attr-defined]
+        with self.assertRaises(AttributeError):
+            del kernel._provider_authority  # type: ignore[attr-defined]
+        with self.assertRaises(AttributeError):
+            kernel._provider_authority.turn = lambda *_args, **_kwargs: None  # type: ignore[attr-defined,misc]
 
     def test_journal_begin_is_first_and_binds_only_closed_request_evidence(self) -> None:
         activation, grant = _documents()
@@ -2513,7 +2805,7 @@ class AgentExecutionKernelTests(unittest.TestCase):
             cancellation=token,
         )
         self.assertEqual("succeeded", first.execute(_request_factory()).outcome)
-        second.provider = FakeProvider([ProviderTurnResult("later_ok", _usage(), completed=True)])
+        second_provider.script.append(ProviderTurnResult("later_ok", _usage(), completed=True))
         second.journal = FakeJournal()
         self.assertEqual("succeeded", second.execute(_request_factory()).outcome)
 

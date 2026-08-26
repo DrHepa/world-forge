@@ -94,6 +94,9 @@ class ExecutionResult:
 
 
 class ProviderAdapter(Protocol):
+    @property
+    def runtime_binding(self) -> dict[str, object]: ...
+
     def turn(
         self,
         request: ProviderTurnRequest,

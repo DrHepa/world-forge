@@ -6,8 +6,12 @@ import hashlib
 
 # This source is deliberately self-contained.  ``-I -S`` prevents the child
 # from importing the checkout, so the supervisor passes no module or path.
+_CONFORMANCE_RUNTIME_ID = "worldforge_conformance_provider"
+_CONFORMANCE_RUNTIME_REVISION = 1
+_RUNTIME_ID_TOKEN = "__WORLD_FORGE_RUNTIME_ID__"
+_RUNTIME_REVISION_TOKEN = "__WORLD_FORGE_RUNTIME_REVISION__"
 RUNTIME_CONTENT_HASH_TOKEN = "__WORLD_FORGE_RUNTIME_CONTENT_HASH__"
-WORKER_BOOTSTRAP_TEMPLATE = r"""
+_WORKER_BOOTSTRAP_TEMPLATE = r"""
 import hashlib
 import hmac
 import json
@@ -21,8 +25,8 @@ import time
 MAX_REQUEST = 256 * 1024
 MAX_RESPONSE = 32 * 1024 * 1024
 RUNTIME = {
-    "id": "worldforge.conformance.provider",
-    "revision": 1,
+    "id": "__WORLD_FORGE_RUNTIME_ID__",
+    "revision": __WORLD_FORGE_RUNTIME_REVISION__,
     "content_hash": "__WORLD_FORGE_RUNTIME_CONTENT_HASH__",
 }
 MAX_DEPTH = 64
@@ -342,15 +346,21 @@ except BaseException:
     os._exit(70)
 """
 
-CONFORMANCE_RUNTIME_HASH = hashlib.sha256(WORKER_BOOTSTRAP_TEMPLATE.encode("utf-8")).hexdigest()
+WORKER_BOOTSTRAP_TEMPLATE = _WORKER_BOOTSTRAP_TEMPLATE.replace(
+    _RUNTIME_ID_TOKEN,
+    _CONFORMANCE_RUNTIME_ID,
+).replace(
+    _RUNTIME_REVISION_TOKEN,
+    str(_CONFORMANCE_RUNTIME_REVISION),
+)
+_CONFORMANCE_RUNTIME_HASH = hashlib.sha256(WORKER_BOOTSTRAP_TEMPLATE.encode("utf-8")).hexdigest()
 WORKER_BOOTSTRAP = WORKER_BOOTSTRAP_TEMPLATE.replace(
     RUNTIME_CONTENT_HASH_TOKEN,
-    CONFORMANCE_RUNTIME_HASH,
+    _CONFORMANCE_RUNTIME_HASH,
 )
 
 
 __all__ = (
-    "CONFORMANCE_RUNTIME_HASH",
     "RUNTIME_CONTENT_HASH_TOKEN",
     "WORKER_BOOTSTRAP",
     "WORKER_BOOTSTRAP_TEMPLATE",

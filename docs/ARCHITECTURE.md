@@ -646,6 +646,25 @@ isolation, real providers, and telemetry enforcement remain outside this slice. 
 [ADR-0032](decisions/0032-private-durable-agent-event-log.md), and
 [ADR-0033](decisions/0033-one-shot-isolated-provider-worker.md).
 
+The injected provider boundary is now bound to the existing activation runtime
+triple rather than a Harness-selected registry entry. Kernel construction
+strictly snapshots one exact built-in binding and the matching bound turn
+callable before journal or broker authority can exist. A frozen private
+authority rejects ordinary replacement or deletion, and later mutation of an
+adapter's endpoint selector cannot redirect execution. This boundary does not
+claim protection against `object.__setattr__`, malicious same-process
+private/module reflection, or memory corruption. After durable begin,
+cancellation and deadline retain precedence; an activation mismatch otherwise
+terminalizes as the existing `provider_failed` failure without broker, provider,
+worker, tool, or proposal activation. A matching turn and its receipt share that
+exact binding, while exact-terminal replay performs no new binding access or
+provider effect. The fixed supervisor's portable private ID is
+`worldforge_conformance_provider`; a frozen private binding supplies fresh
+caller-owned documents, and its content hash derives from the bootstrap template
+built from the same immutable scalars. This adds neither a provider registry nor
+selection authority. See
+[ADR-0034](decisions/0034-exact-provider-runtime-attestation.md).
+
 Slice 2B retains the closed, identity/evidence-only plan, observation, and report
 boundary for an optional codebase-memory comparison and adds a pure evaluator
 plus an explicit-input, atomic no-replace CLI. Validators resolve the exact plan

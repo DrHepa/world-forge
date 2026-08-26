@@ -16,6 +16,7 @@ from .worker_protocol import (
     build_request_frame,
     parse_result_frame,
 )
+from .worker_registry import fixed_runtime_identity
 
 _MAX_PRIVATE_TURN_TIMEOUT_MS = 60_000
 
@@ -39,6 +40,12 @@ class OneShotProviderSupervisor:
     @property
     def spawn_count(self) -> int:
         return self._process_supervisor.spawn_count
+
+    @property
+    def runtime_binding(self) -> dict[str, object]:
+        """Return the exact fixed bootstrap-derived identity without caller aliases."""
+
+        return fixed_runtime_identity()
 
     @property
     def active_broker_pid(self) -> int | None:

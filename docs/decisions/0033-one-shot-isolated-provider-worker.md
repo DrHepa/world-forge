@@ -6,6 +6,10 @@
 > Supersession note: ADR-0038 preserves this conformance runtime and containment
 > contract byte-for-byte while adding one second code-owned offline probe behind
 > the same enum-only supervisor boundary.
+>
+> ADR-0041 advances the private provider-turn protocol to version 2 and the
+> conformance runtime to revision 3 with a new bootstrap hash; containment and
+> process ownership are unchanged.
 
 ## Context
 

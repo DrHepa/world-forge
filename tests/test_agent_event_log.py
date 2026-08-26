@@ -1158,8 +1158,14 @@ class AgentEventLogTests(unittest.TestCase):
                                 "arguments": "PRIVATE_TOOL_ARGUMENTS",
                                 "provider_payload": "PRIVATE_PROVIDER_PAYLOAD",
                             },
+                            neutral_call_id="neutral_coordinator_01",
                         ),
                     ),
+                    completed=False,
+                ),
+                ProviderTurnResult(
+                    private_output={"payload": "PRIVATE_COORDINATOR_OUTPUT"},
+                    usage=ProviderUsage(0, 0, 0, 0, "USD"),
                     completed=True,
                 ),
                 ProviderTurnResult(
@@ -1196,22 +1202,22 @@ class AgentEventLogTests(unittest.TestCase):
             first = coordinator.execute(request)
             self.assertEqual("executed", first.disposition)
             self.assertIsNotNone(first.result)
-            self.assertEqual(2, len(provider.requests))
+            self.assertEqual(3, len(provider.requests))
             self.assertEqual(1, provider.runtime_binding_reads)
             second = coordinator.execute(request)
             self.assertEqual("existing_terminal", second.disposition)
             self.assertIsNone(second.result)
             self.assertEqual(first.records, second.records)
-            self.assertEqual(2, len(provider.requests))
+            self.assertEqual(3, len(provider.requests))
             self.assertEqual(1, provider.runtime_binding_reads)
             with self.assertRaisesRegex(KernelError, "execution_already_recorded"):
                 kernel.execute(request)
-            self.assertEqual(2, len(provider.requests))
+            self.assertEqual(3, len(provider.requests))
 
             kernel.journal = FakeJournal()
             with self.assertRaisesRegex(AgentEventLogError, "event_log_coordinator_mismatch"):
                 coordinator.execute(request)
-            self.assertEqual(2, len(provider.requests))
+            self.assertEqual(3, len(provider.requests))
             kernel.journal = log
 
             before_changes = log.connection.total_changes

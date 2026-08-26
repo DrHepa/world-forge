@@ -118,13 +118,13 @@ class ConformanceRuntimeApprovalTests(unittest.TestCase):
     def test_existing_conformance_template_bytes_and_hash_are_pinned(self) -> None:
         encoded = worker_module.WORKER_BOOTSTRAP_TEMPLATE.encode("utf-8")
 
-        self.assertEqual(13_446, len(encoded))
+        self.assertEqual(15_623, len(encoded))
         self.assertEqual(
-            "62edb8058126c106eba24b457a2f2be232c952e4389584ad1bd5a4d3234aff0c",
+            "581acc1e370a580f737c1c3b3063b62309808748b2e7b569c39fd62411b20829",
             hashlib.sha256(encoded).hexdigest(),
         )
         self.assertEqual(
-            "62edb8058126c106eba24b457a2f2be232c952e4389584ad1bd5a4d3234aff0c",
+            "581acc1e370a580f737c1c3b3063b62309808748b2e7b569c39fd62411b20829",
             fixed_runtime_identity()["content_hash"],
         )
 
@@ -170,6 +170,13 @@ class CodeOwnedRuntimeRegistryTests(unittest.TestCase):
         self.assertEqual(2, len(entries))
         self.assertEqual(
             {
+                _CodeOwnedRuntimeKey.CONFORMANCE: (3, 2),
+                _CodeOwnedRuntimeKey.DETERMINISTIC_PROBE: (4, 2),
+            },
+            {entry.key: (entry.revision, entry.protocol_version) for entry in entries},
+        )
+        self.assertEqual(
+            {
                 "worldforge_conformance_provider",
                 "worldforge_deterministic_probe_provider",
             },
@@ -177,9 +184,15 @@ class CodeOwnedRuntimeRegistryTests(unittest.TestCase):
         )
         self.assertEqual(2, len({entry.content_hash for entry in entries}))
         self.assertEqual(2, len({entry.spec.content_hash for entry in entries}))
-        self.assertTrue(all(entry.protocol_version == 1 for entry in entries))
+        self.assertTrue(all(entry.protocol_version == 2 for entry in entries))
         self.assertTrue(all(entry.spec.network_scope == "none" for entry in entries))
         self.assertTrue(all(not entry.spec.production_eligible for entry in entries))
+        probe = runtime_entry(_CodeOwnedRuntimeKey.DETERMINISTIC_PROBE)
+        self.assertEqual(16_184, len(probe.bootstrap_template.encode("utf-8")))
+        self.assertEqual(
+            "8d162770d4c2edfba6f483063e308cc7d94bd33c6afc4d541a9fcd306972b0cc",
+            probe.content_hash,
+        )
         self.assertEqual(
             tuple(entry.spec for entry in entries),
             code_owned_provider_catalog().specs,
@@ -298,7 +311,7 @@ class CodeOwnedRuntimeRegistryTests(unittest.TestCase):
 
 
 class RuntimeBoundProtocolTests(unittest.TestCase):
-    def test_authenticated_frames_remain_v1_and_reject_cross_runtime_parsing(self) -> None:
+    def test_authenticated_frames_are_v2_and_reject_cross_runtime_parsing(self) -> None:
         request = _turn_request({"probe": "request"})
         key = b"k" * 32
         nonce = "ab" * 32
@@ -307,7 +320,7 @@ class RuntimeBoundProtocolTests(unittest.TestCase):
         frame = build_request_frame(request, key=key, nonce=nonce, runtime_key=conformance)
         size = int.from_bytes(frame[:4], "big")
         document = json.loads(frame[4 : 4 + size])
-        self.assertEqual(1, document["format_version"])
+        self.assertEqual(2, document["format_version"])
         self.assertEqual(runtime_identity(conformance), document["runtime"])
         self.assertEqual(
             request,
@@ -483,7 +496,7 @@ class LinuxRuntimeDispatchTests(unittest.TestCase):
             {
                 "execution_id": "execution_minimal_01",
                 "exposed_tool_count": 0,
-                "history_hash": hashlib.sha256(b"[]").hexdigest(),
+                "transcript_hash": hashlib.sha256(b"[]").hexdigest(),
                 "private_input_hash": hashlib.sha256(b'{"probe":"payload"}').hexdigest(),
                 "runtime_id": "worldforge_deterministic_probe_provider",
                 "tool_summary_count": 0,

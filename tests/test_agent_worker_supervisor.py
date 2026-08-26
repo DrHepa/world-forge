@@ -58,7 +58,7 @@ def _turn_request(private_input: object) -> ProviderTurnRequest:
         execution_id="execution_minimal_01",
         turn_index=0,
         private_input=private_input,
-        history=(),
+        transcript=(),
     )
 
 
@@ -1230,7 +1230,14 @@ class LinuxOneShotProviderSupervisorTests(unittest.TestCase):
             (
                 _case(
                     "echo",
-                    tool_calls=[{"tool_id": "source.read", "private_arguments": {"x": 1}}],
+                    tool_calls=[
+                        {
+                            "neutral_call_id": "neutral_native_01",
+                            "tool_id": "source.read",
+                            "private_arguments": {"x": 1},
+                        }
+                    ],
+                    completed=False,
                 ),
                 "tool_not_authorized",
             ),
@@ -1866,7 +1873,7 @@ if __name__ == "__main__":
     def test_fixed_runtime_identity_and_bootstrap_are_not_caller_injectable(self) -> None:
         expected = {
             "id": "worldforge_conformance_provider",
-            "revision": 2,
+            "revision": 3,
             "content_hash": hashlib.sha256(
                 worker_module.WORKER_BOOTSTRAP_TEMPLATE.encode("utf-8")
             ).hexdigest(),
@@ -2754,11 +2761,11 @@ class WorkerRequestDecoderHardeningTests(unittest.TestCase):
             ("invalid_execution_id", ("request", ("execution_id", "INVALID"))),
             ("bool_turn", ("request", ("turn_index", True))),
             ("turn_out_of_bounds", ("request", ("turn_index", 65))),
-            ("history_wrong_type", ("request", ("history", {}))),
-            ("history_too_large", ("request", ("history", [{}] * 257))),
+            ("transcript_wrong_type", ("request", ("transcript", {}))),
+            ("transcript_too_large", ("request", ("transcript", [{}] * 257))),
             ("private_depth", ("request", ("private_input", deep))),
             ("request_extra", ("request", ("extra", "value"))),
-            ("request_missing", ("request", ("history", _DELETE))),
+            ("request_missing", ("request", ("transcript", _DELETE))),
         )
         for label, mutation in cases:
             with self.subTest(case=label):

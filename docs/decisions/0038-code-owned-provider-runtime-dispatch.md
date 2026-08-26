@@ -6,6 +6,10 @@
 > Supersession note: ADR-0040 advances the deterministic probe to revision 3
 > and permits its exact governed loopback variant through a parent-owned
 > gateway; the conformance runtime and closed two-ID registry remain unchanged.
+>
+> ADR-0041 advances conformance to revision 3, the deterministic probe to
+> revision 4, and the private provider-turn protocol to version 2 while
+> retaining both runtime IDs and exactly two registry entries.
 
 ## Context
 

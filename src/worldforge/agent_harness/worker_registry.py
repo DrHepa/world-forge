@@ -29,7 +29,7 @@ from .worker import (
 )
 
 _REGISTRY_ERROR = "code_owned_runtime_registry_invalid"
-_PROTOCOL_VERSION = 1
+_PROTOCOL_VERSION = 2
 _ENVIRONMENT_PROFILE = (
     ("ANTHROPIC_DISABLE_TELEMETRY", "1"),
     ("DO_NOT_TRACK", "1"),

@@ -3,6 +3,10 @@
 - Status: accepted
 - Date: 2026-08-26
 
+> Supersession note: ADR-0041 advances the deterministic probe to revision 4
+> and provider-turn protocol to version 2. This ADR's loopback side-band
+> protocol and gateway policy remain version 1.
+
 ## Context
 
 ADR-0039 denies direct socket creation and descriptor acquisition in every

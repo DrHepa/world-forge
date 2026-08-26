@@ -11,13 +11,16 @@ from dataclasses import dataclass
 from .ports import (
     ArtifactProposal,
     MemoryProposal,
+    ProviderAssistantTranscriptItem,
     ProviderToolDefinition,
+    ProviderToolResultTranscriptItem,
     ProviderToolSummary,
     ProviderTurnRequest,
     ProviderTurnResult,
     ProviderUsage,
     ToolCall,
 )
+from .worker_limits import MAX_PROVIDER_TOOL_CALLS_PER_TURN
 from .worker_registry import (
     _CodeOwnedRuntimeEntry,
     _CodeOwnedRuntimeKey,
@@ -29,14 +32,16 @@ MAX_WORKER_REQUEST_BYTES = 256 * 1024
 MAX_WORKER_RESPONSE_BYTES = 32 * 1024 * 1024
 MAX_WORKER_STDERR_BYTES = 64 * 1024
 MAX_WORKER_JSON_DEPTH = 64
-MAX_WORKER_HISTORY_ITEMS = 256
+MAX_WORKER_TRANSCRIPT_ITEMS = 256
+MAX_WORKER_TRANSCRIPT_BYTES = 64 * 1024
 MAX_SAFE_INTEGER = (1 << 53) - 1
 _REQUEST_FORMAT = "world-forge.private.provider_turn_request"
 _RESULT_FORMAT = "world-forge.private.provider_turn_result"
-_PROTOCOL_VERSION = 1
+_PROTOCOL_VERSION = 2
 _HEX_64_RE = re.compile(r"^[0-9a-f]{64}$")
 _ID_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
 _TOOL_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}(?:\.[a-z][a-z0-9_]{1,63})+$")
+_NEUTRAL_CALL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$", re.ASCII)
 _CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
 _MAX_TOOL_SUMMARY_BYTES = 1024
 _MAX_TOOL_SCHEMA_BYTES = 16 * 1024
@@ -267,8 +272,8 @@ def _request_payload(request: ProviderTurnRequest) -> dict[str, object]:
         or _ID_RE.fullmatch(request.execution_id) is None
         or type(request.turn_index) is not int
         or not 0 <= request.turn_index <= 64
-        or type(request.history) is not tuple
-        or len(request.history) > MAX_WORKER_HISTORY_ITEMS
+        or type(request.transcript) is not tuple
+        or len(request.transcript) > MAX_WORKER_TRANSCRIPT_ITEMS
         or type(request.tool_summaries) is not tuple
         or type(request.exposed_tools) is not tuple
         or len(request.tool_summaries) > 128
@@ -302,14 +307,187 @@ def _request_payload(request: ProviderTurnRequest) -> dict[str, object]:
             raise WorkerProtocolError("worker_protocol_request_invalid")
         definition_ids.add(tool_id)
         definitions.append(definition)
+    transcript = _transcript_payload(request.transcript)
     return {
         "execution_id": request.execution_id,
         "turn_index": request.turn_index,
         "private_input": _snapshot(request.private_input),
-        "history": [_snapshot(item) for item in tuple.__iter__(request.history)],
+        "transcript": transcript,
         "tool_summaries": summaries,
         "exposed_tools": definitions,
     }
+
+
+def _neutral_call_id(value: object, *, reason_code: str) -> str:
+    if type(value) is not str or _NEUTRAL_CALL_ID_RE.fullmatch(value) is None:
+        raise WorkerProtocolError(reason_code)
+    return value
+
+
+def _tool_call_payload(call: object, *, reason_code: str) -> dict[str, object]:
+    if type(call) is not ToolCall:
+        raise WorkerProtocolError(reason_code)
+    neutral_call_id = _neutral_call_id(call.neutral_call_id, reason_code=reason_code)
+    if (
+        type(call.tool_id) is not str
+        or len(call.tool_id) > _MAX_TOOL_ID_CHARACTERS
+        or _TOOL_RE.fullmatch(call.tool_id) is None
+    ):
+        raise WorkerProtocolError(reason_code)
+    return {
+        "neutral_call_id": neutral_call_id,
+        "tool_id": call.tool_id,
+        "private_arguments": _snapshot(call.private_arguments),
+    }
+
+
+def _transcript_payload(value: object) -> list[dict[str, object]]:
+    if type(value) is not tuple or len(value) > MAX_WORKER_TRANSCRIPT_ITEMS:
+        raise WorkerProtocolError("worker_protocol_request_invalid")
+    items = tuple(tuple.__iter__(value))
+    payload: list[dict[str, object]] = []
+    seen: set[str] = set()
+    index = 0
+    while index < len(items):
+        assistant = items[index]
+        if (
+            type(assistant) is not ProviderAssistantTranscriptItem
+            or type(assistant.tool_calls) is not tuple
+            or type(MAX_PROVIDER_TOOL_CALLS_PER_TURN) is not int
+            or len(assistant.tool_calls) > MAX_PROVIDER_TOOL_CALLS_PER_TURN
+        ):
+            raise WorkerProtocolError("worker_protocol_request_invalid")
+        calls = tuple(
+            _tool_call_payload(call, reason_code="worker_protocol_request_invalid")
+            for call in tuple.__iter__(assistant.tool_calls)
+        )
+        call_ids = tuple(call["neutral_call_id"] for call in calls)
+        if len(call_ids) != len(set(call_ids)) or not set(call_ids).isdisjoint(seen):
+            raise WorkerProtocolError("worker_protocol_request_invalid")
+        seen.update(call_ids)
+        payload.append(
+            {
+                "role": "assistant",
+                "private_output": _snapshot(assistant.private_output),
+                "tool_calls": list(calls),
+            }
+        )
+        index += 1
+        for call in calls:
+            if index >= len(items):
+                raise WorkerProtocolError("worker_protocol_request_invalid")
+            result = items[index]
+            if (
+                type(result) is not ProviderToolResultTranscriptItem
+                or _neutral_call_id(
+                    result.neutral_call_id,
+                    reason_code="worker_protocol_request_invalid",
+                )
+                != call["neutral_call_id"]
+                or type(result.tool_id) is not str
+                or result.tool_id != call["tool_id"]
+            ):
+                raise WorkerProtocolError("worker_protocol_request_invalid")
+            payload.append(
+                {
+                    "role": "tool_result",
+                    "neutral_call_id": result.neutral_call_id,
+                    "tool_id": result.tool_id,
+                    "private_output": _snapshot(result.private_output),
+                }
+            )
+            index += 1
+    if len(_canonical(payload)) > MAX_WORKER_TRANSCRIPT_BYTES:
+        raise WorkerProtocolError("worker_protocol_request_invalid")
+    return payload
+
+
+def _parse_transcript(
+    value: object,
+) -> tuple[ProviderAssistantTranscriptItem | ProviderToolResultTranscriptItem, ...]:
+    if type(value) is not list or len(value) > MAX_WORKER_TRANSCRIPT_ITEMS:
+        raise WorkerProtocolError("worker_protocol_request_invalid")
+    parsed: list[ProviderAssistantTranscriptItem | ProviderToolResultTranscriptItem] = []
+    index = 0
+    seen: set[str] = set()
+    while index < len(value):
+        item = value[index]
+        if (
+            type(item) is not dict
+            or set(item)
+            != {
+                "role",
+                "private_output",
+                "tool_calls",
+            }
+            or item["role"] != "assistant"
+            or type(item["tool_calls"]) is not list
+            or type(MAX_PROVIDER_TOOL_CALLS_PER_TURN) is not int
+            or len(item["tool_calls"]) > MAX_PROVIDER_TOOL_CALLS_PER_TURN
+        ):
+            raise WorkerProtocolError("worker_protocol_request_invalid")
+        calls: list[ToolCall] = []
+        for raw_call in item["tool_calls"]:
+            if type(raw_call) is not dict or set(raw_call) != {
+                "neutral_call_id",
+                "tool_id",
+                "private_arguments",
+            }:
+                raise WorkerProtocolError("worker_protocol_request_invalid")
+            call_payload = _tool_call_payload(
+                ToolCall(
+                    raw_call["tool_id"],
+                    raw_call["private_arguments"],
+                    neutral_call_id=raw_call["neutral_call_id"],
+                ),
+                reason_code="worker_protocol_request_invalid",
+            )
+            if call_payload["neutral_call_id"] in seen:
+                raise WorkerProtocolError("worker_protocol_request_invalid")
+            seen.add(call_payload["neutral_call_id"])
+            calls.append(
+                ToolCall(
+                    call_payload["tool_id"],
+                    call_payload["private_arguments"],
+                    neutral_call_id=call_payload["neutral_call_id"],
+                )
+            )
+        parsed.append(ProviderAssistantTranscriptItem(item["private_output"], tuple(calls)))
+        index += 1
+        for call in calls:
+            if index >= len(value):
+                raise WorkerProtocolError("worker_protocol_request_invalid")
+            raw_result = value[index]
+            if (
+                type(raw_result) is not dict
+                or set(raw_result)
+                != {
+                    "role",
+                    "neutral_call_id",
+                    "tool_id",
+                    "private_output",
+                }
+                or raw_result["role"] != "tool_result"
+            ):
+                raise WorkerProtocolError("worker_protocol_request_invalid")
+            neutral_call_id = _neutral_call_id(
+                raw_result["neutral_call_id"],
+                reason_code="worker_protocol_request_invalid",
+            )
+            if neutral_call_id != call.neutral_call_id or raw_result["tool_id"] != call.tool_id:
+                raise WorkerProtocolError("worker_protocol_request_invalid")
+            parsed.append(
+                ProviderToolResultTranscriptItem(
+                    neutral_call_id,
+                    call.tool_id,
+                    raw_result["private_output"],
+                )
+            )
+            index += 1
+    transcript = tuple(parsed)
+    if _transcript_payload(transcript) != value:
+        raise WorkerProtocolError("worker_protocol_request_invalid")
+    return transcript
 
 
 def _tool_summary_payload(value: ProviderToolSummary) -> dict[str, object]:
@@ -428,7 +606,7 @@ def parse_request_frame(
         "execution_id",
         "turn_index",
         "private_input",
-        "history",
+        "transcript",
         "tool_summaries",
         "exposed_tools",
     }:
@@ -438,11 +616,11 @@ def parse_request_frame(
     )
     if not hmac.compare_digest(request_hash, _digest(payload)):
         raise WorkerProtocolError("worker_protocol_hash_mismatch")
-    history = payload["history"]
+    transcript = payload["transcript"]
     summary_values = payload["tool_summaries"]
     definition_values = payload["exposed_tools"]
     if (
-        type(history) is not list
+        type(transcript) is not list
         or type(summary_values) is not list
         or type(definition_values) is not list
     ):
@@ -477,7 +655,7 @@ def parse_request_frame(
         execution_id=payload["execution_id"],
         turn_index=payload["turn_index"],
         private_input=payload["private_input"],
-        history=tuple(history),
+        transcript=_parse_transcript(transcript),
         tool_summaries=tuple(summaries),
         exposed_tools=tuple(definitions),
     )
@@ -551,7 +729,8 @@ def _parse_result_payload(payload: object) -> ProviderTurnResult:
     ):
         raise WorkerProtocolError("worker_protocol_result_invalid")
     if (
-        len(tool_values) > 128
+        type(MAX_PROVIDER_TOOL_CALLS_PER_TURN) is not int
+        or len(tool_values) > MAX_PROVIDER_TOOL_CALLS_PER_TURN
         or len(artifact_values) > 64
         or len(memory_values) > 64
         or len(exposure_values) > 128
@@ -566,7 +745,11 @@ def _parse_result_payload(payload: object) -> ProviderTurnResult:
         raise WorkerProtocolError("worker_protocol_result_invalid")
     tool_calls: list[ToolCall] = []
     for item in tool_values:
-        if type(item) is not dict or set(item) != {"tool_id", "private_arguments"}:
+        if type(item) is not dict or set(item) != {
+            "neutral_call_id",
+            "tool_id",
+            "private_arguments",
+        }:
             raise WorkerProtocolError("worker_protocol_result_invalid")
         tool_id = item["tool_id"]
         if (
@@ -575,7 +758,20 @@ def _parse_result_payload(payload: object) -> ProviderTurnResult:
             or _TOOL_RE.fullmatch(tool_id) is None
         ):
             raise WorkerProtocolError("worker_protocol_result_invalid")
-        tool_calls.append(ToolCall(tool_id, item["private_arguments"]))
+        tool_calls.append(
+            ToolCall(
+                tool_id,
+                item["private_arguments"],
+                neutral_call_id=_neutral_call_id(
+                    item["neutral_call_id"],
+                    reason_code="worker_protocol_result_invalid",
+                ),
+            )
+        )
+    if len({call.neutral_call_id for call in tool_calls}) != len(tool_calls):
+        raise WorkerProtocolError("worker_protocol_result_invalid")
+    if payload["completed"] and tool_calls:
+        raise WorkerProtocolError("worker_protocol_result_invalid")
     if set(exposure_values).intersection(call.tool_id for call in tool_calls):
         raise WorkerProtocolError("worker_protocol_result_invalid")
     artifact_proposals: list[ArtifactProposal] = []
@@ -614,7 +810,7 @@ def _result_payload(result: ProviderTurnResult) -> dict[str, object]:
         "private_output": _snapshot(result.private_output),
         "usage": _usage_payload(result.usage),
         "tool_calls": [
-            {"tool_id": call.tool_id, "private_arguments": _snapshot(call.private_arguments)}
+            _tool_call_payload(call, reason_code="worker_protocol_result_invalid")
             for call in result.tool_calls
             if type(call) is ToolCall
         ],

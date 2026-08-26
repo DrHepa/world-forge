@@ -3,6 +3,10 @@
 - Status: accepted
 - Date: 2026-08-26
 
+> Supersession note: ADR-0041 adds mandatory provider-neutral call correlation,
+> forbids completed results with calls, and advances conformance to revision 3;
+> progressive exposure and human approval semantics are unchanged.
+
 ## Context
 
 The public capability grant proves deterministic policy intersection, but it

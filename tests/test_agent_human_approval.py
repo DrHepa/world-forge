@@ -669,9 +669,16 @@ class KernelApprovalAndProgressiveExposureTests(unittest.TestCase):
                 ProviderTurnResult(
                     "complete",
                     _usage(),
-                    tool_calls=(ToolCall("source.read", {"path": "PRIVATE_PATH"}),),
-                    completed=True,
+                    tool_calls=(
+                        ToolCall(
+                            "source.read",
+                            {"path": "PRIVATE_PATH"},
+                            neutral_call_id="neutral_test_001",
+                        ),
+                    ),
+                    completed=False,
                 ),
+                ProviderTurnResult("complete", _usage(), completed=True),
             ]
         )
         kernel, authority = _approval_kernel(provider, (source, hidden))
@@ -686,8 +693,8 @@ class KernelApprovalAndProgressiveExposureTests(unittest.TestCase):
         result = kernel.execute(request)
 
         self.assertEqual("succeeded", result.outcome)
-        self.assertEqual(2, len(provider.requests))
-        initial, following = provider.requests
+        self.assertEqual(3, len(provider.requests))
+        initial, following, final = provider.requests
         self.assertEqual(("source.read",), tuple(item.tool_id for item in initial.tool_summaries))
         self.assertFalse(hasattr(initial.tool_summaries[0], "input_schema"))
         self.assertEqual((), initial.exposed_tools)
@@ -703,6 +710,7 @@ class KernelApprovalAndProgressiveExposureTests(unittest.TestCase):
             following.exposed_tools[0].input_schema,
         )
         self.assertEqual(1, len(source.calls))
+        self.assertEqual("neutral_test_001", final.transcript[2].neutral_call_id)
         self.assertEqual([], hidden.calls)
         private_documents = json.dumps(
             [
@@ -738,9 +746,9 @@ class KernelApprovalAndProgressiveExposureTests(unittest.TestCase):
                 ProviderTurnResult(
                     "escalate",
                     _usage(),
-                    tool_calls=(ToolCall("source.read", {}),),
+                    tool_calls=(ToolCall("source.read", {}, neutral_call_id="neutral_test_002"),),
                     tool_exposure_requests=("source.read",),
-                    completed=True,
+                    completed=False,
                 )
             ]
         )
@@ -764,9 +772,9 @@ class KernelApprovalAndProgressiveExposureTests(unittest.TestCase):
                 ProviderTurnResult(
                     "re-request and invoke",
                     _usage(),
-                    tool_calls=(ToolCall("source.read", {}),),
+                    tool_calls=(ToolCall("source.read", {}, neutral_call_id="neutral_test_003"),),
                     tool_exposure_requests=("source.read",),
-                    completed=True,
+                    completed=False,
                 ),
             ]
         )
@@ -1091,8 +1099,8 @@ class KernelApprovalAndProgressiveExposureTests(unittest.TestCase):
                 ProviderTurnResult(
                     "invoke",
                     _usage(),
-                    tool_calls=(ToolCall("source.read", {}),),
-                    completed=True,
+                    tool_calls=(ToolCall("source.read", {}, neutral_call_id="neutral_test_004"),),
+                    completed=False,
                 ),
             ]
         )
@@ -1124,10 +1132,10 @@ class KernelApprovalAndProgressiveExposureTests(unittest.TestCase):
                     "mixed batch",
                     _usage(),
                     tool_calls=(
-                        ToolCall("source.read", {}),
-                        ToolCall("world.validate", {}),
+                        ToolCall("source.read", {}, neutral_call_id="neutral_test_005"),
+                        ToolCall("world.validate", {}, neutral_call_id="neutral_test_006"),
                     ),
-                    completed=True,
+                    completed=False,
                 ),
             ]
         )
@@ -1315,8 +1323,8 @@ class KernelApprovalAndProgressiveExposureTests(unittest.TestCase):
                 ProviderTurnResult(
                     "invoke",
                     _usage(),
-                    tool_calls=(ToolCall("source.read", {}),),
-                    completed=True,
+                    tool_calls=(ToolCall("source.read", {}, neutral_call_id="neutral_test_007"),),
+                    completed=False,
                 ),
             ]
         )
@@ -1566,7 +1574,7 @@ class ProgressiveExposureProtocolTests(unittest.TestCase):
             build_result_frame(
                 replace(
                     result,
-                    tool_calls=(ToolCall("source.read", {}),),
+                    tool_calls=(ToolCall("source.read", {}, neutral_call_id="neutral_test_008"),),
                     tool_exposure_requests=("source.read",),
                 ),
                 key=key,
@@ -1712,7 +1720,7 @@ class ProgressiveExposureProtocolTests(unittest.TestCase):
         self.assertEqual(1024, len(exact_tool_id))
         exact_result = replace(
             result,
-            tool_calls=(ToolCall(exact_tool_id, {"value": 1}),),
+            tool_calls=(ToolCall(exact_tool_id, {"value": 1}, neutral_call_id="neutral_test_009"),),
             tool_exposure_requests=(),
         )
         exact_frame = build_result_frame(
@@ -1736,7 +1744,9 @@ class ProgressiveExposureProtocolTests(unittest.TestCase):
             build_result_frame(
                 replace(
                     result,
-                    tool_calls=(ToolCall(overlong_call_id, {}),),
+                    tool_calls=(
+                        ToolCall(overlong_call_id, {}, neutral_call_id="neutral_test_010"),
+                    ),
                     tool_exposure_requests=(),
                 ),
                 key=key,
@@ -1751,7 +1761,9 @@ class ProgressiveExposureProtocolTests(unittest.TestCase):
             build_result_frame(
                 replace(
                     result,
-                    tool_calls=(ToolCall(TextAlias("source.read"), {}),),
+                    tool_calls=(
+                        ToolCall(TextAlias("source.read"), {}, neutral_call_id="neutral_test_011"),
+                    ),
                     tool_exposure_requests=(),
                 ),
                 key=key,
@@ -1984,12 +1996,14 @@ class NativeApprovalRevocationTests(unittest.TestCase):
                         {
                             "tool_calls": [
                                 {
+                                    "neutral_call_id": "neutral_native_01",
                                     "tool_id": "source.read",
                                     "private_arguments": {"path": "PRIVATE_NATIVE_PATH"},
                                 }
                             ],
-                            "completed": True,
+                            "completed": False,
                         },
+                        {"include_transcript": True, "completed": True},
                     ]
                 }
             },
@@ -2020,9 +2034,17 @@ class NativeApprovalRevocationTests(unittest.TestCase):
         )
         result = kernel.execute(request)
         self.assertEqual("succeeded", result.outcome)
-        self.assertEqual(2, supervisor.spawn_count)
+        self.assertEqual(3, supervisor.spawn_count)
         self.assertEqual(1, len(tool.calls))
         self.assertEqual({"path": "PRIVATE_NATIVE_PATH"}, tool.calls[0].private_arguments)
+        transcript = result.private_output["transcript"]
+        self.assertEqual(
+            ["assistant", "assistant", "tool_result"],
+            [item["role"] for item in transcript],
+        )
+        self.assertEqual("neutral_native_01", transcript[2]["neutral_call_id"])
+        self.assertEqual("source.read", transcript[2]["tool_id"])
+        self.assertEqual({"value": "PRIVATE_NATIVE_RESULT"}, transcript[2]["private_output"])
         self.assertEqual([], result.receipt["failure_codes"])
 
 

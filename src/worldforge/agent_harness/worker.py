@@ -5,13 +5,32 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 
+from .worker_limits import MAX_PROVIDER_TOOL_CALLS_PER_TURN
+
 # This source is deliberately self-contained.  ``-I -S`` prevents the child
 # from importing the checkout, so the supervisor passes no module or path.
 _CONFORMANCE_RUNTIME_ID = "worldforge_conformance_provider"
-_CONFORMANCE_RUNTIME_REVISION = 2
+_CONFORMANCE_RUNTIME_REVISION = 3
 _RUNTIME_ID_TOKEN = "__WORLD_FORGE_RUNTIME_ID__"
 _RUNTIME_REVISION_TOKEN = "__WORLD_FORGE_RUNTIME_REVISION__"
+_TOOL_CALL_LIMIT_TOKEN = "__WORLD_FORGE_MAX_TOOL_CALLS_PER_TURN__"
 RUNTIME_CONTENT_HASH_TOKEN = "__WORLD_FORGE_RUNTIME_CONTENT_HASH__"
+
+
+def _embed_tool_call_limit(source: str) -> str:
+    if (
+        type(source) is not str
+        or source.count(_TOOL_CALL_LIMIT_TOKEN) != 1
+        or type(MAX_PROVIDER_TOOL_CALLS_PER_TURN) is not int
+        or MAX_PROVIDER_TOOL_CALLS_PER_TURN < 1
+    ):
+        raise RuntimeError("provider_worker_tool_call_limit_invalid")
+    return source.replace(
+        _TOOL_CALL_LIMIT_TOKEN,
+        str(MAX_PROVIDER_TOOL_CALLS_PER_TURN),
+    )
+
+
 _WORKER_BOOTSTRAP_TEMPLATE = r"""
 import hashlib
 import hmac
@@ -31,7 +50,7 @@ RUNTIME = {
     "content_hash": "__WORLD_FORGE_RUNTIME_CONTENT_HASH__",
 }
 MAX_DEPTH = 64
-MAX_HISTORY = 256
+MAX_TRANSCRIPT = 256
 MAX_SAFE_INTEGER = (1 << 53) - 1
 CAPABILITIES = frozenset({
     "artifact.propose", "artifact.read", "memory.propose",
@@ -103,6 +122,18 @@ def exact_tool_id(value):
     parts = value.split(".")
     return len(parts) >= 2 and all(exact_identifier(part) for part in parts)
 
+def exact_neutral_call_id(value):
+    return (
+        type(value) is str
+        and 1 <= len(value) <= 64
+        and value[0].isascii()
+        and value[0].isalnum()
+        and all(
+            character.isascii() and (character.isalnum() or character in "._:-")
+            for character in value
+        )
+    )
+
 def exact_json(value, depth=1, max_depth=MAX_DEPTH):
     if depth > max_depth:
         return False
@@ -121,13 +152,63 @@ def exact_json(value, depth=1, max_depth=MAX_DEPTH):
         )
     return False
 
+def exact_transcript(value):
+    if type(value) is not list or len(value) > MAX_TRANSCRIPT:
+        return False
+    if len(canonical(value)) > 64 * 1024:
+        return False
+    seen = set()
+    index = 0
+    while index < len(value):
+        assistant = value[index]
+        if type(assistant) is not dict or set(assistant) != {
+            "role", "private_output", "tool_calls"
+        }:
+            return False
+        if assistant["role"] != "assistant" or not exact_json(assistant["private_output"]):
+            return False
+        calls = assistant["tool_calls"]
+        if type(calls) is not list or len(calls) > __WORLD_FORGE_MAX_TOOL_CALLS_PER_TURN__:
+            return False
+        index += 1
+        for call in calls:
+            if type(call) is not dict or set(call) != {
+                "neutral_call_id", "tool_id", "private_arguments"
+            }:
+                return False
+            call_id = call["neutral_call_id"]
+            if (
+                not exact_neutral_call_id(call_id)
+                or call_id in seen
+                or not exact_tool_id(call["tool_id"])
+                or not exact_json(call["private_arguments"])
+            ):
+                return False
+            seen.add(call_id)
+            if index >= len(value):
+                return False
+            result = value[index]
+            if type(result) is not dict or set(result) != {
+                "role", "neutral_call_id", "tool_id", "private_output"
+            }:
+                return False
+            if (
+                result["role"] != "tool_result"
+                or result["neutral_call_id"] != call_id
+                or result["tool_id"] != call["tool_id"]
+                or not exact_json(result["private_output"])
+            ):
+                return False
+            index += 1
+    return True
+
 def exact_request(value):
     if type(value) is not dict or set(value) != {
-        "execution_id", "turn_index", "private_input", "history",
+        "execution_id", "turn_index", "private_input", "transcript",
         "tool_summaries", "exposed_tools"
     }:
         return False
-    history = value["history"]
+    transcript = value["transcript"]
     summaries = value["tool_summaries"]
     definitions = value["exposed_tools"]
     if type(summaries) is not list or len(summaries) > 128:
@@ -183,9 +264,7 @@ def exact_request(value):
         and type(value["turn_index"]) is int
         and 0 <= value["turn_index"] <= 64
         and exact_json(value["private_input"])
-        and type(history) is list
-        and len(history) <= MAX_HISTORY
-        and all(exact_json(item) for item in history)
+        and exact_transcript(transcript)
     )
 
 def exact_runtime(value):
@@ -230,7 +309,7 @@ def read_request(key):
         raise ValueError()
     if (
         type(document["format_version"]) is not int
-        or document["format_version"] != 1
+        or document["format_version"] != 2
         or not exact_sha256(document["nonce"])
         or not exact_runtime(document["runtime"])
     ):
@@ -250,7 +329,7 @@ def read_request(key):
 def result_document(request_document, result):
     document = {
         "format": "world-forge.private.provider_turn_result",
-        "format_version": 1,
+        "format_version": 2,
         "nonce": request_document["nonce"],
         "request_hash": request_document["request_hash"],
         "result": result,
@@ -396,6 +475,8 @@ def main():
         private_output = audit_environment()
     else:
         private_output = {"payload": config.get("payload")}
+        if config.get("include_transcript"):
+            private_output["transcript"] = request_document["request"]["transcript"]
         if config.get("include_worker_pid"):
             private_output["worker_pid"] = os.getpid()
         if descendant_pids:
@@ -419,12 +500,14 @@ except BaseException:
     os._exit(70)
 """
 
-WORKER_BOOTSTRAP_TEMPLATE = _WORKER_BOOTSTRAP_TEMPLATE.replace(
-    _RUNTIME_ID_TOKEN,
-    _CONFORMANCE_RUNTIME_ID,
-).replace(
-    _RUNTIME_REVISION_TOKEN,
-    str(_CONFORMANCE_RUNTIME_REVISION),
+WORKER_BOOTSTRAP_TEMPLATE = _embed_tool_call_limit(
+    _WORKER_BOOTSTRAP_TEMPLATE.replace(
+        _RUNTIME_ID_TOKEN,
+        _CONFORMANCE_RUNTIME_ID,
+    ).replace(
+        _RUNTIME_REVISION_TOKEN,
+        str(_CONFORMANCE_RUNTIME_REVISION),
+    )
 )
 _CONFORMANCE_RUNTIME_HASH = hashlib.sha256(WORKER_BOOTSTRAP_TEMPLATE.encode("utf-8")).hexdigest()
 WORKER_BOOTSTRAP = WORKER_BOOTSTRAP_TEMPLATE.replace(
@@ -434,8 +517,8 @@ WORKER_BOOTSTRAP = WORKER_BOOTSTRAP_TEMPLATE.replace(
 
 
 _DETERMINISTIC_PROBE_RUNTIME_ID = "worldforge_deterministic_probe_provider"
-_DETERMINISTIC_PROBE_RUNTIME_REVISION = 3
-_DETERMINISTIC_PROBE_BOOTSTRAP_TEMPLATE = r"""
+_DETERMINISTIC_PROBE_RUNTIME_REVISION = 4
+_DETERMINISTIC_PROBE_BOOTSTRAP_TEMPLATE_SOURCE = r"""
 import hashlib
 import hmac
 import json
@@ -451,11 +534,11 @@ MAX_GATEWAY_REQUEST_BODY = 8 * 1024
 MAX_GATEWAY_RESPONSE_BODY = 64 * 1024
 RUNTIME = {
     "id": "worldforge_deterministic_probe_provider",
-    "revision": 3,
+    "revision": 4,
     "content_hash": "__WORLD_FORGE_RUNTIME_CONTENT_HASH__",
 }
 MAX_DEPTH = 64
-MAX_HISTORY = 256
+MAX_TRANSCRIPT = 256
 MAX_SAFE_INTEGER = (1 << 53) - 1
 CAPABILITIES = frozenset({
     "artifact.propose", "artifact.read", "memory.propose",
@@ -535,6 +618,18 @@ def exact_tool_id(value):
     parts = value.split(".")
     return len(parts) >= 2 and all(exact_identifier(part) for part in parts)
 
+def exact_neutral_call_id(value):
+    return (
+        type(value) is str
+        and 1 <= len(value) <= 64
+        and value[0].isascii()
+        and value[0].isalnum()
+        and all(
+            character.isascii() and (character.isalnum() or character in "._:-")
+            for character in value
+        )
+    )
+
 def exact_json(value, depth=1, max_depth=MAX_DEPTH):
     if depth > max_depth:
         return False
@@ -553,18 +648,66 @@ def exact_json(value, depth=1, max_depth=MAX_DEPTH):
         )
     return False
 
+def exact_transcript(value):
+    if type(value) is not list or len(value) > MAX_TRANSCRIPT:
+        return False
+    if len(canonical(value)) > 64 * 1024:
+        return False
+    seen = set()
+    index = 0
+    while index < len(value):
+        assistant = value[index]
+        if type(assistant) is not dict or set(assistant) != {
+            "role", "private_output", "tool_calls"
+        }:
+            return False
+        if assistant["role"] != "assistant" or not exact_json(assistant["private_output"]):
+            return False
+        calls = assistant["tool_calls"]
+        if type(calls) is not list or len(calls) > __WORLD_FORGE_MAX_TOOL_CALLS_PER_TURN__:
+            return False
+        index += 1
+        for call in calls:
+            if type(call) is not dict or set(call) != {
+                "neutral_call_id", "tool_id", "private_arguments"
+            }:
+                return False
+            call_id = call["neutral_call_id"]
+            if (
+                not exact_neutral_call_id(call_id)
+                or call_id in seen
+                or not exact_tool_id(call["tool_id"])
+                or not exact_json(call["private_arguments"])
+            ):
+                return False
+            seen.add(call_id)
+            if index >= len(value):
+                return False
+            result = value[index]
+            if type(result) is not dict or set(result) != {
+                "role", "neutral_call_id", "tool_id", "private_output"
+            }:
+                return False
+            if (
+                result["role"] != "tool_result"
+                or result["neutral_call_id"] != call_id
+                or result["tool_id"] != call["tool_id"]
+                or not exact_json(result["private_output"])
+            ):
+                return False
+            index += 1
+    return True
+
 def exact_request(value):
     if type(value) is not dict or set(value) != {
-        "execution_id", "turn_index", "private_input", "history",
+        "execution_id", "turn_index", "private_input", "transcript",
         "tool_summaries", "exposed_tools"
     }:
         return False
-    history = value["history"]
+    transcript = value["transcript"]
     summaries = value["tool_summaries"]
     definitions = value["exposed_tools"]
-    if type(history) is not list or len(history) > MAX_HISTORY:
-        return False
-    if not all(exact_json(item) for item in history):
+    if not exact_transcript(transcript):
         return False
     if type(summaries) is not list or len(summaries) > 128:
         return False
@@ -653,7 +796,7 @@ def read_request(key):
         raise ValueError()
     if (
         type(document["format_version"]) is not int
-        or document["format_version"] != 1
+        or document["format_version"] != 2
         or not exact_sha256(document["nonce"])
         or not exact_runtime(document["runtime"])
         or not exact_sha256(document["mac"])
@@ -782,7 +925,7 @@ def main():
             raise ValueError()
         gateway_body = {
             "execution_id": request["execution_id"],
-            "history_hash": digest(request["history"]),
+            "transcript_hash": digest(request["transcript"]),
             "private_input_hash": digest(request["private_input"]),
             "turn_index": request["turn_index"],
         }
@@ -808,7 +951,7 @@ def main():
     private_output = {
         "execution_id": request["execution_id"],
         "exposed_tool_count": len(request["exposed_tools"]),
-        "history_hash": digest(request["history"]),
+        "transcript_hash": digest(request["transcript"]),
         "private_input_hash": digest(request["private_input"]),
         "runtime_id": RUNTIME["id"],
         "tool_summary_count": len(request["tool_summaries"]),
@@ -834,7 +977,7 @@ def main():
     }
     document = {
         "format": "world-forge.private.provider_turn_result",
-        "format_version": 1,
+        "format_version": 2,
         "nonce": request_document["nonce"],
         "request_hash": request_document["request_hash"],
         "result": result,
@@ -852,6 +995,10 @@ try:
 except BaseException:
     os._exit(70)
 """
+
+_DETERMINISTIC_PROBE_BOOTSTRAP_TEMPLATE = _embed_tool_call_limit(
+    _DETERMINISTIC_PROBE_BOOTSTRAP_TEMPLATE_SOURCE
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -874,7 +1021,7 @@ def _worker_artifact(
     return _WorkerArtifact(
         identifier=identifier,
         revision=revision,
-        protocol_version=1,
+        protocol_version=2,
         bootstrap_template=bootstrap_template,
         bootstrap_source=bootstrap_template.replace(
             RUNTIME_CONTENT_HASH_TOKEN,

@@ -3,6 +3,9 @@
 - Status: accepted
 - Date: 2026-08-26
 
+> Supersession note: ADR-0041 advances the exact conformance runtime to revision
+> 3 and retains this bootstrap-derived attestation model.
+
 ## Context
 
 ADR-0031 lets the host inject one private `ProviderAdapter`, and ADR-0033 moves

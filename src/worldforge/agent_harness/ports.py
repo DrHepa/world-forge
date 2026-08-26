@@ -46,6 +46,7 @@ class ProviderUsage:
 class ToolCall:
     tool_id: str
     private_arguments: object = None
+    neutral_call_id: str = field(kw_only=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,11 +81,24 @@ class ProviderToolDefinition:
 
 
 @dataclass(frozen=True, slots=True)
+class ProviderAssistantTranscriptItem:
+    private_output: object
+    tool_calls: tuple[ToolCall, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderToolResultTranscriptItem:
+    neutral_call_id: str
+    tool_id: str
+    private_output: object = None
+
+
+@dataclass(frozen=True, slots=True)
 class ProviderTurnRequest:
     execution_id: str
     turn_index: int
     private_input: object
-    history: tuple[object, ...] = ()
+    transcript: tuple[ProviderAssistantTranscriptItem | ProviderToolResultTranscriptItem, ...] = ()
     tool_summaries: tuple[ProviderToolSummary, ...] = ()
     exposed_tools: tuple[ProviderToolDefinition, ...] = ()
 

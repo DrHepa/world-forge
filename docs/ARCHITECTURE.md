@@ -700,8 +700,9 @@ blocked worker after revocation but still requires its existing process-domain
 empty proof. Fingerprints bind catalog/review/decision hashes, exact terminal
 duplicates remain evidence-only after revocation, and interrupted executions
 are never resumed. Approval covers tools only, not providers, cloud, cost, data,
-credentials, artifacts, or memory promotion. The private conformance runtime is
-revision 2; Windows remains unsupported and `UNTESTED`. See
+credentials, artifacts, or memory promotion. The private conformance runtime
+baseline established here was revision 2; ADR-0041 advances it to revision 3.
+Windows remains unsupported and `UNTESTED`. See
 [ADR-0035](decisions/0035-human-approval-and-progressive-tool-exposure.md).
 
 Approved memory projection is independent of execution/tool approval. An
@@ -776,14 +777,15 @@ and anonymous-pipe `read`/`write` remain available; safety depends on the
 composite clean-descriptor launch plus acquisition-denial filter, and descendants
 inherit both seccomp and `no_new_privs`. Unsupported platforms/architectures,
 descriptor-census uncertainty, and filter setup failures produce no worker
-action or public raw error evidence. The fixed worker IDs, bootstrap bytes,
-private protocol v1, public contracts, EventLog schema, and `src/isoworld` remain
-unchanged. This is not a complete OS network sandbox, firewall, filesystem
+action or public raw error evidence. The fixed worker IDs, public contracts,
+EventLog schema, and `src/isoworld` remain unchanged; ADR-0041 later advances
+the exact bootstrap bytes and private provider-turn protocol without changing
+the egress profile. This is not a complete OS network sandbox, firewall, filesystem
 boundary, trusted-parent loopback gateway, or real-provider claim. See
 [ADR-0039](decisions/0039-deny-all-provider-worker-egress.md).
 
 ADR-0040 adds that trusted-parent loopback gateway as a separate positive
-authority, not as an exception inside the worker filter. The revision-3
+authority, not as an exception inside the worker filter. The revision-4
 deterministic probe emits one authenticated semantic side-band request through
 its existing pipes; the broker authenticates and relays it, while the main
 parent alone owns one exact numeric-loopback nonblocking HTTP/1.1 socket. The
@@ -797,6 +799,21 @@ leaves the EventLog prefix open. This proves no server identity, exposure
 policy, vendor telemetry, provider, credentials, Internet route, Windows
 backend, or production readiness. See
 [ADR-0040](decisions/0040-parent-owned-exact-origin-loopback-gateway.md).
+
+ADR-0041 replaces arbitrary private provider history with an exact typed
+transcript. A completed provider turn contributes one assistant record first,
+followed immediately by ordered tool-result records matching mandatory
+provider-neutral call IDs and tool IDs. Whole-batch preflight rejects reused,
+missing, orphaned, reordered, mismatched, malformed, or completed-plus-call
+input before tool effects. The version-2 request/result protocol HMACs the exact
+discriminated serialization; the full transient transcript is sealed and
+bounded to 64 KiB, separately from the 256-record and outer-frame bounds, and
+each assistant item is bounded to 128 calls in both host and worker validation.
+Conformance revision 3 and deterministic-probe revision 4
+retain the two existing runtime IDs; loopback side-band v1 is unchanged. Raw
+transcript values and call IDs remain absent from durable/public evidence.
+Usage-source provenance remains the next separate blocker. See
+[ADR-0041](decisions/0041-private-correlated-provider-turn-transcript.md).
 
 Slice 2B retains the closed, identity/evidence-only plan, observation, and report
 boundary for an optional codebase-memory comparison and adds a pure evaluator

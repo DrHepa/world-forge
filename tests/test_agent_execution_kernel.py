@@ -440,9 +440,11 @@ class AgentExecutionKernelTests(unittest.TestCase):
                 ProviderTurnResult(
                     "MUST_NOT_RETURN",
                     _usage(),
-                    tool_calls=(ToolCall("source.read", {"private": 1}),),
+                    tool_calls=(
+                        ToolCall("source.read", {"private": 1}, neutral_call_id="neutral_test_001"),
+                    ),
                     artifact_proposals=(ArtifactProposal("PRIVATE_PROPOSAL"),),
-                    completed=True,
+                    completed=False,
                 )
             ],
             runtime_binding={
@@ -741,7 +743,7 @@ class AgentExecutionKernelTests(unittest.TestCase):
         first.execute(request)
         second, _ = _kernel(provider)
         second.execute(_request(activation, grant))
-        self.assertEqual([(), ()], [call.history for call in provider.requests])
+        self.assertEqual([(), ()], [call.transcript for call in provider.requests])
         self.assertEqual({"nested": ["PRIVATE_INPUT"]}, shared)
 
     def test_malformed_and_oversized_private_provider_fields_fail_with_bounded_codes(self) -> None:
@@ -769,8 +771,10 @@ class AgentExecutionKernelTests(unittest.TestCase):
                         ProviderTurnResult(
                             "private",
                             _usage(),
-                            tool_calls=(ToolCall("INVALID", {}),),
-                            completed=True,
+                            tool_calls=(
+                                ToolCall("INVALID", {}, neutral_call_id="neutral_test_002"),
+                            ),
+                            completed=False,
                         )
                     ]
                 ),
@@ -793,8 +797,14 @@ class AgentExecutionKernelTests(unittest.TestCase):
                 ProviderTurnResult(
                     "done",
                     _usage(),
-                    tool_calls=(ToolCall("source.read", {"SECRET_ARGUMENT": 1}),),
-                    completed=True,
+                    tool_calls=(
+                        ToolCall(
+                            "source.read",
+                            {"SECRET_ARGUMENT": 1},
+                            neutral_call_id="neutral_test_003",
+                        ),
+                    ),
+                    completed=False,
                 )
             ]
         )
@@ -850,9 +860,12 @@ class AgentExecutionKernelTests(unittest.TestCase):
                             ProviderTurnResult(
                                 "done",
                                 _usage(),
-                                tool_calls=(ToolCall("source.read", {}),),
-                                completed=True,
-                            )
+                                tool_calls=(
+                                    ToolCall("source.read", {}, neutral_call_id="neutral_test_004"),
+                                ),
+                                completed=False,
+                            ),
+                            ProviderTurnResult("done", _usage(), completed=True),
                         ]
                     ),
                     tools=(tool,),
@@ -870,24 +883,24 @@ class AgentExecutionKernelTests(unittest.TestCase):
             (
                 _documents(),
                 (),
-                ToolCall("other.tool", {}),
+                ToolCall("other.tool", {}, neutral_call_id="neutral_test_005"),
             ),
             (
                 ineffective,
                 (FakeTool("source.read", "tool.invoke", ToolResult("x")),),
-                ToolCall("source.read", {}),
+                ToolCall("source.read", {}, neutral_call_id="neutral_test_006"),
             ),
             (
                 _documents(),
                 (FakeTool("source.read", "memory.read", ToolResult("x")),),
-                ToolCall("source.read", {}),
+                ToolCall("source.read", {}, neutral_call_id="neutral_test_007"),
             ),
         )
         for documents, tools, call in cases:
             with self.subTest(tool_id=call.tool_id, tools=tools):
                 activation, grant = documents
                 provider = FakeProvider(
-                    [ProviderTurnResult("private", _usage(), tool_calls=(call,), completed=True)]
+                    [ProviderTurnResult("private", _usage(), tool_calls=(call,), completed=False)]
                 )
                 kernel, _ = _kernel(provider, tools=tools)
                 result = kernel.execute(_request(activation, grant))
@@ -1037,9 +1050,11 @@ class AgentExecutionKernelTests(unittest.TestCase):
                 ProviderTurnResult(
                     "discard",
                     _usage(),
-                    tool_calls=(ToolCall("source.read", {"secret": 1}),),
+                    tool_calls=(
+                        ToolCall("source.read", {"secret": 1}, neutral_call_id="neutral_test_008"),
+                    ),
                     artifact_proposals=(ArtifactProposal("private"),),
-                    completed=True,
+                    completed=False,
                 )
             ]
         )
@@ -1085,8 +1100,8 @@ class AgentExecutionKernelTests(unittest.TestCase):
             return ProviderTurnResult(
                 "discard",
                 _usage(input_tokens=7, output_tokens=5, cached_input_tokens=2),
-                tool_calls=(ToolCall("source.read", {}),),
-                completed=True,
+                tool_calls=(ToolCall("source.read", {}, neutral_call_id="neutral_test_009"),),
+                completed=False,
             )
 
         tool = FakeTool("source.read", "tool.invoke", ToolResult("unused"))
@@ -1114,9 +1129,11 @@ class AgentExecutionKernelTests(unittest.TestCase):
                     ProviderTurnResult(
                         "discard",
                         _usage(),
-                        tool_calls=(ToolCall("source.read", {}),),
+                        tool_calls=(
+                            ToolCall("source.read", {}, neutral_call_id="neutral_test_010"),
+                        ),
                         artifact_proposals=(ArtifactProposal("unused"),),
-                        completed=True,
+                        completed=False,
                     )
                 ]
             ),
@@ -1203,8 +1220,10 @@ class AgentExecutionKernelTests(unittest.TestCase):
                     ProviderTurnResult(
                         "discard",
                         _usage(),
-                        tool_calls=(ToolCall("source.read", {}),),
-                        completed=True,
+                        tool_calls=(
+                            ToolCall("source.read", {}, neutral_call_id="neutral_test_011"),
+                        ),
+                        completed=False,
                     )
                 ]
             ),
@@ -1698,8 +1717,8 @@ class AgentExecutionKernelTests(unittest.TestCase):
                 ProviderTurnResult(
                     "discard",
                     _usage(input_tokens=7, output_tokens=5, cached_input_tokens=2),
-                    tool_calls=[ToolCall("source.read", {})],
-                    completed=True,
+                    tool_calls=[ToolCall("source.read", {}, neutral_call_id="neutral_test_012")],
+                    completed=False,
                 ),
                 100,
                 "provider_result_invalid",
@@ -1709,8 +1728,8 @@ class AgentExecutionKernelTests(unittest.TestCase):
                 ProviderTurnResult(
                     "discard",
                     _usage(input_tokens=True),
-                    tool_calls=[ToolCall("source.read", {})],
-                    completed=True,
+                    tool_calls=[ToolCall("source.read", {}, neutral_call_id="neutral_test_013")],
+                    completed=False,
                 ),
                 100,
                 "provider_usage_invalid",
@@ -1720,8 +1739,8 @@ class AgentExecutionKernelTests(unittest.TestCase):
                 ProviderTurnResult(
                     "discard",
                     _usage(input_tokens=70, output_tokens=40, cached_input_tokens=0),
-                    tool_calls=[ToolCall("source.read", {})],
-                    completed=True,
+                    tool_calls=[ToolCall("source.read", {}, neutral_call_id="neutral_test_014")],
+                    completed=False,
                 ),
                 100,
                 "token_budget_exceeded",
@@ -1748,8 +1767,8 @@ class AgentExecutionKernelTests(unittest.TestCase):
             return ProviderTurnResult(
                 "discard",
                 _usage(input_tokens=7, output_tokens=5, cached_input_tokens=2),
-                tool_calls=[ToolCall("source.read", {})],
-                completed=True,
+                tool_calls=[ToolCall("source.read", {}, neutral_call_id="neutral_test_015")],
+                completed=False,
             )
 
         result = _kernel(FakeProvider([cancel_with_malformed_nested_result]), cancellation=token)[
@@ -1792,8 +1811,10 @@ class AgentExecutionKernelTests(unittest.TestCase):
                     ProviderTurnResult(
                         "discard",
                         _usage(),
-                        tool_calls=(ToolCall("source.read", {}),),
-                        completed=True,
+                        tool_calls=(
+                            ToolCall("source.read", {}, neutral_call_id="neutral_test_016"),
+                        ),
+                        completed=False,
                     )
                 ]
             ),
@@ -1837,15 +1858,22 @@ class AgentExecutionKernelTests(unittest.TestCase):
                 "provider_usage_invalid",
             ),
             (
-                ProviderTurnResult("x", _usage(), tool_calls=[ToolCall("source.read", {})]),
+                ProviderTurnResult(
+                    "x",
+                    _usage(),
+                    tool_calls=[ToolCall("source.read", {}, neutral_call_id="neutral_test_017")],
+                ),
                 "provider_result_invalid",
             ),
             (
                 ProviderTurnResult(
                     "x",
                     _usage(),
-                    tool_calls=(ToolCall("source.read", {}), object()),
-                    completed=True,
+                    tool_calls=(
+                        ToolCall("source.read", {}, neutral_call_id="neutral_test_018"),
+                        object(),
+                    ),
+                    completed=False,
                 ),
                 "provider_result_invalid",
             ),
@@ -1871,8 +1899,10 @@ class AgentExecutionKernelTests(unittest.TestCase):
                 ProviderTurnResult(
                     "x",
                     _usage(),
-                    tool_calls=(ForgedToolCall("source.read", {}),),
-                    completed=True,
+                    tool_calls=(
+                        ForgedToolCall("source.read", {}, neutral_call_id="neutral_test_019"),
+                    ),
+                    completed=False,
                 ),
                 "provider_result_invalid",
             ),
@@ -1898,9 +1928,9 @@ class AgentExecutionKernelTests(unittest.TestCase):
                 ProviderTurnResult(
                     "x",
                     _usage(),
-                    tool_calls=(ToolCall("source.read", {}),),
+                    tool_calls=(ToolCall("source.read", {}, neutral_call_id="neutral_test_020"),),
                     artifact_proposals=(ArtifactProposal("x" * (64 * 1024)),),
-                    completed=True,
+                    completed=False,
                 ),
                 "provider_result_invalid",
             ),
@@ -1927,8 +1957,11 @@ class AgentExecutionKernelTests(unittest.TestCase):
         over_tool_batch = ProviderTurnResult(
             "x",
             _usage(),
-            tool_calls=(ToolCall("source.read", {}), ToolCall("world.validate", {})),
-            completed=True,
+            tool_calls=(
+                ToolCall("source.read", {}, neutral_call_id="neutral_test_021"),
+                ToolCall("world.validate", {}, neutral_call_id="neutral_test_022"),
+            ),
+            completed=False,
         )
         result = _kernel(FakeProvider([over_tool_batch]), tools=(tool, second_tool))[0].execute(
             _request(activation, grant, max_tool_calls=1)
@@ -1973,14 +2006,19 @@ class AgentExecutionKernelTests(unittest.TestCase):
             provider_output,
             _usage(),
             tool_calls=(
-                ToolCall("source.read", {"step": 1}),
-                ToolCall("world.validate", second_arguments),
+                ToolCall("source.read", {"step": 1}, neutral_call_id="neutral_test_023"),
+                ToolCall("world.validate", second_arguments, neutral_call_id="neutral_test_024"),
             ),
             artifact_proposals=(ArtifactProposal(proposal_payload),),
-            completed=True,
+            completed=False,
         )
+
+        def finish(request):
+            self.assertEqual({"value": "original"}, request.transcript[0].private_output)
+            return ProviderTurnResult({"value": "original"}, _usage(), completed=True)
+
         result = _kernel(
-            FakeProvider([turn]),
+            FakeProvider([turn, finish]),
             tools=(first_tool, second_tool),
             artifact_port=artifact,
         )[0].execute(_request(activation, grant))
@@ -2302,9 +2340,9 @@ class AgentExecutionKernelTests(unittest.TestCase):
 
     def test_turn_tool_and_duplicate_call_limits_fail_closed(self) -> None:
         activation, grant = _documents()
-        duplicate = ToolCall("source.read", {"same": 1})
+        duplicate = ToolCall("source.read", {"same": 1}, neutral_call_id="neutral_test_025")
         provider = FakeProvider(
-            [ProviderTurnResult("x", _usage(), tool_calls=(duplicate, duplicate), completed=True)]
+            [ProviderTurnResult("x", _usage(), tool_calls=(duplicate, duplicate), completed=False)]
         )
         result = _kernel(
             provider, tools=(FakeTool("source.read", "tool.invoke", ToolResult("x")),)
@@ -2343,8 +2381,14 @@ class AgentExecutionKernelTests(unittest.TestCase):
                         ProviderTurnResult(
                             "x",
                             _usage(),
-                            tool_calls=(ToolCall("source.read", {"PRIVATE_ARGUMENT": 1}),),
-                            completed=True,
+                            tool_calls=(
+                                ToolCall(
+                                    "source.read",
+                                    {"PRIVATE_ARGUMENT": 1},
+                                    neutral_call_id="neutral_test_026",
+                                ),
+                            ),
+                            completed=False,
                         )
                     ]
                 )
@@ -2520,7 +2564,7 @@ class AgentExecutionKernelTests(unittest.TestCase):
                 (FakeTool("source.read", "tool.invoke", ControlSignal("PRIVATE_TOOL")),),
                 None,
                 None,
-                dict(tool_calls=(ToolCall("source.read", {}),)),
+                dict(tool_calls=(ToolCall("source.read", {}, neutral_call_id="neutral_test_027"),)),
             ),
             (
                 ["artifact.propose"],
@@ -2543,7 +2587,14 @@ class AgentExecutionKernelTests(unittest.TestCase):
             with self.subTest(capabilities=capabilities):
                 activation, grant = _documents(capabilities=capabilities, tools=tools)
                 provider = FakeProvider(
-                    [ProviderTurnResult("discard", _usage(), completed=True, **turn_values)]
+                    [
+                        ProviderTurnResult(
+                            "discard",
+                            _usage(),
+                            completed="tool_calls" not in turn_values,
+                            **turn_values,
+                        )
+                    ]
                 )
                 kernel, _ = _kernel(
                     provider,

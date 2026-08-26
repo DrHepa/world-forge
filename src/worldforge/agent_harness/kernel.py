@@ -44,7 +44,9 @@ from .ports import (
     ExecutionResult,
     MemoryProposal,
     ProviderAdapter,
+    ProviderAssistantTranscriptItem,
     ProviderBoundaryControl,
+    ProviderToolResultTranscriptItem,
     ProviderTurnRequest,
     ProviderTurnResult,
     ProviderUsage,
@@ -71,8 +73,10 @@ from .worker_registry import code_owned_provider_catalog
 _PORTABLE_ID_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _TOOL_ID_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}(?:\.[a-z][a-z0-9_]{1,63})+$")
+_NEUTRAL_CALL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$", re.ASCII)
 _RUNTIME_BINDING_FIELDS = frozenset({"id", "revision", "content_hash"})
 _MAX_PRIVATE_FIELD_BYTES = 64 * 1024
+_MAX_TRANSCRIPT_BYTES = 64 * 1024
 _MAX_ARTIFACT_PROPOSALS = 64
 _MAX_MEMORY_PROPOSALS = 64
 _INVALID_PRIVATE_INPUT = object()
@@ -537,6 +541,112 @@ def _request_hash(call: ToolCall) -> str:
     except (KernelError, Exception):
         raise KernelError("tool_call_invalid") from None
     return hashlib.sha256(call.tool_id.encode("utf-8") + b"\0" + private_arguments).hexdigest()
+
+
+def _neutral_call_id(value: object, *, reason_code: str) -> str:
+    if type(value) is not str or _NEUTRAL_CALL_ID_RE.fullmatch(value) is None:
+        raise KernelError(reason_code)
+    return value
+
+
+def _sealed_transcript(
+    value: object,
+    *,
+    allow_incomplete_tail: bool = False,
+) -> tuple[ProviderAssistantTranscriptItem | ProviderToolResultTranscriptItem, ...]:
+    if type(value) is not tuple or len(value) > 256:
+        raise KernelError("private_field_invalid")
+    supplied = tuple(tuple.__iter__(value))
+    sealed: list[ProviderAssistantTranscriptItem | ProviderToolResultTranscriptItem] = []
+    payload: list[dict[str, object]] = []
+    seen: set[str] = set()
+    index = 0
+    incomplete = False
+    while index < len(supplied):
+        assistant = supplied[index]
+        if type(assistant) is not ProviderAssistantTranscriptItem:
+            raise KernelError("private_field_invalid")
+        if type(assistant.tool_calls) is not tuple:
+            raise KernelError("private_field_invalid")
+        private_output = _sealed_private_value(assistant.private_output)
+        calls: list[ToolCall] = []
+        call_payloads: list[dict[str, object]] = []
+        for call in tuple.__iter__(assistant.tool_calls):
+            if type(call) is not ToolCall:
+                raise KernelError("private_field_invalid")
+            neutral_call_id = _neutral_call_id(
+                call.neutral_call_id,
+                reason_code="private_field_invalid",
+            )
+            if neutral_call_id in seen:
+                raise KernelError("private_field_invalid")
+            seen.add(neutral_call_id)
+            _request_hash(call)
+            private_arguments = _sealed_private_value(call.private_arguments)
+            sealed_call = ToolCall(
+                call.tool_id,
+                private_arguments,
+                neutral_call_id=neutral_call_id,
+            )
+            calls.append(sealed_call)
+            call_payloads.append(
+                {
+                    "neutral_call_id": neutral_call_id,
+                    "tool_id": call.tool_id,
+                    "private_arguments": private_arguments,
+                }
+            )
+        sealed.append(ProviderAssistantTranscriptItem(private_output, tuple(calls)))
+        payload.append(
+            {
+                "role": "assistant",
+                "private_output": private_output,
+                "tool_calls": call_payloads,
+            }
+        )
+        index += 1
+        for call in calls:
+            if index >= len(supplied):
+                if not allow_incomplete_tail:
+                    raise KernelError("private_field_invalid")
+                incomplete = True
+                break
+            result = supplied[index]
+            if type(result) is not ProviderToolResultTranscriptItem:
+                raise KernelError("private_field_invalid")
+            if (
+                _neutral_call_id(
+                    result.neutral_call_id,
+                    reason_code="private_field_invalid",
+                )
+                != call.neutral_call_id
+                or type(result.tool_id) is not str
+                or result.tool_id != call.tool_id
+            ):
+                raise KernelError("private_field_invalid")
+            result_output = _sealed_private_value(result.private_output)
+            sealed.append(
+                ProviderToolResultTranscriptItem(
+                    call.neutral_call_id,
+                    call.tool_id,
+                    result_output,
+                )
+            )
+            payload.append(
+                {
+                    "role": "tool_result",
+                    "neutral_call_id": call.neutral_call_id,
+                    "tool_id": call.tool_id,
+                    "private_output": result_output,
+                }
+            )
+            index += 1
+        if incomplete:
+            break
+    _closed, encoded = _exact_json_snapshot(payload, reason_code="private_field_invalid")
+    if len(encoded) > _MAX_TRANSCRIPT_BYTES:
+        raise KernelError("private_field_invalid")
+    return tuple(sealed)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1167,7 +1277,7 @@ class AgentExecutionKernel:
         events: list[dict[str, object]] = []
         invocations: list[dict[str, object]] = []
         artifacts: list[dict[str, str]] = []
-        history: list[object] = []
+        transcript: list[ProviderAssistantTranscriptItem | ProviderToolResultTranscriptItem] = []
         private_output: object = None
         effective_capabilities = frozenset(grant["effective_capability_ids"])
         approved_tool_ids = () if approval_check is None else approval_check.approved_tool_ids
@@ -1234,7 +1344,7 @@ class AgentExecutionKernel:
                         ledger,
                         invocations,
                         artifacts,
-                        history,
+                        transcript,
                         effective_capabilities,
                         effective_tools,
                         private_input,
@@ -1275,7 +1385,7 @@ class AgentExecutionKernel:
         ledger: BudgetLedger,
         invocations: list[dict[str, object]],
         artifacts: list[dict[str, str]],
-        history: list[object],
+        transcript: list[ProviderAssistantTranscriptItem | ProviderToolResultTranscriptItem],
         effective_capabilities: frozenset[str],
         effective_tools: frozenset[str],
         private_input: object,
@@ -1298,6 +1408,7 @@ class AgentExecutionKernel:
         }
         exposed_tool_ids: list[str] = []
         exposed_tool_membership: set[str] = set()
+        used_neutral_call_ids: set[str] = set()
         while ledger.turns < request.limits.max_turns:
             reason = self._cancellation_reason(request.limits, start_ms)
             if reason is not None:
@@ -1316,12 +1427,12 @@ class AgentExecutionKernel:
             ):
                 return "failed", ["tool_not_authorized"], None
             try:
-                safe_history = _sealed_private_value(history)
+                safe_transcript = _sealed_transcript(tuple(transcript))
                 turn_request = ProviderTurnRequest(
                     execution_id=execution_id,
                     turn_index=ledger.turns,
                     private_input=copy.deepcopy(private_input),
-                    history=tuple(safe_history),
+                    transcript=safe_transcript,
                     tool_summaries=tuple(tool_summaries),
                     exposed_tools=tuple(
                         descriptors_by_id[tool_id].provider_definition()
@@ -1409,6 +1520,7 @@ class AgentExecutionKernel:
                         _MAX_ARTIFACT_PROPOSALS - ledger.artifact_proposals
                     ),
                     remaining_memory_proposals=(_MAX_MEMORY_PROPOSALS - ledger.memory_proposals),
+                    used_neutral_call_ids=frozenset(used_neutral_call_ids),
                 )
             except KernelError as exc:
                 reason = self._cancellation_reason(request.limits, start_ms)
@@ -1458,6 +1570,19 @@ class AgentExecutionKernel:
                 if reason is not None:
                     return "cancelled", [reason], None
                 return "failed", ["broker_preflight_failed"], None
+
+            try:
+                assistant_item = ProviderAssistantTranscriptItem(
+                    copy.deepcopy(prepared.private_output),
+                    tuple(copy.deepcopy(prepared.tool_calls)),
+                )
+                transcript[:] = _sealed_transcript(
+                    (*transcript, assistant_item),
+                    allow_incomplete_tail=True,
+                )
+            except (KernelError, Exception):
+                return "failed", ["private_field_invalid"], None
+            used_neutral_call_ids.update(call.neutral_call_id for call in prepared.tool_calls)
 
             for call, request_hash in zip(
                 prepared.tool_calls, prepared.request_hashes, strict=True
@@ -1596,7 +1721,20 @@ class AgentExecutionKernel:
                 invocation["outcome"] = "succeeded"
                 invocation["failure_codes"] = []
                 invocations.append(invocation)
-                history.append(safe_tool_output)
+                try:
+                    transcript[:] = _sealed_transcript(
+                        (
+                            *transcript,
+                            ProviderToolResultTranscriptItem(
+                                call.neutral_call_id,
+                                call.tool_id,
+                                safe_tool_output,
+                            ),
+                        ),
+                        allow_incomplete_tail=True,
+                    )
+                except (KernelError, Exception):
+                    return "failed", ["private_field_invalid"], None
 
             for proposal in prepared.artifact_proposals:
                 reason = self._cancellation_reason(request.limits, start_ms)
@@ -1774,7 +1912,6 @@ class AgentExecutionKernel:
                     exposed_tool_membership.add(tool_id)
                     exposed_tool_ids.append(tool_id)
             private_output = copy.deepcopy(prepared.private_output)
-            history.append(copy.deepcopy(prepared.private_output))
             if prepared.completed:
                 return "succeeded", [], private_output
         return "failed", ["turn_budget_exceeded"], None
@@ -1786,6 +1923,7 @@ class AgentExecutionKernel:
         remaining_tool_calls: int,
         remaining_artifact_proposals: int,
         remaining_memory_proposals: int,
+        used_neutral_call_ids: frozenset[str],
     ) -> _PreparedProviderTurn:
         try:
             if type(turn) is not ProviderTurnResult or type(turn.completed) is not bool:
@@ -1799,6 +1937,8 @@ class AgentExecutionKernel:
                 raise KernelError("provider_result_invalid")
             if len(turn.tool_calls) > min(128, remaining_tool_calls):
                 raise KernelError("tool_budget_exceeded")
+            if turn.completed and turn.tool_calls:
+                raise KernelError("provider_result_invalid")
             if len(turn.tool_exposure_requests) > 128:
                 raise KernelError("provider_result_invalid")
             if len(turn.artifact_proposals) > min(
@@ -1826,7 +1966,14 @@ class AgentExecutionKernel:
                 raise KernelError("provider_result_invalid") from None
             try:
                 tool_calls = tuple(
-                    ToolCall(call.tool_id, _sealed_private_value(call.private_arguments))
+                    ToolCall(
+                        call.tool_id,
+                        _sealed_private_value(call.private_arguments),
+                        neutral_call_id=_neutral_call_id(
+                            call.neutral_call_id,
+                            reason_code="provider_result_invalid",
+                        ),
+                    )
                     for call in turn.tool_calls
                 )
                 artifact_proposals = tuple(
@@ -1842,7 +1989,10 @@ class AgentExecutionKernel:
             request_hashes = tuple(_request_hash(call) for call in tool_calls)
             if set(turn.tool_exposure_requests).intersection(call.tool_id for call in tool_calls):
                 raise KernelError("provider_result_invalid")
-            if len(request_hashes) != len(set(request_hashes)):
+            neutral_call_ids = tuple(call.neutral_call_id for call in tool_calls)
+            if len(neutral_call_ids) != len(set(neutral_call_ids)) or not set(
+                neutral_call_ids
+            ).isdisjoint(used_neutral_call_ids):
                 raise KernelError("duplicate_tool_call")
             return _PreparedProviderTurn(
                 private_output=private_output,

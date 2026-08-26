@@ -71,7 +71,7 @@ from worldforge.agent_harness.worker_registry import (
 
 _RUNTIME = {
     "id": "worldforge_deterministic_probe_provider",
-    "revision": 3,
+    "revision": 4,
     "content_hash": "1" * 64,
 }
 _NONCE = "2" * 64
@@ -150,7 +150,7 @@ result = {{
 }}
 final = authenticated({{
     "format": "world-forge.private.provider_turn_result",
-    "format_version": 1,
+    "format_version": 2,
     "nonce": request["nonce"],
     "request_hash": request["request_hash"],
     "result": result,
@@ -408,7 +408,7 @@ class LoopbackSideBandProtocolTests(unittest.TestCase):
         cases = (
             {"key": b"x" * 32},
             {"nonce": "0" * 64},
-            {"runtime": {**_RUNTIME, "revision": 4}},
+            {"runtime": {**_RUNTIME, "revision": 5}},
             {"original_request_hash": "0" * 64},
             {"gateway_policy_hash": "0" * 64},
         )
@@ -1429,7 +1429,7 @@ print(json.dumps(result, sort_keys=True, separators=(",", ":")))
                 execution_id="exec_one",
                 turn_index=0,
                 private_input={"sentinel": "private-only"},
-                history=({"role": "user", "text": "hello"},),
+                transcript=(),
                 tool_summaries=(),
                 exposed_tools=(),
             ),
@@ -1743,7 +1743,7 @@ print(json.dumps(result, sort_keys=True, separators=(",", ":")))
             execution_id="exec_one",
             turn_index=0,
             private_input={"probe": "concurrency"},
-            history=(),
+            transcript=(),
             tool_summaries=(),
             exposed_tools=(),
         )

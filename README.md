@@ -848,8 +848,15 @@ audit the canonical bytes after reopen. Ordinary sessions retain a shared
 one-byte OS lock; only an exclusive offline recovery session can mark an
 interrupted prefix `recovery_required`, and it is never resumed or given a
 synthetic receipt. Unsealable private input receives no replay identity, so its
-failure receipt cannot be deduplicated on retry. The private SQLite v1 schema
-and startup foreign-key projection are checked exactly. Local evidence proves
+failure receipt cannot be deduplicated on retry. The private SQLite v2 schema,
+internal indexes, bounded physical integrity, and startup foreign-key projection
+are checked exactly. Exact v1 ordinary stores migrate transactionally; offline
+recovery retains exact main/WAL/SHM evidence, validates and applies committed
+WAL frames without opening any database pathname, and serves the resulting v1
+or v2 logical image from digest-bound query-only memory. Any rollback-journal
+sidecar, including an empty or stale one, fails closed until a reviewed parser
+exists. Original crash bytes remain unchanged until an explicit recovery
+transition revalidates them and opens the original store. Local evidence proves
 the POSIX process fence; Windows lock behavior is seam-tested but not natively
 proven by this slice.
 
@@ -872,7 +879,7 @@ Broker loss remains containment-indeterminate even though the
 parent best-effort kills descendants still attributable to known worker
 identities. This is not a real provider/model, same-UID filesystem/network
 sandbox, vendor telemetry guarantee, Studio job/UI, external MCP boundary,
-memory projection, artifact promotion, deterministic provider replay, or
+memory hydration, artifact promotion, deterministic provider replay, or
 hosted/native/release claim.
 See [ADR-0031](docs/decisions/0031-provider-free-agent-execution-kernel.md) and
 [ADR-0032](docs/decisions/0032-private-durable-agent-event-log.md), and
@@ -918,6 +925,22 @@ tool approval only: it does not authorize provider/cloud use, cost, data,
 credentials, artifacts, or memory promotion. Public Harness bytes remain
 unchanged. See
 [ADR-0035](docs/decisions/0035-human-approval-and-progressive-tool-exposure.md).
+
+Approved memory projection is now a separate private post-success boundary.
+An ephemeral proposal source owns bounded exact JSON values but exposes only
+code-owned hashes. A distinct memory authority reviews the exact succeeded
+receipt, complete pre-projection event chain/head, candidate snapshot, and fixed
+lossless hash-only policy; tool approval cannot authorize it. The deterministic
+compiler performs exact hash deduplication and ordering only, never semantic
+summarization. The private SQLite schema advances to v2 so one privileged atomic
+operation can record the canonical public projection and append exactly one
+`memory.projected` event after the receipt. Raw candidate content is absent from
+approval, fingerprints, public records, and SQLite. Exact duplicates are
+evidence-only; changed lineage or authority conflicts. Memory hydration, scope,
+truth promotion, retention/deletion, authenticated review, and durable raw
+content remain Studio-owned and unimplemented. Public Harness bytes, worker
+protocol, runtime revision, and receipt replay claims remain unchanged. See
+[ADR-0036](docs/decisions/0036-approved-hash-only-memory-projection.md).
 
 Slice 2B adds a pure deterministic evaluator and explicit-input, atomic
 no-replace CLI for the closed recorded-result plan, observation, and report

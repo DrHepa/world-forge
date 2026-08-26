@@ -51,8 +51,9 @@ hash, lifecycle state, public aggregate, and bounded size in one transaction.
 It inserts an append-only event row and advances the execution head, count, and
 generation atomically. `finalize` atomically inserts the append-only receipt and
 terminal `execution.receipt_recorded` event, then advances state, head, count,
-receipt anchor, and generation. An exact duplicate finalization is idempotent;
-a differing duplicate conflicts. After an ordinary exception at a commit
+receipt anchor, and generation. An exact duplicate finalization is idempotent,
+including after the single valid post-terminal projection extension; a differing
+receipt or final event conflicts. After an ordinary exception at a commit
 boundary, a fresh transactional reread must prove the exact immediate committed
 state and projection. Append reconciliation accepts only an open row whose
 generation and sequence advanced by exactly one and whose exact submitted bytes
@@ -67,10 +68,11 @@ operation: it performs no provider, tool, proposal, memory, or project-file
 side effect and does not reconstruct private input or output.
 
 The lifecycle fold accepts only the ordered worker/grant/start prefix, at most
-one cancellation event, and one terminal receipt event at the end. It rejects
-duplicates, reordering, `memory.projected`, post-terminal appends, partial
-valid-looking success/failure prefixes, and cancellation/outcome
-contradictions.
+one cancellation event, one terminal receipt event, and—through the separate
+privileged boundary—one final approved `memory.projected` event after a
+succeeded receipt. It rejects duplicates, reordering, direct projection appends,
+other post-terminal events, partial valid-looking success/failure prefixes, and
+cancellation/outcome contradictions.
 
 ## Crash and recovery boundary
 
@@ -83,20 +85,41 @@ Consequently an open prefix can be marked only while all ordinary sessions are
 closed or have exited. POSIX uses non-blocking shared/exclusive `flock`; Windows
 uses non-blocking shared/exclusive `LockFileEx`.
 
-Recovery requires an existing regular, one-link database before SQLite is
-opened. While holding the exclusive fence, it retains and hashes the main
-database plus any durable WAL and rollback-journal sidecars, observes but does
-not copy SHM lock state, and copies at most 64 MiB of cumulative stable bytes
-into an exclusive temporary sibling directory outside the store. Descriptor,
-pathname, size, and hash evidence must remain exact before and after copying
-and detached validation. The detached copy validates WAL structure and
-checksums, applies any WAL or rollback recovery only in the temporary
-namespace, and revalidates version, exact schema, lock binding, foreign keys,
-private state, public documents, and lifecycle.
+Recovery requires an existing regular, one-link database before any SQLite
+connection is created. While holding the exclusive fence, it retains exact
+descriptors, identities, sizes, hashes, and bounded bytes for the main database
+and any WAL/SHM sidecars. The cumulative retained namespace is limited to 64 MiB.
+The main image must have an exact SQLite header, valid power-of-two page size,
+and page alignment. A WAL is parsed directly from retained bytes: magic,
+version, page-size agreement, salts, rolling checksums, frame alignment, page
+numbers, and size bounds all fail closed. The materializer applies the latest
+frame for each page only through the last commit frame, ignores a checksum-valid
+trailing uncommitted sequence, and truncates or extends to that commit's database
+page count. A valid WAL with no commit leaves the exact main image authoritative.
 
-Only after that detached preflight passes may recovery open the original with
-an existing-database-only connection and repeat exact identity, schema, and
-state checks. Only an ordinary session may initialize the private schema; a
+No copied or original pathname is SQLite-opened during recovery construction,
+replay, listing, or any other read. The offline logical-image digest is the
+authority. Only SQLite header bytes 18 and 19 are changed for transport because
+an in-memory connection has no pathname from which to open a WAL; all other page
+bytes remain exact. Those bounded bytes are deserialized into `:memory:`, made
+query-only, and checked for version, exact schema including internal
+autoindexes, bounded physical integrity, foreign keys, lock binding, private
+state, public documents, and lifecycle. Every read boundary rebuilds and
+rechecks the offline digest from retained bytes, serializes and rechecks the
+transported memory digest, and rechecks every original identity, size, and hash.
+
+Rollback-journal recovery is not inferred from copied-path SQLite behavior. Any
+`-journal` sidecar, including an empty or stale file, fails with the fixed
+private `event_log_recovery_rollback_journal_unsupported` error while preserving
+the original bytes and namespace. Support requires a separately reviewed parser
+for the complete rollback-journal format and crash semantics.
+
+Only an explicit `mark_recovery_required` transition may reverify every retained
+original identity, size, and hash, open the original with an
+existing-database-only connection, repeat exact schema/state checks, and compare
+SQLite's recovered serialization with the authoritative offline logical digest
+before mutation. Only
+an ordinary session may initialize the private schema; a
 missing, empty, replaced, unknown, or corrupt recovery store is never created
 or migrated. A failed recovery preflight leaves the original main database and
 its WAL, SHM, and rollback-journal namespace and bytes unchanged.
@@ -159,15 +182,22 @@ pagination, privacy sentinels, schema/version rejection, document/state/
 relational/lifecycle tamper detection, and the path attacks that repository
 primitives can detect. Linux spawned-process tests prove shared coexistence,
 exclusive recovery exclusion after broker activation but before provider invocation,
-lock release after clean close or abrupt process exit, and byte-preserving
-rejection of unknown version, schema corruption, foreign-key corruption, and a
-checksum-corrupt WAL retained after a crash. Windows lock mode and remote-drive
-decisions are seam-tested only in this local evidence.
+lock release after clean close or abrupt process exit, committed v1/v2 WAL
+materialization, last-commit sizing, checksum-valid uncommitted tails, no-commit
+WALs, and byte-preserving rejection of unknown version, schema corruption,
+foreign-key corruption, malformed main/WAL headers, salts, checksums, page
+numbers, truncation, oversize images, and every rollback-journal sidecar retained
+after a crash. Windows lock mode and remote-drive decisions are seam-tested only
+in this local evidence.
 
 ## Not proven
 
+ADR-0036 extends this store with locally tested, separately approved hash-only
+memory-projection recording. It does not persist raw memory or establish
+retention, hydration, truth, or promotion into authoring inputs or assets.
+
 This slice does **not** prove a real provider/model or billing record, a Studio
-job/recovery UI, process isolation or hard kill, external MCP safety, memory
-approval/projection, asset promotion, deterministic provider replay,
-same-UID full-store authenticity, backups, native Windows lock behavior, or
-hosted/native/release evidence.
+job/recovery UI, process isolation or hard kill, external MCP safety, raw-memory
+storage or hydration, asset promotion, deterministic provider replay, same-UID
+full-store authenticity, a rollback-journal parser, backups, native Windows lock
+behavior, or hosted/native/release evidence.

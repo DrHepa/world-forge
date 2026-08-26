@@ -7,6 +7,7 @@ inputs or private outputs.
 
 from __future__ import annotations
 
+import base64
 import ctypes
 import hashlib
 import json
@@ -14,7 +15,6 @@ import os
 import re
 import sqlite3
 import stat
-import tempfile
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -25,6 +25,7 @@ from worldforge.agent_harness_contracts import (
     AGENT_CAPABILITY_GRANT_FORMAT,
     AGENT_EVENT_FORMAT,
     AGENT_EXECUTION_RECEIPT_FORMAT,
+    AGENT_MEMORY_PROJECTION_FORMAT,
     AGENT_WORKER_ACTIVATION_FORMAT,
     MAX_AGENT_HARNESS_DOCUMENT_BYTES,
     MAX_SAFE_INTEGER,
@@ -42,7 +43,7 @@ if TYPE_CHECKING:
     from .kernel import AgentExecutionKernel
     from .ports import ExecutionRequest, ExecutionResult
 
-AGENT_EVENT_LOG_SCHEMA_VERSION = 1
+AGENT_EVENT_LOG_SCHEMA_VERSION = 2
 AGENT_EVENT_LOG_DATABASE_NAME = "agent-events.sqlite3"
 AGENT_EVENT_LOG_LOCK_NAME = "agent-events.lock"
 MAX_AGENT_EVENT_LOG_EVENTS = 5
@@ -50,7 +51,7 @@ MAX_AGENT_EVENT_LOG_EXECUTION_BYTES = 8 * 1024 * 1024
 MAX_AGENT_EVENT_LOG_PAGE_SIZE = 100
 MAX_AGENT_EVENT_LOG_RECOVERY_SNAPSHOT_BYTES = 64 * 1024 * 1024
 
-_RECOVERY_COPY_CHUNK_BYTES = 64 * 1024
+_RECOVERY_READ_CHUNK_BYTES = 64 * 1024
 _SQLITE_WAL_VERSION = 3_007_000
 _SQLITE_WAL_MAGIC_LITTLE_CHECKSUM = 0x377F0682
 _SQLITE_WAL_MAGIC_BIG_CHECKSUM = 0x377F0683
@@ -59,6 +60,7 @@ _ID_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
 _SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 _STATES = frozenset({"open", "terminal", "recovery_required"})
 _STATE_FORMAT = "world-forge.private.agent_event_log_state"
+_STATE_FORMAT_VERSION = 1
 _LOCAL_LOCK_FILE_SYSTEMS = frozenset(
     {
         "apfs",
@@ -75,7 +77,7 @@ _LOCAL_LOCK_FILE_SYSTEMS = frozenset(
         "zfs",
     }
 )
-_SCHEMA_TABLE_SQL = {
+_SCHEMA_TABLE_SQL_V1 = {
     "schema_meta": """CREATE TABLE schema_meta (
                     key TEXT PRIMARY KEY NOT NULL,
                     value TEXT NOT NULL
@@ -111,8 +113,46 @@ _SCHEMA_TABLE_SQL = {
                     receipt_json BLOB NOT NULL
                 )""",
 }
-_EXPECTED_SCHEMA_MANIFEST = tuple(
-    sorted(("table", name, name, sql) for name, sql in _SCHEMA_TABLE_SQL.items())
+_SCHEMA_TABLE_SQL = {
+    **_SCHEMA_TABLE_SQL_V1,
+    "memory_projections": """CREATE TABLE memory_projections (
+                    execution_id TEXT PRIMARY KEY NOT NULL REFERENCES executions(execution_id),
+                    projection_id TEXT NOT NULL UNIQUE,
+                    projection_hash TEXT NOT NULL UNIQUE,
+                    request_fingerprint TEXT NOT NULL,
+                    projection_json BLOB NOT NULL
+                )""",
+}
+_EXPECTED_SCHEMA_MANIFESTS = {
+    1: tuple(sorted(("table", name, name, sql) for name, sql in _SCHEMA_TABLE_SQL_V1.items())),
+    2: tuple(sorted(("table", name, name, sql) for name, sql in _SCHEMA_TABLE_SQL.items())),
+}
+_EXPECTED_INTERNAL_SCHEMA_OBJECTS = {
+    1: tuple(
+        sorted(
+            (
+                ("index", "sqlite_autoindex_schema_meta_1", "schema_meta"),
+                ("index", "sqlite_autoindex_executions_1", "executions"),
+                ("index", "sqlite_autoindex_executions_2", "executions"),
+                ("index", "sqlite_autoindex_events_1", "events"),
+                ("index", "sqlite_autoindex_events_2", "events"),
+                ("index", "sqlite_autoindex_events_3", "events"),
+                ("index", "sqlite_autoindex_receipts_1", "receipts"),
+                ("index", "sqlite_autoindex_receipts_2", "receipts"),
+                ("index", "sqlite_autoindex_receipts_3", "receipts"),
+            )
+        )
+    ),
+}
+_EXPECTED_INTERNAL_SCHEMA_OBJECTS[2] = tuple(
+    sorted(
+        (
+            *_EXPECTED_INTERNAL_SCHEMA_OBJECTS[1],
+            ("index", "sqlite_autoindex_memory_projections_1", "memory_projections"),
+            ("index", "sqlite_autoindex_memory_projections_2", "memory_projections"),
+            ("index", "sqlite_autoindex_memory_projections_3", "memory_projections"),
+        )
+    )
 )
 _SCHEMA_COLUMNS = {
     "schema_meta": ("key", "value"),
@@ -134,6 +174,13 @@ _SCHEMA_COLUMNS = {
     ),
     "events": ("execution_id", "sequence", "event_id", "event_hash", "event_json"),
     "receipts": ("execution_id", "receipt_id", "receipt_hash", "receipt_json"),
+    "memory_projections": (
+        "execution_id",
+        "projection_id",
+        "projection_hash",
+        "request_fingerprint",
+        "projection_json",
+    ),
 }
 _SCHEMA_COLUMN_SHAPES = {
     "schema_meta": (("key", "TEXT", 1, 1), ("value", "TEXT", 1, 0)),
@@ -165,6 +212,13 @@ _SCHEMA_COLUMN_SHAPES = {
         ("receipt_id", "TEXT", 1, 0),
         ("receipt_hash", "TEXT", 1, 0),
         ("receipt_json", "BLOB", 1, 0),
+    ),
+    "memory_projections": (
+        ("execution_id", "TEXT", 1, 1),
+        ("projection_id", "TEXT", 1, 0),
+        ("projection_hash", "TEXT", 1, 0),
+        ("request_fingerprint", "TEXT", 1, 0),
+        ("projection_json", "BLOB", 1, 0),
     ),
 }
 
@@ -339,6 +393,11 @@ _SCHEMA_UNIQUE_INDEXES = {
         ("u", ("receipt_hash",)),
         ("u", ("receipt_id",)),
     ),
+    "memory_projections": (
+        ("pk", ("execution_id",)),
+        ("u", ("projection_hash",)),
+        ("u", ("projection_id",)),
+    ),
 }
 
 
@@ -372,6 +431,13 @@ class _RetainedRecoveryFile:
 
 
 @dataclass(frozen=True, slots=True)
+class _WalFrame:
+    page_number: int
+    database_size: int
+    page: bytes
+
+
+@dataclass(frozen=True, slots=True)
 class ReplayedExecution:
     execution_id: str
     log_id: str
@@ -385,6 +451,7 @@ class ReplayedExecution:
     grant_bytes: bytes
     event_bytes: tuple[bytes, ...]
     receipt_bytes: bytes | None
+    projection_bytes: bytes | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -421,9 +488,33 @@ def _wal_checksum(
     return first, second
 
 
-def _validate_wal_bytes(payload: bytes) -> None:
+def _sqlite_main_page_size(payload: bytes) -> int:
+    if len(payload) > MAX_AGENT_EVENT_LOG_RECOVERY_SNAPSHOT_BYTES:
+        raise AgentEventLogError("event_log_recovery_snapshot_too_large")
+    if len(payload) < 100 or payload[:16] != b"SQLite format 3\x00":
+        raise AgentEventLogCorrupt("event_log_storage_corrupt")
+    encoded_page_size = int.from_bytes(payload[16:18], "big")
+    page_size = 65_536 if encoded_page_size == 1 else encoded_page_size
+    if (
+        page_size < 512
+        or page_size > 65_536
+        or page_size & (page_size - 1) != 0
+        or len(payload) < page_size
+        or len(payload) % page_size != 0
+    ):
+        raise AgentEventLogCorrupt("event_log_storage_corrupt")
+    return page_size
+
+
+def _validate_wal_bytes(
+    payload: bytes,
+    *,
+    expected_page_size: int,
+) -> tuple[_WalFrame, ...]:
     if not payload:
-        return
+        return ()
+    if len(payload) > MAX_AGENT_EVENT_LOG_RECOVERY_SNAPSHOT_BYTES:
+        raise AgentEventLogError("event_log_recovery_snapshot_too_large")
     if len(payload) < 32:
         raise AgentEventLogCorrupt("event_log_storage_corrupt")
     magic = int.from_bytes(payload[0:4], "big")
@@ -436,9 +527,12 @@ def _validate_wal_bytes(payload: bytes) -> None:
     if int.from_bytes(payload[4:8], "big") != _SQLITE_WAL_VERSION:
         raise AgentEventLogCorrupt("event_log_storage_corrupt")
     page_size = int.from_bytes(payload[8:12], "big")
-    if page_size == 1:
-        page_size = 65_536
-    if page_size < 512 or page_size > 65_536 or page_size & (page_size - 1) != 0:
+    if (
+        page_size < 512
+        or page_size > 65_536
+        or page_size & (page_size - 1) != 0
+        or page_size != expected_page_size
+    ):
         raise AgentEventLogCorrupt("event_log_storage_corrupt")
     frame_size = 24 + page_size
     if (len(payload) - 32) % frame_size != 0:
@@ -451,9 +545,18 @@ def _validate_wal_bytes(payload: bytes) -> None:
     if checksum != stored_header_checksum:
         raise AgentEventLogCorrupt("event_log_storage_corrupt")
     salt = payload[16:24]
+    maximum_pages = MAX_AGENT_EVENT_LOG_RECOVERY_SNAPSHOT_BYTES // page_size
+    frames: list[_WalFrame] = []
     for offset in range(32, len(payload), frame_size):
         frame_header = payload[offset : offset + 24]
-        if int.from_bytes(frame_header[:4], "big") == 0 or frame_header[8:16] != salt:
+        page_number = int.from_bytes(frame_header[:4], "big")
+        database_size = int.from_bytes(frame_header[4:8], "big")
+        if (
+            page_number == 0
+            or page_number > maximum_pages
+            or database_size > maximum_pages
+            or frame_header[8:16] != salt
+        ):
             raise AgentEventLogCorrupt("event_log_storage_corrupt")
         page = payload[offset + 24 : offset + frame_size]
         checksum = _wal_checksum(
@@ -468,6 +571,37 @@ def _validate_wal_bytes(payload: bytes) -> None:
         )
         if checksum != stored_frame_checksum:
             raise AgentEventLogCorrupt("event_log_storage_corrupt")
+        frames.append(_WalFrame(page_number, database_size, page))
+    return tuple(frames)
+
+
+def _materialize_offline_recovery_image(main: bytes, wal: bytes) -> bytes:
+    if len(main) + len(wal) > MAX_AGENT_EVENT_LOG_RECOVERY_SNAPSHOT_BYTES:
+        raise AgentEventLogError("event_log_recovery_snapshot_too_large")
+    page_size = _sqlite_main_page_size(main)
+    frames = _validate_wal_bytes(wal, expected_page_size=page_size)
+    last_commit = -1
+    committed_pages = 0
+    for index, frame in enumerate(frames):
+        if frame.database_size != 0:
+            last_commit = index
+            committed_pages = frame.database_size
+    if last_commit < 0:
+        return main
+    target_size = committed_pages * page_size
+    if target_size > MAX_AGENT_EVENT_LOG_RECOVERY_SNAPSHOT_BYTES:
+        raise AgentEventLogError("event_log_recovery_snapshot_too_large")
+    image = bytearray(target_size)
+    image[: min(len(main), target_size)] = main[:target_size]
+    for frame in frames[: last_commit + 1]:
+        if frame.page_number > committed_pages:
+            continue
+        offset = (frame.page_number - 1) * page_size
+        image[offset : offset + page_size] = frame.page
+    materialized = bytes(image)
+    if _sqlite_main_page_size(materialized) != page_size:
+        raise AgentEventLogCorrupt("event_log_storage_corrupt")
+    return materialized
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -553,6 +687,13 @@ def _plain_nonnegative(value: object) -> int:
     return value
 
 
+def _memory_projection_event_id(request_fingerprint: object) -> str:
+    fingerprint = _plain_hash(request_fingerprint)
+    assert fingerprint is not None
+    encoded = base64.b32encode(bytes.fromhex(fingerprint)).decode("ascii")
+    return "me_" + encoded.casefold().rstrip("=")
+
+
 def _state_payload(
     *,
     execution_id: str,
@@ -569,7 +710,7 @@ def _state_payload(
 ) -> dict[str, object]:
     return {
         "format": _STATE_FORMAT,
-        "format_version": AGENT_EVENT_LOG_SCHEMA_VERSION,
+        "format_version": _STATE_FORMAT_VERSION,
         "execution_id": execution_id,
         "log_id": log_id,
         "request_fingerprint": request_fingerprint,
@@ -597,13 +738,23 @@ def _lifecycle_fold(
     prefix_length = 0
     cancel_seen = False
     terminal_seen = False
+    projection_seen = False
     for index, event in enumerate(events):
         event_type = event["event_type"]
-        if terminal_seen:
+        if projection_seen:
             raise AgentEventLogCorrupt("event_log_lifecycle_invalid")
         if event_type == "memory.projected":
+            if (
+                not terminal_seen
+                or receipt is None
+                or receipt["outcome"] != "succeeded"
+                or index != len(events) - 1
+            ):
+                raise AgentEventLogCorrupt("event_log_lifecycle_invalid")
+            projection_seen = True
+        elif terminal_seen:
             raise AgentEventLogCorrupt("event_log_lifecycle_invalid")
-        if event_type in expected_prefix:
+        elif event_type in expected_prefix:
             if cancel_seen or prefix_length >= len(expected_prefix):
                 raise AgentEventLogCorrupt("event_log_lifecycle_invalid")
             if event_type != expected_prefix[prefix_length]:
@@ -614,7 +765,7 @@ def _lifecycle_fold(
                 raise AgentEventLogCorrupt("event_log_lifecycle_invalid")
             cancel_seen = True
         elif event_type == "execution.receipt_recorded":
-            if index != len(events) - 1 or receipt is None:
+            if receipt is None:
                 raise AgentEventLogCorrupt("event_log_lifecycle_invalid")
             terminal_seen = True
         else:
@@ -637,6 +788,29 @@ def _lifecycle_fold(
     return cancel_seen, terminal_seen
 
 
+def _projection_has_exact_source_lineage(
+    projection: dict[str, object],
+    source_events: list[dict[str, object]],
+) -> bool:
+    ordered_events = sorted(
+        source_events,
+        key=lambda event: str(event["event_id"]).encode("utf-8"),
+    )
+    expected_refs = [
+        {
+            "format": AGENT_EVENT_FORMAT,
+            "format_version": 1,
+            "id": event["event_id"],
+            "content_hash": event["content_hash"],
+        }
+        for event in ordered_events
+    ]
+    expected_ids = [str(item["id"]) for item in expected_refs]
+    return projection["source_events"] == expected_refs and all(
+        entry["source_event_ids"] == expected_ids for entry in projection["entries"]
+    )
+
+
 class AgentEventLog:
     """Host-supplied SQLite journal implementing the private journal port."""
 
@@ -653,6 +827,11 @@ class AgentEventLog:
         self._closed = False
         self._lock_descriptor: int | None = None
         self.connection: sqlite3.Connection | None = None
+        self._recovery_retained_files: dict[str, _RetainedRecoveryFile | None] = {}
+        self._recovery_attested_image_digest: bytes | None = None
+        self._recovery_memory_image_digest: bytes | None = None
+        self._recovery_memory_active = False
+        self._recovery_original_active = False
         self._owned_executions: set[str] = set()
         self._indeterminate_executions: set[str] = set()
         self.root = Path(os.path.abspath(Path(root)))
@@ -676,18 +855,15 @@ class AgentEventLog:
             self._assert_lock_boundary()
             if _recovery_mode:
                 assert before is not None
-                self._preflight_recovery_snapshot(before)
-                self.connection = sqlite3.connect(
-                    f"{self.database_path.as_uri()}?mode=rw",
-                    timeout=5.0,
-                    uri=True,
-                )
+                self.connection = self._open_offline_recovery_snapshot(before)
             else:
                 self.connection = sqlite3.connect(self.database_path, timeout=5.0)
         except sqlite3.Error as exc:
+            self._discard_recovery_snapshot()
             self._close_lock()
             raise AgentEventLogError("event_log_open_failed") from exc
-        except Exception:
+        except BaseException:
+            self._discard_recovery_snapshot()
             self._close_lock()
             raise
         assert self.connection is not None
@@ -695,6 +871,7 @@ class AgentEventLog:
         after = self._safe_file_identity(self.database_path, required=True)
         if before is not None and before != after:
             self.connection.close()
+            self._discard_recovery_snapshot()
             self._close_lock()
             raise AgentEventLogError("event_log_path_substituted")
         assert after is not None
@@ -702,15 +879,17 @@ class AgentEventLog:
         try:
             if _recovery_mode:
                 self._verify_existing_store_readonly()
-            self._configure()
+            else:
+                self._configure()
             self._migrate_or_verify(
                 new_database=before is None,
                 verify_state=_recovery_mode,
             )
             self._sidecar_identities = self._current_sidecar_identities()
             self._assert_boundary()
-        except Exception:
+        except BaseException:
             self.connection.close()
+            self._discard_recovery_snapshot()
             self._close_lock()
             raise
 
@@ -736,7 +915,7 @@ class AgentEventLog:
     def schema_version(self) -> int:
         self._assert_owner_process()
         with self._transaction():
-            return self._verify_version_locked()
+            return self._verify_version_locked(allow_legacy=self._recovery_mode)
 
     def close(self) -> None:
         if os.getpid() != self._owner_pid:
@@ -746,6 +925,8 @@ class AgentEventLog:
             return
         if self.connection is not None:
             self.connection.close()
+            self.connection = None
+        self._discard_recovery_snapshot()
         self._owned_executions.clear()
         self._indeterminate_executions.clear()
         self._close_lock()
@@ -771,6 +952,11 @@ class AgentEventLog:
                 connection.close()
             except BaseException:
                 pass
+        self.connection = None
+        retained_sets = (getattr(self, "_recovery_retained_files", {}),)
+        self._recovery_retained_files = {}
+        for retained in retained_sets:
+            self._close_retained_files(retained)
         self._owned_executions.clear()
         self._indeterminate_executions.clear()
         self._close_lock(unlock=False)
@@ -927,7 +1113,7 @@ class AgentEventLog:
         try:
             os.lseek(descriptor, 0, os.SEEK_SET)
             while True:
-                chunk = os.read(descriptor, _RECOVERY_COPY_CHUNK_BYTES)
+                chunk = os.read(descriptor, _RECOVERY_READ_CHUNK_BYTES)
                 if not chunk:
                     break
                 total += len(chunk)
@@ -990,83 +1176,20 @@ class AgentEventLog:
                 pass
             raise
 
-    @staticmethod
-    def _write_all(descriptor: int, payload: bytes) -> None:
-        offset = 0
-        while offset < len(payload):
-            written = os.write(descriptor, payload[offset:])
-            if written <= 0:
-                raise OSError("short recovery snapshot write")
-            offset += written
-
-    def _copy_retained_recovery_file(
-        self,
-        retained: _RetainedRecoveryFile,
-        destination: Path,
-    ) -> None:
-        flags = (
-            os.O_RDWR
-            | os.O_CREAT
-            | os.O_EXCL
-            | getattr(os, "O_BINARY", 0)
-            | getattr(os, "O_CLOEXEC", 0)
-            | getattr(os, "O_NOINHERIT", 0)
-            | getattr(os, "O_NOFOLLOW", 0)
-        )
-        destination_descriptor: int | None = None
-        digest = hashlib.sha256()
-        total = 0
-        try:
-            destination_descriptor = os.open(destination, flags, 0o600)
-            os.lseek(retained.descriptor, 0, os.SEEK_SET)
-            while True:
-                chunk = os.read(retained.descriptor, _RECOVERY_COPY_CHUNK_BYTES)
-                if not chunk:
-                    break
-                total += len(chunk)
-                if total > retained.size:
-                    raise AgentEventLogError("event_log_path_substituted")
-                digest.update(chunk)
-                self._write_all(destination_descriptor, chunk)
-            os.fsync(destination_descriptor)
-            copied_digest = self._retained_digest(
-                destination_descriptor,
-                expected_size=retained.size,
-            )
-        except AgentEventLogError:
-            raise
-        except OSError as exc:
-            raise AgentEventLogError("event_log_recovery_snapshot_failed") from exc
-        finally:
-            if destination_descriptor is not None:
-                try:
-                    os.close(destination_descriptor)
-                except OSError:
-                    pass
-        if (
-            total != retained.size
-            or digest.hexdigest() != retained.digest
-            or copied_digest != retained.digest
-        ):
-            raise AgentEventLogError("event_log_path_substituted")
-        try:
-            copied = path_file_stat(destination)
-        except (OSError, ValueError) as exc:
-            raise AgentEventLogError("event_log_recovery_snapshot_failed") from exc
-        if (
-            is_link_or_reparse(copied)
-            or not stat.S_ISREG(copied.st_mode)
-            or copied.st_nlink != 1
-            or copied.st_size != retained.size
-        ):
-            raise AgentEventLogError("event_log_recovery_snapshot_failed")
-
     def _verify_retained_recovery_files(
         self,
         retained: dict[str, _RetainedRecoveryFile | None],
     ) -> None:
+        self._verify_retained_files(retained, database_path=self.database_path)
+
+    def _verify_retained_files(
+        self,
+        retained: dict[str, _RetainedRecoveryFile | None],
+        *,
+        database_path: Path,
+    ) -> None:
         for suffix, item in retained.items():
-            path = Path(f"{self.database_path}{suffix}")
+            path = Path(f"{database_path}{suffix}")
             if item is None:
                 if self._safe_file_identity(path, required=False) is not None:
                     raise AgentEventLogError("event_log_path_substituted")
@@ -1086,42 +1209,80 @@ class AgentEventLog:
             ):
                 raise AgentEventLogError("event_log_path_substituted")
 
-    def _validate_detached_recovery_snapshot(self, database: Path) -> None:
-        previous_connection = self.connection
-        snapshot: sqlite3.Connection | None = None
-        try:
-            snapshot = sqlite3.connect(
-                f"{database.as_uri()}?mode=rw",
-                timeout=5.0,
-                uri=True,
-            )
-            snapshot.row_factory = sqlite3.Row
-            self.connection = snapshot
-            snapshot.execute("BEGIN")
-            self._verify_existing_store_readonly()
-            snapshot.commit()
-        except AgentEventLogError:
-            if snapshot is not None and snapshot.in_transaction:
-                snapshot.rollback()
-            raise
-        except sqlite3.Error as exc:
-            if snapshot is not None and snapshot.in_transaction:
-                snapshot.rollback()
-            raise AgentEventLogCorrupt("event_log_storage_corrupt") from exc
-        finally:
-            self.connection = previous_connection
-            if snapshot is not None:
-                snapshot.close()
+    @staticmethod
+    def _close_retained_files(
+        retained: dict[str, _RetainedRecoveryFile | None],
+    ) -> None:
+        for item in retained.values():
+            if item is not None:
+                try:
+                    os.close(item.descriptor)
+                except OSError:
+                    pass
 
-    def _preflight_recovery_snapshot(
+    def _retained_payload(self, retained: _RetainedRecoveryFile) -> bytes:
+        payload = bytearray()
+        try:
+            before = descriptor_file_stat(retained.descriptor)
+            os.lseek(retained.descriptor, 0, os.SEEK_SET)
+            while len(payload) < retained.size:
+                chunk = os.read(
+                    retained.descriptor,
+                    min(_RECOVERY_READ_CHUNK_BYTES, retained.size - len(payload)),
+                )
+                if not chunk:
+                    break
+                payload.extend(chunk)
+            after = descriptor_file_stat(retained.descriptor)
+        except (OSError, ValueError) as exc:
+            raise AgentEventLogError("event_log_recovery_snapshot_failed") from exc
+        if (
+            len(payload) != retained.size
+            or is_link_or_reparse(before)
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or file_identity(before) != retained.identity
+            or before.st_size != retained.size
+            or is_link_or_reparse(after)
+            or not stat.S_ISREG(after.st_mode)
+            or after.st_nlink != 1
+            or file_identity(after) != retained.identity
+            or after.st_size != retained.size
+            or hashlib.sha256(payload).hexdigest() != retained.digest
+        ):
+            raise AgentEventLogError("event_log_path_substituted")
+        return bytes(payload)
+
+    def _offline_recovery_image_from_retained(
+        self,
+        retained: dict[str, _RetainedRecoveryFile | None],
+    ) -> bytes:
+        retained_main = retained.get("")
+        if retained_main is None:
+            raise AgentEventLogCorrupt("event_log_storage_corrupt")
+        main = self._retained_payload(retained_main)
+        retained_wal = retained.get("-wal")
+        wal = b"" if retained_wal is None else self._retained_payload(retained_wal)
+        return _materialize_offline_recovery_image(main, wal)
+
+    def _verify_offline_recovery_image(
+        self,
+        retained: dict[str, _RetainedRecoveryFile | None],
+    ) -> None:
+        expected_digest = self._recovery_attested_image_digest
+        if expected_digest is None:
+            raise AgentEventLogError("event_log_path_substituted")
+        logical_image = self._offline_recovery_image_from_retained(retained)
+        if hashlib.sha256(logical_image).digest() != expected_digest:
+            raise AgentEventLogError("event_log_path_substituted")
+
+    def _open_offline_recovery_snapshot(
         self,
         expected_database_identity: tuple[int, int],
-    ) -> None:
-        snapshot_parent = self.root.parent
-        if snapshot_parent == self.root:
-            raise AgentEventLogError("event_log_recovery_snapshot_failed")
-        parent_identity = self._directory_identity(snapshot_parent)
+    ) -> sqlite3.Connection:
         retained: dict[str, _RetainedRecoveryFile | None] = {}
+        connection: sqlite3.Connection | None = None
+        succeeded = False
         try:
             remaining = MAX_AGENT_EVENT_LOG_RECOVERY_SNAPSHOT_BYTES
             retained[""] = self._retain_recovery_file(
@@ -1130,57 +1291,168 @@ class AgentEventLog:
                 expected_identity=expected_database_identity,
                 maximum_size=remaining,
             )
-            assert retained[""] is not None
-            remaining -= retained[""].size
+            retained_main = retained[""]
+            assert retained_main is not None
+            remaining -= retained_main.size
             for suffix in ("-wal", "-journal", "-shm"):
                 retained[suffix] = self._retain_recovery_file(
                     Path(f"{self.database_path}{suffix}"),
                     required=False,
                     maximum_size=remaining,
                 )
-                if retained[suffix] is not None:
-                    remaining -= retained[suffix].size
-            try:
-                with tempfile.TemporaryDirectory(
-                    prefix=".worldforge-agent-event-log-recovery-",
-                    dir=snapshot_parent,
-                ) as temporary:
-                    snapshot_root = Path(temporary)
-                    self._directory_identity(snapshot_root)
-                    if snapshot_root == self.root or snapshot_root.is_relative_to(self.root):
-                        raise AgentEventLogError("event_log_recovery_snapshot_failed")
-                    main = retained[""]
-                    assert main is not None
-                    snapshot_database = snapshot_root / AGENT_EVENT_LOG_DATABASE_NAME
-                    self._copy_retained_recovery_file(main, snapshot_database)
-                    for suffix in ("-wal", "-journal"):
-                        sidecar = retained[suffix]
-                        if sidecar is not None:
-                            self._copy_retained_recovery_file(
-                                sidecar,
-                                Path(f"{snapshot_database}{suffix}"),
-                            )
-                    self._verify_retained_recovery_files(retained)
-                    snapshot_wal = Path(f"{snapshot_database}-wal")
-                    if snapshot_wal.exists():
-                        _validate_wal_bytes(snapshot_wal.read_bytes())
-                    try:
-                        self._validate_detached_recovery_snapshot(snapshot_database)
-                    finally:
-                        self._verify_retained_recovery_files(retained)
-            except AgentEventLogError:
-                raise
-            except (OSError, ValueError) as exc:
-                raise AgentEventLogError("event_log_recovery_snapshot_failed") from exc
-            if self._directory_identity(snapshot_parent) != parent_identity:
-                raise AgentEventLogError("event_log_path_substituted")
-        finally:
-            for item in retained.values():
+                item = retained[suffix]
                 if item is not None:
+                    remaining -= item.size
+            if retained["-journal"] is not None:
+                raise AgentEventLogError("event_log_recovery_rollback_journal_unsupported")
+            self._verify_retained_recovery_files(retained)
+            logical_image = self._offline_recovery_image_from_retained(retained)
+            logical_digest = hashlib.sha256(logical_image).digest()
+            memory_payload = self._memory_transport_image(logical_image)
+            memory_digest = hashlib.sha256(memory_payload).digest()
+            connection = sqlite3.connect(":memory:", timeout=5.0)
+            connection.deserialize(memory_payload)
+            connection.row_factory = sqlite3.Row
+            self._configure_recovery_memory_connection(connection)
+            if self._database_image_digest(connection) != memory_digest:
+                raise AgentEventLogError("event_log_path_substituted")
+            self._verify_retained_recovery_files(retained)
+            if (
+                hashlib.sha256(self._offline_recovery_image_from_retained(retained)).digest()
+                != logical_digest
+            ):
+                raise AgentEventLogError("event_log_path_substituted")
+            self._recovery_retained_files = retained
+            self._recovery_attested_image_digest = logical_digest
+            self._recovery_memory_image_digest = memory_digest
+            self._recovery_memory_active = True
+            succeeded = True
+            return connection
+        except AgentEventLogError:
+            raise
+        except (MemoryError, sqlite3.Error) as exc:
+            raise AgentEventLogCorrupt("event_log_storage_corrupt") from exc
+        finally:
+            if not succeeded:
+                if connection is not None:
                     try:
-                        os.close(item.descriptor)
-                    except OSError:
+                        connection.close()
+                    except BaseException:
                         pass
+                self._close_retained_files(retained)
+
+    def _discard_recovery_snapshot(self) -> None:
+        retained = self._recovery_retained_files
+        self._recovery_retained_files = {}
+        self._close_retained_files(retained)
+        self._recovery_attested_image_digest = None
+        self._recovery_memory_image_digest = None
+        self._recovery_memory_active = False
+
+    @staticmethod
+    def _memory_transport_image(payload: bytes) -> bytes:
+        """Adapt only SQLite's journaling header bytes for in-memory deserialize.
+
+        The offline image remains authoritative and keeps its exact WAL-mode
+        header.  An in-memory database has no pathname from which SQLite could
+        open a WAL, so deserialize requires the read/write versions to identify
+        a self-contained rollback-format image.  No page content is otherwise
+        normalized.
+        """
+
+        if (
+            type(payload) is not bytes
+            or len(payload) < 100
+            or payload[:16] != b"SQLite format 3\x00"
+            or payload[18] not in (1, 2)
+            or payload[19] not in (1, 2)
+        ):
+            raise AgentEventLogCorrupt("event_log_storage_corrupt")
+        transported = bytearray(payload)
+        transported[18] = 1
+        transported[19] = 1
+        return bytes(transported)
+
+    def _activate_recovery_mutation(self) -> None:
+        self._require_recovery_session()
+        if self._recovery_original_active:
+            return
+        self._assert_boundary()
+        self._fault("before_recovery_original_open")
+        self._assert_boundary()
+        retained_main = self._recovery_retained_files.get("")
+        attested_digest = self._recovery_attested_image_digest
+        if retained_main is None or attested_digest is None:
+            raise AgentEventLogError("event_log_path_substituted")
+        snapshot = self.connection
+        assert snapshot is not None
+        original: sqlite3.Connection | None = None
+        try:
+            original = sqlite3.connect(
+                f"{self.database_path.as_uri()}?mode=rw",
+                timeout=5.0,
+                uri=True,
+            )
+            original.row_factory = sqlite3.Row
+            if (
+                self._safe_file_identity(self.database_path, required=True)
+                != retained_main.identity
+            ):
+                raise AgentEventLogError("event_log_path_substituted")
+            self.connection = original
+            if self._database_image_digest(original) != attested_digest:
+                raise AgentEventLogError("event_log_path_substituted")
+            self._verify_existing_store_readonly()
+            self._configure()
+            self._migrate_or_verify(new_database=False, verify_state=True)
+            if self._database_image_digest(original) != attested_digest:
+                raise AgentEventLogError("event_log_path_substituted")
+            database_identity = self._safe_file_identity(self.database_path, required=True)
+            sidecar_identities = self._current_sidecar_identities()
+            if self._database_image_digest(original) != attested_digest:
+                raise AgentEventLogError("event_log_path_substituted")
+        except BaseException:
+            self.connection = snapshot
+            if original is not None:
+                try:
+                    original.close()
+                except BaseException:
+                    pass
+            raise
+        try:
+            snapshot.close()
+        except BaseException:
+            self.connection = snapshot
+            try:
+                original.close()
+            except BaseException:
+                pass
+            raise
+        assert database_identity is not None
+        self.connection = original
+        self._database_identity = database_identity
+        self._sidecar_identities = sidecar_identities
+        self._recovery_original_active = True
+        self._discard_recovery_snapshot()
+        self._assert_boundary()
+
+    @staticmethod
+    def _database_image_bytes(connection: sqlite3.Connection) -> bytes:
+        try:
+            payload = connection.serialize()
+        except (MemoryError, sqlite3.Error) as exc:
+            raise AgentEventLogCorrupt("event_log_storage_corrupt") from exc
+        if (
+            type(payload) is not bytes
+            or not payload
+            or len(payload) > MAX_AGENT_EVENT_LOG_RECOVERY_SNAPSHOT_BYTES
+        ):
+            raise AgentEventLogCorrupt("event_log_storage_corrupt")
+        return payload
+
+    @staticmethod
+    def _database_image_digest(connection: sqlite3.Connection) -> bytes:
+        return hashlib.sha256(AgentEventLog._database_image_bytes(connection)).digest()
 
     def _current_sidecar_identities(self) -> dict[str, tuple[int, int] | None]:
         return {
@@ -1196,26 +1468,64 @@ class AgentEventLog:
         if self._directory_identity(self.root) != self._root_identity:
             raise AgentEventLogError("event_log_path_substituted")
         self._assert_lock_boundary()
+        if self._recovery_mode and not self._recovery_original_active:
+            self._verify_retained_recovery_files(self._recovery_retained_files)
+            self._verify_offline_recovery_image(self._recovery_retained_files)
+            expected_digest = self._recovery_memory_image_digest
+            if (
+                not self._recovery_memory_active
+                or expected_digest is None
+                or self.connection is None
+                or self._database_image_digest(self.connection) != expected_digest
+            ):
+                raise AgentEventLogError("event_log_path_substituted")
+            return
         if self._safe_file_identity(self.database_path, required=True) != self._database_identity:
             raise AgentEventLogError("event_log_path_substituted")
         if self._current_sidecar_identities() != self._sidecar_identities:
             raise AgentEventLogError("event_log_path_substituted")
 
     def _configure(self) -> None:
+        self._configure_wal_connection(self.connection)
+
+    @staticmethod
+    def _configure_wal_connection(connection: sqlite3.Connection) -> None:
         try:
-            self.connection.execute("PRAGMA foreign_keys = ON")
-            self.connection.execute("PRAGMA busy_timeout = 5000")
-            mode = self.connection.execute("PRAGMA journal_mode = WAL").fetchone()[0]
-            self.connection.execute("PRAGMA synchronous = FULL")
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute("PRAGMA busy_timeout = 5000")
+            mode = connection.execute("PRAGMA journal_mode = WAL").fetchone()[0]
+            connection.execute("PRAGMA synchronous = FULL")
         except sqlite3.Error as exc:
             raise AgentEventLogError("event_log_configuration_failed") from exc
         if str(mode).casefold() != "wal":
             raise AgentEventLogError("event_log_configuration_failed")
 
-    def _migrate_or_verify(self, *, new_database: bool, verify_state: bool) -> None:
+    @staticmethod
+    def _configure_recovery_memory_connection(connection: sqlite3.Connection) -> None:
         try:
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute("PRAGMA busy_timeout = 5000")
+            connection.execute("PRAGMA synchronous = FULL")
+            mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
+            connection.execute("PRAGMA query_only = ON")
+        except sqlite3.Error as exc:
+            raise AgentEventLogError("event_log_configuration_failed") from exc
+        if str(mode).casefold() != "memory":
+            raise AgentEventLogError("event_log_configuration_failed")
+
+    def _migrate_or_verify(self, *, new_database: bool, verify_state: bool) -> None:
+        if self._recovery_mode:
+            self._verify_version_locked(allow_legacy=True)
+            self._verify_physical_integrity_locked()
+            self._verify_foreign_keys_locked()
+            if verify_state:
+                self._verify_all_executions_locked(
+                    schema_version=self._read_schema_version_locked()
+                )
+            return
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
             if new_database:
-                self.connection.execute("BEGIN IMMEDIATE")
                 for statement in _SCHEMA_TABLE_SQL.values():
                     self.connection.execute(statement)
                 self.connection.executemany(
@@ -1227,29 +1537,51 @@ class AgentEventLog:
                     ),
                 )
             else:
-                self.connection.execute("BEGIN IMMEDIATE")
+                version = self._read_schema_version_locked()
+                if version == 1:
+                    self._verify_schema_locked(schema_version=1)
+                    self._verify_lock_binding_locked()
+                    self._verify_foreign_keys_locked()
+                    self._verify_all_executions_locked(schema_version=1)
+                    self.connection.execute(_SCHEMA_TABLE_SQL["memory_projections"])
+                    changed = self.connection.execute(
+                        "UPDATE schema_meta SET value = '2' WHERE key = 'schema_version' "
+                        "AND value = '1'"
+                    ).rowcount
+                    if changed != 1:
+                        raise AgentEventLogCorrupt("event_log_version_unsupported")
+                    self._fault("before_schema_v2_migration_commit")
+                elif version != AGENT_EVENT_LOG_SCHEMA_VERSION:
+                    raise AgentEventLogCorrupt("event_log_version_unsupported")
             self._verify_version_locked()
+            self._verify_physical_integrity_locked()
             self._verify_foreign_keys_locked()
             if verify_state:
-                self._verify_all_executions_locked()
+                self._verify_all_executions_locked(schema_version=AGENT_EVENT_LOG_SCHEMA_VERSION)
             self.connection.commit()
         except Exception:
             if self.connection.in_transaction:
                 self.connection.rollback()
             raise
 
-    def _verify_version_locked(self) -> int:
+    def _read_schema_version_locked(self) -> int:
         try:
             row = self.connection.execute(
                 "SELECT value FROM schema_meta WHERE key = 'schema_version'"
             ).fetchone()
         except sqlite3.Error as exc:
             raise AgentEventLogCorrupt("event_log_schema_corrupt") from exc
-        if row is None or row["value"] != str(AGENT_EVENT_LOG_SCHEMA_VERSION):
+        if row is None or type(row["value"]) is not str or row["value"] not in {"1", "2"}:
             raise AgentEventLogCorrupt("event_log_version_unsupported")
-        self._verify_schema_locked()
+        return int(row["value"])
+
+    def _verify_version_locked(self, *, allow_legacy: bool = False) -> int:
+        version = self._read_schema_version_locked()
+        if version != AGENT_EVENT_LOG_SCHEMA_VERSION and not (allow_legacy and version == 1):
+            raise AgentEventLogCorrupt("event_log_version_unsupported")
+        self._verify_schema_locked(schema_version=version)
         self._verify_lock_binding_locked()
-        return AGENT_EVENT_LOG_SCHEMA_VERSION
+        return version
 
     def _verify_lock_binding_locked(self) -> None:
         try:
@@ -1270,18 +1602,32 @@ class AgentEventLog:
 
     def _verify_foreign_keys_locked(self) -> None:
         try:
-            violation = self.connection.execute("PRAGMA foreign_key_check").fetchone()
+            violations = self.connection.execute("PRAGMA foreign_key_check").fetchmany(1)
         except sqlite3.Error as exc:
             raise AgentEventLogCorrupt("event_log_storage_corrupt") from exc
-        if violation is not None:
+        if violations:
+            raise AgentEventLogCorrupt("event_log_storage_corrupt")
+
+    def _verify_physical_integrity_locked(self) -> None:
+        try:
+            results = self.connection.execute("PRAGMA integrity_check(1)").fetchmany(2)
+        except sqlite3.Error as exc:
+            raise AgentEventLogCorrupt("event_log_storage_corrupt") from exc
+        if (
+            len(results) != 1
+            or len(results[0]) != 1
+            or type(results[0][0]) is not str
+            or results[0][0] != "ok"
+        ):
             raise AgentEventLogCorrupt("event_log_storage_corrupt")
 
     def _verify_existing_store_readonly(self) -> None:
-        self._verify_version_locked()
+        version = self._verify_version_locked(allow_legacy=True)
+        self._verify_physical_integrity_locked()
         self._verify_foreign_keys_locked()
-        self._verify_all_executions_locked()
+        self._verify_all_executions_locked(schema_version=version)
 
-    def _verify_all_executions_locked(self) -> None:
+    def _verify_all_executions_locked(self, *, schema_version: int) -> None:
         try:
             rows = self.connection.execute(
                 "SELECT * FROM executions ORDER BY execution_id"
@@ -1289,28 +1635,46 @@ class AgentEventLog:
         except sqlite3.Error as exc:
             raise AgentEventLogCorrupt("event_log_storage_corrupt") from exc
         for row in rows:
-            self._replay_locked(row)
+            self._replay_locked(row, schema_version=schema_version)
 
-    def _verify_schema_locked(self) -> None:
+    def _verify_schema_locked(self, *, schema_version: int) -> None:
         try:
             objects = self.connection.execute(
                 """
-                SELECT type, name, tbl_name, sql FROM sqlite_schema
-                WHERE sql IS NOT NULL
-                ORDER BY type, name, tbl_name, sql
+                SELECT type, name, tbl_name, rootpage, sql FROM sqlite_schema
+                ORDER BY type, name, tbl_name
                 """
             ).fetchall()
             manifest_rows: list[tuple[str, str, str, str]] = []
+            internal_rows: list[tuple[str, str, str]] = []
+            rootpages: set[int] = set()
             for row in objects:
-                values = (row["type"], row["name"], row["tbl_name"], row["sql"])
-                if any(type(value) is not str for value in values):
+                object_type = row["type"]
+                name = row["name"]
+                table_name = row["tbl_name"]
+                rootpage = row["rootpage"]
+                sql = row["sql"]
+                if (
+                    any(type(value) is not str for value in (object_type, name, table_name))
+                    or type(rootpage) is not int
+                    or rootpage <= 0
+                    or rootpage in rootpages
+                    or (sql is not None and type(sql) is not str)
+                ):
                     raise AgentEventLogCorrupt("event_log_schema_corrupt")
-                object_type, name, table_name, sql = values
-                manifest_rows.append((object_type, name, table_name, sql))
+                rootpages.add(rootpage)
+                if sql is None:
+                    internal_rows.append((object_type, name, table_name))
+                else:
+                    manifest_rows.append((object_type, name, table_name, sql))
             manifest = tuple(manifest_rows)
-            if manifest != _EXPECTED_SCHEMA_MANIFEST:
+            if manifest != _EXPECTED_SCHEMA_MANIFESTS[schema_version]:
                 raise AgentEventLogCorrupt("event_log_schema_corrupt")
-            for table, expected in _SCHEMA_COLUMNS.items():
+            if tuple(internal_rows) != _EXPECTED_INTERNAL_SCHEMA_OBJECTS[schema_version]:
+                raise AgentEventLogCorrupt("event_log_schema_corrupt")
+            expected_tables = _SCHEMA_TABLE_SQL_V1 if schema_version == 1 else _SCHEMA_TABLE_SQL
+            for table in expected_tables:
+                expected = _SCHEMA_COLUMNS[table]
                 table_info = self.connection.execute(f"PRAGMA table_info({table})").fetchall()
                 columns = tuple(row["name"] for row in table_info)
                 if columns != expected:
@@ -1343,8 +1707,12 @@ class AgentEventLog:
                 "receipts": (
                     ("executions", "execution_id", "execution_id", "NO ACTION", "NO ACTION"),
                 ),
+                "memory_projections": (
+                    ("executions", "execution_id", "execution_id", "NO ACTION", "NO ACTION"),
+                ),
             }
-            for table, expected in expected_foreign_keys.items():
+            for table in expected_tables:
+                expected = expected_foreign_keys[table]
                 foreign_keys = tuple(
                     (
                         row["table"],
@@ -1374,9 +1742,17 @@ class AgentEventLog:
             foreign_keys = self.connection.execute("PRAGMA foreign_keys").fetchone()[0]
             synchronous = self.connection.execute("PRAGMA synchronous").fetchone()[0]
             journal_mode = self.connection.execute("PRAGMA journal_mode").fetchone()[0]
+            query_only = self.connection.execute("PRAGMA query_only").fetchone()[0]
         except sqlite3.Error as exc:
             raise AgentEventLogError("event_log_configuration_failed") from exc
-        if foreign_keys != 1 or synchronous != 2 or str(journal_mode).casefold() != "wal":
+        expected_query_only = 1 if self._recovery_mode and not self._recovery_original_active else 0
+        expected_journal_mode = "memory" if self._recovery_memory_active else "wal"
+        if (
+            foreign_keys != 1
+            or synchronous != 2
+            or str(journal_mode).casefold() != expected_journal_mode
+            or query_only != expected_query_only
+        ):
             raise AgentEventLogError("event_log_configuration_failed")
 
     @contextmanager
@@ -1386,8 +1762,13 @@ class AgentEventLog:
         primary: BaseException | None = None
         self._assert_configuration()
         try:
-            self.connection.execute("BEGIN IMMEDIATE")
-            self._verify_version_locked()
+            transaction = (
+                "BEGIN"
+                if self._recovery_mode and not self._recovery_original_active
+                else "BEGIN IMMEDIATE"
+            )
+            self.connection.execute(transaction)
+            self._verify_version_locked(allow_legacy=self._recovery_mode)
             yield
             self.connection.commit()
         except BaseException as exc:
@@ -1654,7 +2035,18 @@ class AgentEventLog:
             "SELECT COALESCE(SUM(length(receipt_json)), 0) FROM receipts WHERE execution_id = ?",
             (row["execution_id"],),
         ).fetchone()[0]
-        return len(row["activation_json"]) + len(row["grant_json"]) + event_total + receipt_total
+        projection_total = self.connection.execute(
+            "SELECT COALESCE(SUM(length(projection_json)), 0) FROM memory_projections "
+            "WHERE execution_id = ?",
+            (row["execution_id"],),
+        ).fetchone()[0]
+        return (
+            len(row["activation_json"])
+            + len(row["grant_json"])
+            + event_total
+            + receipt_total
+            + projection_total
+        )
 
     def append_event(
         self,
@@ -1672,7 +2064,10 @@ class AgentEventLog:
         expected_generation = _plain_nonnegative(expected_generation)
         expected_previous_hash = _plain_hash(expected_previous_hash, allow_none=True)
         document, event_bytes = _validated_document_bytes(event, expected_format=AGENT_EVENT_FORMAT)
-        if document["event_type"] == "execution.receipt_recorded":
+        if document["event_type"] in {
+            "execution.receipt_recorded",
+            "memory.projected",
+        }:
             raise AgentEventLogConflict("event_log_lifecycle_conflict")
         if (
             execution_id not in self._owned_executions
@@ -1849,7 +2244,7 @@ class AgentEventLog:
         )
         _, event_bytes = _validated_document_bytes(event, expected_format=AGENT_EVENT_FORMAT)
         try:
-            self._finalize_once(
+            committed_now = self._finalize_once(
                 execution_id,
                 receipt,
                 event,
@@ -1857,7 +2252,8 @@ class AgentEventLog:
                 expected_previous_hash=expected_previous_hash,
                 expected_generation=expected_generation,
             )
-            self._fault("after_finalize_commit")
+            if committed_now:
+                self._fault("after_finalize_commit")
             self._owned_executions.discard(execution_id)
         except AgentEventLogError:
             raise
@@ -1910,7 +2306,7 @@ class AgentEventLog:
         expected_sequence: int,
         expected_previous_hash: str | None,
         expected_generation: int,
-    ) -> None:
+    ) -> bool:
         execution_id = _plain_id(execution_id)
         expected_sequence = _plain_nonnegative(expected_sequence)
         expected_generation = _plain_nonnegative(expected_generation)
@@ -1928,14 +2324,25 @@ class AgentEventLog:
             self._verify_state_hash(row)
             if row["state"] == "terminal":
                 existing = self._replay_locked(row)
+                exact_terminal = (
+                    row["next_sequence"] == expected_sequence + 1
+                    and row["generation"] == expected_generation + 1
+                    and len(existing.event_bytes) == expected_sequence + 1
+                    and existing.projection_bytes is None
+                )
+                exact_projected_extension = (
+                    row["next_sequence"] == expected_sequence + 2
+                    and row["generation"] == expected_generation + 2
+                    and len(existing.event_bytes) == expected_sequence + 2
+                    and existing.projection_bytes is not None
+                )
                 if (
-                    expected_sequence + 1 == row["next_sequence"]
-                    and expected_generation + 1 == row["generation"]
+                    (exact_terminal or exact_projected_extension)
                     and event_document["previous_event_hash"] == expected_previous_hash
                     and existing.receipt_bytes == receipt_bytes
                     and existing.event_bytes[expected_sequence] == event_bytes
                 ):
-                    return
+                    return False
                 raise AgentEventLogConflict("event_log_finalize_conflict")
             if (
                 row["state"] != "open"
@@ -2049,6 +2456,7 @@ class AgentEventLog:
             if changed != 1:
                 raise AgentEventLogConflict("event_log_finalize_conflict")
             self._fault("before_finalize_commit")
+        return True
 
     def replay_records(self, execution_id: str) -> ReplayedExecution:
         self._assert_owner_process()
@@ -2056,6 +2464,277 @@ class AgentEventLog:
         with self._transaction():
             row = self._execution_row_locked(execution_id)
             return self._replay_locked(row)
+
+    def record_memory_projection(
+        self,
+        execution_id: str,
+        projection: dict[str, object],
+        event: dict[str, object],
+        *,
+        request_fingerprint: str,
+        expected_sequence: int,
+        expected_previous_hash: str,
+        expected_generation: int,
+    ) -> dict[str, object]:
+        """Atomically append one approved projection after a succeeded receipt."""
+
+        self._assert_owner_process()
+        self._require_ordinary_session()
+        execution_id = _plain_id(execution_id)
+        request_fingerprint = _plain_hash(request_fingerprint)  # type: ignore[assignment]
+        expected_sequence = _plain_nonnegative(expected_sequence)
+        expected_generation = _plain_nonnegative(expected_generation)
+        expected_previous_hash = _plain_hash(expected_previous_hash)  # type: ignore[assignment]
+        projection_document, projection_bytes = _validated_document_bytes(
+            projection,
+            expected_format=AGENT_MEMORY_PROJECTION_FORMAT,
+        )
+        event_document, event_bytes = _validated_document_bytes(
+            event,
+            expected_format=AGENT_EVENT_FORMAT,
+        )
+        if (
+            event_document["event_type"] != "memory.projected"
+            or projection_document["execution_id"] != execution_id
+            or event_document["event_id"] != _memory_projection_event_id(request_fingerprint)
+        ):
+            raise AgentEventLogConflict("event_log_lifecycle_conflict")
+        if execution_id in self._indeterminate_executions:
+            raise AgentEventLogConflict("event_log_projection_conflict")
+        attempted_mutation = [False]
+        try:
+            result, committed_now = self._record_memory_projection_once(
+                execution_id=execution_id,
+                projection_document=projection_document,
+                projection_bytes=projection_bytes,
+                event_document=event_document,
+                event_bytes=event_bytes,
+                request_fingerprint=request_fingerprint,
+                expected_sequence=expected_sequence,
+                expected_previous_hash=expected_previous_hash,
+                expected_generation=expected_generation,
+                attempted_mutation=attempted_mutation,
+            )
+            if committed_now:
+                self._fault("after_projection_commit")
+            return result
+        except Exception as exc:
+            if not attempted_mutation[0]:
+                raise
+            return self._reconcile_memory_projection(
+                execution_id=execution_id,
+                projection_bytes=projection_bytes,
+                event_bytes=event_bytes,
+                request_fingerprint=request_fingerprint,
+                expected_sequence=expected_sequence,
+                expected_previous_hash=expected_previous_hash,
+                expected_generation=expected_generation,
+                cause=exc,
+            )
+
+    def _record_memory_projection_once(
+        self,
+        *,
+        execution_id: str,
+        projection_document: dict[str, object],
+        projection_bytes: bytes,
+        event_document: dict[str, object],
+        event_bytes: bytes,
+        request_fingerprint: str,
+        expected_sequence: int,
+        expected_previous_hash: str,
+        expected_generation: int,
+        attempted_mutation: list[bool],
+    ) -> tuple[dict[str, object], bool]:
+        with self._transaction():
+            row = self._execution_row_locked(execution_id)
+            self._verify_state_hash(row)
+            existing_projection = self.connection.execute(
+                "SELECT * FROM memory_projections WHERE execution_id = ?",
+                (execution_id,),
+            ).fetchone()
+            if existing_projection is not None:
+                replay = self._replay_locked(row)
+                if (
+                    replay.state == "terminal"
+                    and replay.projection_bytes == projection_bytes
+                    and existing_projection["request_fingerprint"] == request_fingerprint
+                    and replay.next_sequence == expected_sequence + 1
+                    and replay.generation == expected_generation + 1
+                    and len(replay.event_bytes) == expected_sequence + 1
+                    and replay.event_bytes[expected_sequence] == event_bytes
+                    and event_document["previous_event_hash"] == expected_previous_hash
+                ):
+                    return projection_document, False
+                raise AgentEventLogConflict("event_log_projection_conflict")
+            if (
+                row["state"] != "terminal"
+                or row["next_sequence"] != expected_sequence
+                or row["head_hash"] != expected_previous_hash
+                or row["generation"] != expected_generation
+                or event_document["execution_id"] != execution_id
+                or event_document["log_id"] != row["log_id"]
+                or event_document["sequence"] != expected_sequence
+                or event_document["previous_event_hash"] != expected_previous_hash
+                or event_document["subject"]
+                != {
+                    "format": AGENT_MEMORY_PROJECTION_FORMAT,
+                    "format_version": 1,
+                    "id": projection_document["projection_id"],
+                    "content_hash": projection_document["content_hash"],
+                }
+            ):
+                raise AgentEventLogConflict("event_log_projection_conflict")
+            replay = self._replay_locked(row)
+            if replay.receipt_bytes is None:
+                raise AgentEventLogCorrupt("event_log_projection_corrupt")
+            receipt_document, _ = _decode_document(
+                replay.receipt_bytes,
+                expected_format=AGENT_EXECUTION_RECEIPT_FORMAT,
+            )
+            if receipt_document["outcome"] != "succeeded":
+                raise AgentEventLogConflict("event_log_lifecycle_conflict")
+            activation, _ = _decode_document(
+                row["activation_json"],
+                expected_format=AGENT_WORKER_ACTIVATION_FORMAT,
+            )
+            grant, _ = _decode_document(
+                row["grant_json"],
+                expected_format=AGENT_CAPABILITY_GRANT_FORMAT,
+            )
+            events, _ = self._event_documents_locked(execution_id)
+            if not _projection_has_exact_source_lineage(projection_document, events):
+                raise AgentEventLogConflict("event_log_lifecycle_conflict")
+            events.append(event_document)
+            try:
+                validate_agent_harness_documents(
+                    activation,
+                    grant,
+                    events,
+                    receipt_document,
+                    projection_document,
+                )
+                _lifecycle_fold(events, receipt_document)
+            except AgentEventLogError as exc:
+                raise AgentEventLogConflict("event_log_lifecycle_conflict") from exc
+            except Exception as exc:
+                raise AgentEventLogConflict("event_log_lifecycle_conflict") from exc
+            if len(events) > MAX_AGENT_EVENT_LOG_EVENTS:
+                raise AgentEventLogConflict("event_log_event_bound_exceeded")
+            if (
+                self._current_total_bytes_locked(row) + len(event_bytes) + len(projection_bytes)
+                > MAX_AGENT_EVENT_LOG_EXECUTION_BYTES
+            ):
+                raise AgentEventLogConflict("event_log_execution_too_large")
+            new_generation = expected_generation + 1
+            new_sequence = expected_sequence + 1
+            new_head = str(event_document["content_hash"])
+            values = self._row_state_values(row)
+            values.update(
+                generation=new_generation,
+                next_sequence=new_sequence,
+                head_hash=new_head,
+            )
+            attempted_mutation[0] = True
+            try:
+                self._fault("before_projection_table_insert")
+                self.connection.execute(
+                    """
+                    INSERT INTO memory_projections(
+                        execution_id, projection_id, projection_hash,
+                        request_fingerprint, projection_json
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        execution_id,
+                        projection_document["projection_id"],
+                        projection_document["content_hash"],
+                        request_fingerprint,
+                        sqlite3.Binary(projection_bytes),
+                    ),
+                )
+                self._fault("after_projection_table_insert")
+                self._fault("before_projection_event_insert")
+                self.connection.execute(
+                    """
+                    INSERT INTO events(execution_id, sequence, event_id, event_hash, event_json)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        execution_id,
+                        expected_sequence,
+                        event_document["event_id"],
+                        new_head,
+                        sqlite3.Binary(event_bytes),
+                    ),
+                )
+                self._fault("after_projection_event_insert")
+                self._fault("before_projection_state_update")
+                changed = self.connection.execute(
+                    """
+                    UPDATE executions
+                    SET generation = ?, next_sequence = ?, head_hash = ?, state_hash = ?
+                    WHERE execution_id = ? AND state = 'terminal' AND generation = ?
+                      AND next_sequence = ? AND head_hash = ?
+                    """,
+                    (
+                        new_generation,
+                        new_sequence,
+                        new_head,
+                        _state_hash(**values),
+                        execution_id,
+                        expected_generation,
+                        expected_sequence,
+                        expected_previous_hash,
+                    ),
+                ).rowcount
+                self._fault("after_projection_state_update")
+            except sqlite3.IntegrityError as exc:
+                raise AgentEventLogConflict("event_log_projection_conflict") from exc
+            if changed != 1:
+                raise AgentEventLogConflict("event_log_projection_conflict")
+            self._fault("before_projection_commit")
+        return projection_document, True
+
+    def _reconcile_memory_projection(
+        self,
+        *,
+        execution_id: str,
+        projection_bytes: bytes,
+        event_bytes: bytes,
+        request_fingerprint: str,
+        expected_sequence: int,
+        expected_previous_hash: str,
+        expected_generation: int,
+        cause: Exception,
+    ) -> dict[str, object]:
+        try:
+            replay = self.replay_records(execution_id)
+            stored = self.connection.execute(
+                "SELECT request_fingerprint FROM memory_projections WHERE execution_id = ?",
+                (execution_id,),
+            ).fetchone()
+            committed = (
+                replay.state == "terminal"
+                and replay.projection_bytes == projection_bytes
+                and stored is not None
+                and stored["request_fingerprint"] == request_fingerprint
+                and replay.next_sequence == expected_sequence + 1
+                and replay.generation == expected_generation + 1
+                and len(replay.event_bytes) == expected_sequence + 1
+                and replay.event_bytes[expected_sequence] == event_bytes
+                and expected_previous_hash is not None
+            )
+            if committed:
+                document, _ = _decode_document(
+                    projection_bytes,
+                    expected_format=AGENT_MEMORY_PROJECTION_FORMAT,
+                )
+                return document
+        except Exception:
+            pass
+        self._indeterminate_executions.add(execution_id)
+        raise AgentEventLogIndeterminate("event_log_projection_indeterminate") from cause
 
     def list_open(
         self,
@@ -2124,6 +2803,7 @@ class AgentEventLog:
         expected_sequence = _plain_nonnegative(expected_sequence)
         expected_generation = _plain_nonnegative(expected_generation)
         expected_previous_hash = _plain_hash(expected_previous_hash, allow_none=True)
+        self._activate_recovery_mutation()
         with self._transaction():
             row = self._execution_row_locked(execution_id)
             self._verify_state_hash(row)
@@ -2163,7 +2843,14 @@ class AgentEventLog:
             self._indeterminate_executions.discard(execution_id)
             return self._replay_locked(updated)
 
-    def _replay_locked(self, row: sqlite3.Row) -> ReplayedExecution:
+    def _replay_locked(
+        self,
+        row: sqlite3.Row,
+        *,
+        schema_version: int | None = None,
+    ) -> ReplayedExecution:
+        if schema_version is None:
+            schema_version = self._read_schema_version_locked()
         self._verify_state_hash(row)
         activation, activation_bytes = _decode_document(
             row["activation_json"], expected_format=AGENT_WORKER_ACTIVATION_FORMAT
@@ -2187,8 +2874,35 @@ class AgentEventLog:
                 or receipt_row["receipt_hash"] != receipt["content_hash"]
             ):
                 raise AgentEventLogCorrupt("event_log_projection_corrupt")
+        projection: dict[str, object] | None = None
+        projection_bytes: bytes | None = None
+        projection_row = None
+        if schema_version >= 2:
+            projection_row = self.connection.execute(
+                "SELECT * FROM memory_projections WHERE execution_id = ?",
+                (row["execution_id"],),
+            ).fetchone()
+        if projection_row is not None:
+            projection, projection_bytes = _decode_document(
+                projection_row["projection_json"],
+                expected_format=AGENT_MEMORY_PROJECTION_FORMAT,
+            )
+            if (
+                projection_row["execution_id"] != row["execution_id"]
+                or projection_row["projection_id"] != projection["projection_id"]
+                or projection_row["projection_hash"] != projection["content_hash"]
+                or type(projection_row["request_fingerprint"]) is not str
+                or _SHA_RE.fullmatch(projection_row["request_fingerprint"]) is None
+            ):
+                raise AgentEventLogCorrupt("event_log_projection_corrupt")
         try:
-            validate_agent_harness_documents(activation, grant, events, receipt)
+            validate_agent_harness_documents(
+                activation,
+                grant,
+                events,
+                receipt,
+                projection,
+            )
             _lifecycle_fold(events, receipt)
         except AgentEventLogError:
             raise
@@ -2212,15 +2926,39 @@ class AgentEventLog:
                 or receipt["receipt_id"] != row["receipt_id"]
                 or receipt["content_hash"] != row["receipt_hash"]
                 or not events
-                or events[-1]["event_type"] != "execution.receipt_recorded"
                 or row["generation"] != row["next_sequence"]
+            ):
+                raise AgentEventLogCorrupt("event_log_projection_corrupt")
+            if projection is None:
+                if events[-1]["event_type"] != "execution.receipt_recorded":
+                    raise AgentEventLogCorrupt("event_log_projection_corrupt")
+            elif (
+                receipt["outcome"] != "succeeded"
+                or len(events) < 2
+                or events[-2]["event_type"] != "execution.receipt_recorded"
+                or events[-1]["event_type"] != "memory.projected"
+                or not _projection_has_exact_source_lineage(projection, events[:-1])
+                or events[-1]["event_id"]
+                != _memory_projection_event_id(projection_row["request_fingerprint"])
+                or projection["execution_id"] != row["execution_id"]
+                or events[-1]["subject"]
+                != {
+                    "format": AGENT_MEMORY_PROJECTION_FORMAT,
+                    "format_version": 1,
+                    "id": projection["projection_id"],
+                    "content_hash": projection["content_hash"],
+                }
             ):
                 raise AgentEventLogCorrupt("event_log_projection_corrupt")
         elif (
             receipt is not None
+            or projection is not None
             or row["receipt_id"] is not None
             or row["receipt_hash"] is not None
-            or (events and events[-1]["event_type"] == "execution.receipt_recorded")
+            or (
+                events
+                and events[-1]["event_type"] in {"execution.receipt_recorded", "memory.projected"}
+            )
         ):
             raise AgentEventLogCorrupt("event_log_projection_corrupt")
         if row["state"] == "open" and row["generation"] != row["next_sequence"]:
@@ -2230,6 +2968,8 @@ class AgentEventLog:
         total = len(activation_bytes) + len(grant_bytes) + sum(map(len, event_bytes))
         if receipt_bytes is not None:
             total += len(receipt_bytes)
+        if projection_bytes is not None:
+            total += len(projection_bytes)
         if total > MAX_AGENT_EVENT_LOG_EXECUTION_BYTES:
             raise AgentEventLogCorrupt("event_log_execution_too_large")
         return ReplayedExecution(
@@ -2247,6 +2987,7 @@ class AgentEventLog:
             grant_bytes=bytes(grant_bytes),
             event_bytes=tuple(bytes(item) for item in event_bytes),
             receipt_bytes=None if receipt_bytes is None else bytes(receipt_bytes),
+            projection_bytes=(None if projection_bytes is None else bytes(projection_bytes)),
         )
 
 

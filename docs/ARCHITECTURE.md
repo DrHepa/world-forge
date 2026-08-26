@@ -604,8 +604,19 @@ atomically records the receipt and terminal event, and revalidates immutable
 audit records after reopen. Ordinary stores hold a shared retained one-byte OS
 lock before SQLite opens; only a dedicated exclusive offline recovery store can
 mark an orphaned or indeterminate open prefix `recovery_required`. Lock identity
-is bound into the exact private v1 schema, whose canonical DDL, relational
-shape, and startup foreign-key projection are fail-closed. Unsealable private
+is bound into the exact private v2 schema, whose canonical DDL, relational
+shape, internal indexes, bounded physical integrity, and startup foreign-key
+projection are fail-closed. Exact v1 ordinary stores migrate transactionally;
+recovery retains exact main/WAL/SHM bytes and identities, validates the main
+header and the complete WAL checksum chain, applies only frames through the last
+commit entirely offline, and serves the resulting v1 or v2 image from
+digest-bound query-only memory. It never SQLite-opens a copied or original
+pathname for construction or reads, creates no temporary database, and rejects
+every rollback-journal sidecar until a reviewed parser exists. Each read boundary
+rechecks the authoritative offline logical digest, the transported memory image,
+and every retained original identity, size, and hash. Only an explicit recovery
+transition may revalidate and open the original store. Recovery never creates or
+migrates schema. Unsealable private
 input has a null non-replayable fingerprint; a retry conflicts rather than
 deduplicating. Replay performs no adapter side effects and never resumes work
 or synthesizes a receipt/private output. Local spawned-process evidence covers
@@ -613,7 +624,7 @@ the POSIX fence; Windows shared/exclusive and remote-drive policy is seam-tested
 but has no native evidence in this slice. Public receipt
 `replay_support` remains `not_claimed` because audit reread is not provider
 replay. Durable Studio job recovery, production-grade provider sandboxing, real
-providers/models/billing, external MCP safety, memory approval/projection,
+providers/models/billing, external MCP safety, memory hydration and retention,
 artifact promotion, Studio jobs/UI/Team Mode, deterministic provider replay,
 and hosted/native/release evidence remain unimplemented and unproven.
 
@@ -691,6 +702,28 @@ are never resumed. Approval covers tools only, not providers, cloud, cost, data,
 credentials, artifacts, or memory promotion. The private conformance runtime is
 revision 2; Windows remains unsupported and `UNTESTED`. See
 [ADR-0035](decisions/0035-human-approval-and-progressive-tool-exposure.md).
+
+Approved memory projection is independent of execution/tool approval. An
+ephemeral source validates and copies explicit bounded JSON candidates but
+exports only code-owned identities and hashes. A separate instance-scoped CAS
+authority binds the succeeded receipt, complete pre-projection event chain and
+head, candidate snapshot, and one fixed lossless hash-only policy. Its reviewer
+label is asserted, not authenticated. The compiler rehashes raw values,
+deduplicates identical `(kind, subject_id, value_hash)` triples, rejects two
+approved values for one kind/subject, and sorts code-owned IDs by UTF-8 bytes;
+it performs no semantic summarization or provider call.
+
+The private event-log v2 `memory_projections` table stores only the canonical
+public hash-only projection and its private request fingerprint. One privileged
+transaction inserts it, appends exactly one `memory.projected` event after a
+succeeded receipt, and advances sequence/generation/head; the receipt remains
+the terminal execution outcome and ordinary event append cannot inject memory.
+Replay validates the projection, exact aggregate lineage, lifecycle, table
+projection, and state. Existing state hashes retain their v1 document format.
+Raw values are never durable. Hydration, scope, promotion/truth, retention,
+deletion/tombstones, authenticated reviewers, and durable content remain future
+Studio authorities. See
+[ADR-0036](decisions/0036-approved-hash-only-memory-projection.md).
 
 Slice 2B retains the closed, identity/evidence-only plan, observation, and report
 boundary for an optional codebase-memory comparison and adds a pure evaluator

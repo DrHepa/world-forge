@@ -114,7 +114,11 @@ connection = sqlite3.connect(sys.argv[1])
 connection.execute("PRAGMA journal_mode = WAL")
 connection.execute("PRAGMA wal_autocheckpoint = 0")
 mutation = sys.argv[2]
-if mutation == "unknown_version":
+if mutation == "valid":
+    connection.execute("PRAGMA user_version = 7")
+elif mutation == "user_version_92":
+    connection.execute("PRAGMA user_version = 92")
+elif mutation == "unknown_version":
     connection.execute(
         "UPDATE schema_meta SET value = '999' WHERE key = 'schema_version'"
     )
@@ -180,6 +184,152 @@ os._exit(0)
             f"rollback-journal crash fixture failed: rc={child.returncode} "
             f"stdout={child.stdout!r} stderr={child.stderr!r}"
         )
+
+
+def _test_wal_checksum(
+    payload: bytes,
+    *,
+    byteorder: str,
+    first: int = 0,
+    second: int = 0,
+) -> tuple[int, int]:
+    if len(payload) % 8 != 0:
+        raise AssertionError("test WAL checksum payload must be 64-bit aligned")
+    for offset in range(0, len(payload), 8):
+        left = int.from_bytes(payload[offset : offset + 4], byteorder)
+        right = int.from_bytes(payload[offset + 4 : offset + 8], byteorder)
+        first = (first + left + second) & 0xFFFFFFFF
+        second = (second + right + first) & 0xFFFFFFFF
+    return first, second
+
+
+def _test_sqlite_main(*, page_size: int = 4096, pages: int = 3) -> bytes:
+    payload = bytearray(page_size * pages)
+    payload[:16] = b"SQLite format 3\x00"
+    payload[16:18] = (1 if page_size == 65_536 else page_size).to_bytes(2, "big")
+    payload[18:20] = b"\x02\x02"
+    payload[21:24] = bytes((64, 32, 32))
+    payload[28:32] = pages.to_bytes(4, "big")
+    return bytes(payload)
+
+
+def _test_wal(
+    *,
+    page_size: int,
+    frames: tuple[tuple[int, int, bytes], ...],
+    magic: int = 0x377F0682,
+    version: int = 3_007_000,
+) -> bytes:
+    if page_size < 512 or page_size > 65_536 or page_size & (page_size - 1) != 0:
+        raise AssertionError("test WAL page size must be a valid literal encoding")
+    byteorder = "little" if magic == 0x377F0682 else "big"
+    salt = bytes.fromhex("0123456789abcdef")
+    header = bytearray(32)
+    header[0:4] = magic.to_bytes(4, "big")
+    header[4:8] = version.to_bytes(4, "big")
+    header[8:12] = page_size.to_bytes(4, "big")
+    header[16:24] = salt
+    checksum = _test_wal_checksum(bytes(header[:24]), byteorder=byteorder)
+    header[24:28] = checksum[0].to_bytes(4, "big")
+    header[28:32] = checksum[1].to_bytes(4, "big")
+    payload = bytearray(header)
+    for page_number, database_size, page in frames:
+        if len(page) != page_size:
+            raise AssertionError("test WAL page has wrong size")
+        frame_header = bytearray(24)
+        frame_header[0:4] = page_number.to_bytes(4, "big")
+        frame_header[4:8] = database_size.to_bytes(4, "big")
+        frame_header[8:16] = salt
+        checksum = _test_wal_checksum(
+            bytes(frame_header[:8]) + page,
+            byteorder=byteorder,
+            first=checksum[0],
+            second=checksum[1],
+        )
+        frame_header[16:20] = checksum[0].to_bytes(4, "big")
+        frame_header[20:24] = checksum[1].to_bytes(4, "big")
+        payload.extend(frame_header)
+        payload.extend(page)
+    return bytes(payload)
+
+
+def _real_sqlite_wal(*, page_size: int, user_version: int) -> tuple[bytes, bytes]:
+    with tempfile.TemporaryDirectory() as temporary:
+        database = Path(temporary) / "fixture.sqlite3"
+        connection = sqlite3.connect(database)
+        try:
+            connection.execute(f"PRAGMA page_size = {page_size}")
+            connection.execute("VACUUM")
+            connection.execute("CREATE TABLE fixture (value INTEGER NOT NULL)")
+            connection.commit()
+        finally:
+            connection.close()
+
+        connection = sqlite3.connect(database)
+        try:
+            mode = connection.execute("PRAGMA journal_mode = WAL").fetchone()[0]
+            if str(mode).casefold() != "wal":
+                raise AssertionError("SQLite WAL fixture did not enter WAL mode")
+            connection.execute("PRAGMA wal_autocheckpoint = 0")
+            connection.execute(f"PRAGMA user_version = {user_version}")
+            connection.execute("INSERT INTO fixture(value) VALUES (1)")
+            connection.commit()
+            main = database.read_bytes()
+            wal = Path(f"{database}-wal").read_bytes()
+        finally:
+            connection.close()
+    return main, wal
+
+
+def _forge_wal_page_size(
+    payload: bytes,
+    *,
+    actual_page_size: int,
+    encoded_page_size: int,
+) -> bytes:
+    frame_size = 24 + actual_page_size
+    if len(payload) < 32 or (len(payload) - 32) % frame_size != 0:
+        raise AssertionError("test WAL payload has wrong frame alignment")
+    magic = int.from_bytes(payload[:4], "big")
+    if magic == 0x377F0682:
+        byteorder = "little"
+    elif magic == 0x377F0683:
+        byteorder = "big"
+    else:
+        raise AssertionError("test WAL payload has unsupported magic")
+
+    forged = bytearray(payload)
+    forged[8:12] = encoded_page_size.to_bytes(4, "big")
+    checksum = _test_wal_checksum(bytes(forged[:24]), byteorder=byteorder)
+    forged[24:28] = checksum[0].to_bytes(4, "big")
+    forged[28:32] = checksum[1].to_bytes(4, "big")
+    for offset in range(32, len(forged), frame_size):
+        page = bytes(forged[offset + 24 : offset + frame_size])
+        checksum = _test_wal_checksum(
+            bytes(forged[offset : offset + 8]) + page,
+            byteorder=byteorder,
+            first=checksum[0],
+            second=checksum[1],
+        )
+        forged[offset + 16 : offset + 20] = checksum[0].to_bytes(4, "big")
+        forged[offset + 20 : offset + 24] = checksum[1].to_bytes(4, "big")
+    return bytes(forged)
+
+
+def _sqlite_user_version(main: bytes, wal: bytes = b"") -> int:
+    with tempfile.TemporaryDirectory() as temporary:
+        database = Path(temporary) / "fixture.sqlite3"
+        database.write_bytes(main)
+        if wal:
+            Path(f"{database}-wal").write_bytes(wal)
+        connection = sqlite3.connect(database)
+        try:
+            row = connection.execute("PRAGMA user_version").fetchone()
+            if row is None:
+                raise AssertionError("SQLite user_version query returned no row")
+            return int(row[0])
+        finally:
+            connection.close()
 
 
 def _documents() -> tuple[dict[str, object], dict[str, object]]:
@@ -1552,7 +1702,7 @@ class AgentEventLogTests(unittest.TestCase):
             database.touch(mode=0o600)
             namespace = {path.name for path in root.iterdir()}
             before = database.read_bytes()
-            with self.assertRaisesRegex(AgentEventLogCorrupt, "event_log_schema_corrupt"):
+            with self.assertRaisesRegex(AgentEventLogCorrupt, "event_log_storage_corrupt"):
                 AgentEventLog.recovery(root)
             self.assertEqual(before, database.read_bytes())
             self.assertEqual(namespace, {path.name for path in root.iterdir()})
@@ -1580,7 +1730,16 @@ class AgentEventLogTests(unittest.TestCase):
             )
             connection.close()
             self.assertEqual("999", version)
-            self.assertEqual(("events", "executions", "receipts", "schema_meta"), tables)
+            self.assertEqual(
+                (
+                    "events",
+                    "executions",
+                    "memory_projections",
+                    "receipts",
+                    "schema_meta",
+                ),
+                tables,
+            )
             self.assertEqual(namespace, {path.name for path in root.iterdir()})
 
     def test_failed_recovery_never_mutates_crash_surviving_wal_bytes(self) -> None:
@@ -1606,6 +1765,562 @@ class AgentEventLogTests(unittest.TestCase):
 
                 self.assertEqual(before, _store_byte_evidence(root))
                 self.assertEqual(parent_namespace, {path.name for path in root.parent.iterdir()})
+
+    def test_recovery_reads_preserve_valid_crash_bytes_until_explicit_transition(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "store"
+            activation, grant = _documents()
+            with AgentEventLog(root) as log:
+                log.begin_execution(
+                    activation["execution_id"],
+                    "log_durable_01",
+                    activation,
+                    grant,
+                    request_fingerprint="a" * 64,
+                )
+                database = log.database_path
+            _commit_wal_then_crash(database, "valid")
+            before = _store_byte_evidence(root)
+
+            with AgentEventLog.recovery(root) as recovery:
+                self.assertTrue(recovery._recovery_memory_active)
+                self.assertFalse(
+                    any(
+                        path.name.startswith(".worldforge-agent-event-log-recovery-")
+                        for path in root.parent.iterdir()
+                    )
+                )
+                retained_descriptors = tuple(
+                    item.descriptor
+                    for item in recovery._recovery_retained_files.values()
+                    if item is not None
+                )
+                self.assertEqual(AGENT_EVENT_LOG_SCHEMA_VERSION, recovery.schema_version)
+                replay = recovery.replay_records(activation["execution_id"])
+                self.assertEqual("open", replay.state)
+                self.assertEqual(
+                    (activation["execution_id"],),
+                    tuple(item.execution_id for item in recovery.list_open(limit=10)),
+                )
+                self.assertEqual(before, _store_byte_evidence(root))
+                recovered = recovery.mark_recovery_required(
+                    activation["execution_id"],
+                    expected_sequence=0,
+                    expected_previous_hash=None,
+                    expected_generation=0,
+                )
+                self.assertEqual("recovery_required", recovered.state)
+                for descriptor in retained_descriptors:
+                    with self.assertRaises(OSError):
+                        os.fstat(descriptor)
+
+            self.assertNotEqual(before, _store_byte_evidence(root))
+            with AgentEventLog(root) as restarted:
+                replay = restarted.replay_records(activation["execution_id"])
+                self.assertEqual("recovery_required", replay.state)
+                self.assertEqual(1, replay.generation)
+
+    def test_recovery_snapshot_is_read_only_and_transition_rejects_content_race(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "readonly"
+            with AgentEventLog(root):
+                pass
+            with AgentEventLog.recovery(root) as recovery:
+                with self.assertRaises(sqlite3.OperationalError):
+                    recovery.connection.execute("PRAGMA user_version = 91")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "raced"
+            activation, grant = _documents()
+            with AgentEventLog(root) as log:
+                log.begin_execution(
+                    activation["execution_id"],
+                    "log_durable_01",
+                    activation,
+                    grant,
+                    request_fingerprint="a" * 64,
+                )
+                database = log.database_path
+            _commit_wal_then_crash(database, "valid")
+            real_connect = sqlite3.connect
+            raced = False
+
+            def race_after_reverification(
+                *args: object,
+                **kwargs: object,
+            ) -> sqlite3.Connection:
+                nonlocal raced
+                target = str(args[0])
+                if not raced and target.startswith(database.as_uri()):
+                    raced = True
+                    attacker = real_connect(database)
+                    try:
+                        attacker.execute("PRAGMA user_version = 92")
+                    finally:
+                        attacker.close()
+                return real_connect(*args, **kwargs)
+
+            with (
+                AgentEventLog.recovery(root) as recovery,
+                mock.patch.object(
+                    event_log_module.sqlite3,
+                    "connect",
+                    side_effect=race_after_reverification,
+                ),
+            ):
+                prefix = recovery.list_open(limit=1)[0]
+                with self.assertRaisesRegex(AgentEventLogError, "event_log_path_substituted"):
+                    recovery.mark_recovery_required(
+                        prefix.execution_id,
+                        expected_sequence=prefix.next_sequence,
+                        expected_previous_hash=prefix.head_hash,
+                        expected_generation=prefix.generation,
+                    )
+            self.assertTrue(raced)
+
+    def test_recovery_boundaries_recheck_memory_image_and_original_source_bytes(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "memory-tamper"
+            activation, grant = _documents()
+            with AgentEventLog(root) as log:
+                log.begin_execution(
+                    activation["execution_id"],
+                    "log_durable_01",
+                    activation,
+                    grant,
+                    request_fingerprint="a" * 64,
+                )
+            with AgentEventLog.recovery(root) as recovery:
+                recovery.connection.execute("PRAGMA query_only = OFF")
+                recovery.connection.execute("PRAGMA user_version = 91")
+                recovery.connection.execute("PRAGMA query_only = ON")
+                with self.assertRaisesRegex(
+                    AgentEventLogError,
+                    "event_log_path_substituted",
+                ):
+                    recovery.replay_records(activation["execution_id"])
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "source-tamper"
+            activation, grant = _documents()
+            with AgentEventLog(root) as log:
+                log.begin_execution(
+                    activation["execution_id"],
+                    "log_durable_01",
+                    activation,
+                    grant,
+                    request_fingerprint="a" * 64,
+                )
+                database = log.database_path
+            with AgentEventLog.recovery(root) as recovery:
+                identity_before = database.stat()
+                with database.open("r+b", buffering=0) as destination:
+                    destination.seek(-1, os.SEEK_END)
+                    original = destination.read(1)
+                    destination.seek(-1, os.SEEK_END)
+                    destination.write(bytes((original[0] ^ 1,)))
+                    os.fsync(destination.fileno())
+                identity_after = database.stat()
+                self.assertEqual(
+                    (identity_before.st_dev, identity_before.st_ino),
+                    (identity_after.st_dev, identity_after.st_ino),
+                )
+                with self.assertRaisesRegex(
+                    AgentEventLogError,
+                    "event_log_path_substituted",
+                ):
+                    recovery.list_open(limit=1)
+
+    def test_recovery_payload_read_is_bound_to_the_retained_source_hash(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "store"
+            with AgentEventLog(root) as log:
+                database = log.database_path
+            with AgentEventLog.recovery(root) as recovery:
+                retained = recovery._recovery_retained_files[""]
+                assert retained is not None
+                with database.open("r+b", buffering=0) as source:
+                    source.seek(-1, os.SEEK_END)
+                    original = source.read(1)
+                    source.seek(-1, os.SEEK_END)
+                    source.write(bytes((original[0] ^ 1,)))
+                    os.fsync(source.fileno())
+                    try:
+                        with self.assertRaisesRegex(
+                            AgentEventLogError,
+                            "event_log_path_substituted",
+                        ):
+                            recovery._retained_payload(retained)
+                    finally:
+                        source.seek(-1, os.SEEK_END)
+                        source.write(original)
+                        os.fsync(source.fileno())
+
+    def test_recovery_memory_seal_failure_closes_connections_files_and_lock(self) -> None:
+        class ControlSignal(BaseException):
+            pass
+
+        for selected in (RuntimeError("memory seal failed"), ControlSignal("stop")):
+            with (
+                self.subTest(kind=type(selected).__name__),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary) / "store"
+                with AgentEventLog(root):
+                    pass
+                before = _store_byte_evidence(root)
+                real_connect = sqlite3.connect
+                memory_connections: list[sqlite3.Connection] = []
+
+                def capture_connect(
+                    *args: object,
+                    _real_connect: object = real_connect,
+                    _memory_connections: list[sqlite3.Connection] = memory_connections,
+                    **kwargs: object,
+                ) -> sqlite3.Connection:
+                    connection = _real_connect(*args, **kwargs)
+                    if args and args[0] == ":memory:":
+                        _memory_connections.append(connection)
+                    return connection
+
+                def fail_memory_configuration(
+                    _connection: sqlite3.Connection,
+                    _selected: BaseException = selected,
+                ) -> None:
+                    raise _selected
+
+                with (
+                    mock.patch.object(
+                        event_log_module.sqlite3,
+                        "connect",
+                        side_effect=capture_connect,
+                    ),
+                    mock.patch.object(
+                        AgentEventLog,
+                        "_configure_recovery_memory_connection",
+                        side_effect=fail_memory_configuration,
+                    ),
+                    self.assertRaises(type(selected)) as raised,
+                ):
+                    AgentEventLog.recovery(root)
+
+                self.assertIs(selected, raised.exception)
+                self.assertEqual(1, len(memory_connections))
+                with self.assertRaises(sqlite3.ProgrammingError):
+                    memory_connections[0].execute("SELECT 1")
+                self.assertEqual(before, _store_byte_evidence(root))
+                self.assertFalse(
+                    any(
+                        path.name.startswith(".worldforge-agent-event-log-recovery-")
+                        for path in root.parent.iterdir()
+                    )
+                )
+                with AgentEventLog(root):
+                    pass
+
+    def test_recovery_serialized_image_is_size_bounded_without_raw_error_payload(self) -> None:
+        secret = b"private-recovery-bytes"
+
+        class OversizedConnection:
+            @staticmethod
+            def serialize() -> bytes:
+                return secret * 2
+
+        with mock.patch.object(
+            event_log_module,
+            "MAX_AGENT_EVENT_LOG_RECOVERY_SNAPSHOT_BYTES",
+            len(secret),
+        ):
+            with self.assertRaisesRegex(
+                AgentEventLogCorrupt,
+                "event_log_storage_corrupt",
+            ) as raised:
+                AgentEventLog._database_image_bytes(OversizedConnection())
+
+        messages: list[str] = []
+        current: BaseException | None = raised.exception
+        while current is not None:
+            messages.extend((str(current), *getattr(current, "__notes__", ())))
+            current = current.__cause__ or current.__context__
+        self.assertNotIn(secret.decode("ascii"), "\n".join(messages))
+
+    def test_offline_wal_image_uses_last_commit_and_ignores_valid_trailing_frames(
+        self,
+    ) -> None:
+        page_size = 4096
+        main = _test_sqlite_main(page_size=page_size, pages=3)
+        first_page_two = b"A" * page_size
+        latest_committed_page_two = b"B" * page_size
+        truncated_page_three = b"C" * page_size
+        trailing_uncommitted_page_two = b"D" * page_size
+        wal = _test_wal(
+            page_size=page_size,
+            frames=(
+                (2, 3, first_page_two),
+                (2, 0, latest_committed_page_two),
+                (3, 2, truncated_page_three),
+                (2, 0, trailing_uncommitted_page_two),
+            ),
+        )
+
+        image = event_log_module._materialize_offline_recovery_image(main, wal)
+
+        self.assertEqual(page_size * 2, len(image))
+        self.assertEqual(main[:page_size], image[:page_size])
+        self.assertEqual(latest_committed_page_two, image[page_size:])
+
+    def test_offline_wal_image_extends_and_no_commit_keeps_exact_main(self) -> None:
+        page_size = 4096
+        main = _test_sqlite_main(page_size=page_size, pages=2)
+        page_three = b"E" * page_size
+
+        no_commit = event_log_module._materialize_offline_recovery_image(
+            main,
+            _test_wal(
+                page_size=page_size,
+                frames=((2, 0, b"U" * page_size),),
+            ),
+        )
+        extended = event_log_module._materialize_offline_recovery_image(
+            main,
+            _test_wal(
+                page_size=page_size,
+                frames=((3, 4, page_three),),
+            ),
+        )
+
+        self.assertEqual(main, no_commit)
+        self.assertEqual(page_size * 4, len(extended))
+        self.assertEqual(main, extended[: page_size * 2])
+        self.assertEqual(page_three, extended[page_size * 2 : page_size * 3])
+        self.assertEqual(b"\0" * page_size, extended[page_size * 3 :])
+
+    def test_offline_wal_rejects_checksummed_64k_sentinel_that_sqlite_ignores(
+        self,
+    ) -> None:
+        page_size = 65_536
+        main, wal = _real_sqlite_wal(page_size=page_size, user_version=7)
+        forged = _forge_wal_page_size(
+            wal,
+            actual_page_size=page_size,
+            encoded_page_size=1,
+        )
+
+        self.assertEqual(1, int.from_bytes(main[16:18], "big"))
+        self.assertEqual(page_size, int.from_bytes(wal[8:12], "big"))
+        self.assertEqual(7, _sqlite_user_version(main, wal))
+        self.assertEqual(
+            7,
+            _sqlite_user_version(event_log_module._materialize_offline_recovery_image(main, wal)),
+        )
+        self.assertEqual(1, int.from_bytes(forged[8:12], "big"))
+        self.assertEqual(0, _sqlite_user_version(main, forged))
+        with self.assertRaisesRegex(
+            AgentEventLogCorrupt,
+            "event_log_storage_corrupt",
+        ):
+            event_log_module._materialize_offline_recovery_image(main, forged)
+
+    def test_offline_wal_page_size_contract_accepts_literals_and_rejects_mismatch(
+        self,
+    ) -> None:
+        for page_size, marker in ((1024, b"A"), (4096, b"B"), (65_536, b"C")):
+            with self.subTest(page_size=page_size):
+                main = _test_sqlite_main(page_size=page_size, pages=2)
+                page = marker * page_size
+                wal = _test_wal(
+                    page_size=page_size,
+                    frames=((2, 2, page),),
+                )
+
+                image = event_log_module._materialize_offline_recovery_image(main, wal)
+
+                self.assertEqual(page_size, int.from_bytes(wal[8:12], "big"))
+                self.assertEqual(page_size * 2, len(image))
+                self.assertEqual(page, image[page_size:])
+
+        mismatched_wal = _test_wal(
+            page_size=1024,
+            frames=((2, 2, b"M" * 1024),),
+        )
+        with self.assertRaisesRegex(
+            AgentEventLogCorrupt,
+            "event_log_storage_corrupt",
+        ):
+            event_log_module._materialize_offline_recovery_image(
+                _test_sqlite_main(page_size=4096, pages=2),
+                mismatched_wal,
+            )
+
+    def test_offline_wal_image_rejects_header_frame_and_bound_corruption(self) -> None:
+        page_size = 4096
+        main = _test_sqlite_main(page_size=page_size, pages=2)
+        page = b"P" * page_size
+        valid = _test_wal(page_size=page_size, frames=((2, 2, page),))
+        bad_checksum = bytearray(valid)
+        bad_checksum[-1] ^= 1
+        bad_salt = bytearray(valid)
+        bad_salt[40] ^= 1
+        bad_page_number = _test_wal(page_size=page_size, frames=((0, 2, page),))
+        maximum_pages = event_log_module.MAX_AGENT_EVENT_LOG_RECOVERY_SNAPSHOT_BYTES // page_size
+        out_of_bound_page = _test_wal(
+            page_size=page_size,
+            frames=((maximum_pages + 1, 2, page),),
+        )
+        out_of_bound_size = _test_wal(
+            page_size=page_size,
+            frames=((2, maximum_pages + 1, page),),
+        )
+        bad_magic = _test_wal(
+            page_size=page_size,
+            frames=((2, 2, page),),
+            magic=0x377F0684,
+        )
+        bad_version = _test_wal(
+            page_size=page_size,
+            frames=((2, 2, page),),
+            version=3_007_001,
+        )
+        mismatched_page_size = _test_wal(
+            page_size=512,
+            frames=((2, 2, b"M" * 512),),
+        )
+
+        cases = {
+            "bad_main_magic": (b"not sqlite" + main[10:], valid),
+            "bad_main_page_size": (main[:16] + b"\x00\x03" + main[18:], valid),
+            "misaligned_main": (main[:-1], valid),
+            "bad_wal_checksum": (main, bytes(bad_checksum)),
+            "bad_wal_salt": (main, bytes(bad_salt)),
+            "bad_wal_page_number": (main, bad_page_number),
+            "out_of_bound_wal_page": (main, out_of_bound_page),
+            "out_of_bound_database_size": (main, out_of_bound_size),
+            "bad_wal_magic": (main, bad_magic),
+            "bad_wal_version": (main, bad_version),
+            "bad_wal_page_size": (main, mismatched_page_size),
+            "truncated_wal": (main, valid[:-1]),
+        }
+        for name, (candidate_main, candidate_wal) in cases.items():
+            with (
+                self.subTest(name=name),
+                self.assertRaisesRegex(
+                    AgentEventLogCorrupt,
+                    "event_log_storage_corrupt",
+                ),
+            ):
+                event_log_module._materialize_offline_recovery_image(
+                    candidate_main,
+                    candidate_wal,
+                )
+
+        with mock.patch.object(
+            event_log_module,
+            "MAX_AGENT_EVENT_LOG_RECOVERY_SNAPSHOT_BYTES",
+            page_size * 2,
+        ):
+            with self.assertRaisesRegex(
+                AgentEventLogError,
+                "event_log_recovery_snapshot_too_large",
+            ):
+                event_log_module._materialize_offline_recovery_image(
+                    _test_sqlite_main(page_size=page_size, pages=3),
+                    b"",
+                )
+            with self.assertRaisesRegex(
+                AgentEventLogError,
+                "event_log_recovery_snapshot_too_large",
+            ):
+                event_log_module._materialize_offline_recovery_image(
+                    main,
+                    _test_wal(
+                        page_size=page_size,
+                        frames=((2, 3, page),),
+                    ),
+                )
+
+    def test_recovery_read_path_only_opens_memory_and_never_runs_copy_seam(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "store"
+            activation, grant = _documents()
+            with AgentEventLog(root) as log:
+                log.begin_execution(
+                    activation["execution_id"],
+                    "log_durable_01",
+                    activation,
+                    grant,
+                    request_fingerprint="a" * 64,
+                )
+                database = log.database_path
+            _commit_wal_then_crash(database, "valid")
+            before = _store_byte_evidence(root)
+            namespace = {path.name for path in root.parent.iterdir()}
+            real_connect = sqlite3.connect
+            targets: list[object] = []
+
+            def memory_only_connect(*args: object, **kwargs: object) -> sqlite3.Connection:
+                targets.append(args[0])
+                if args[0] != ":memory:":
+                    raise AssertionError("recovery read attempted a pathname SQLite open")
+                return real_connect(*args, **kwargs)
+
+            with (
+                mock.patch.object(
+                    AgentEventLog,
+                    "_copy_retained_recovery_file",
+                    side_effect=AssertionError("detached copy seam must be unreachable"),
+                    create=True,
+                ),
+                mock.patch.object(
+                    event_log_module.sqlite3,
+                    "connect",
+                    side_effect=memory_only_connect,
+                ),
+                AgentEventLog.recovery(root) as recovery,
+            ):
+                self.assertEqual(2, recovery.schema_version)
+                self.assertEqual("open", recovery.replay_records(activation["execution_id"]).state)
+                self.assertEqual(
+                    (activation["execution_id"],),
+                    tuple(item.execution_id for item in recovery.list_open(limit=10)),
+                )
+
+            self.assertEqual([":memory:"], targets)
+            self.assertEqual(before, _store_byte_evidence(root))
+            self.assertEqual(namespace, {path.name for path in root.parent.iterdir()})
+
+    def test_recovery_rejects_every_rollback_journal_sidecar_without_mutation(self) -> None:
+        for payload in (b"", b"stale", None):
+            with self.subTest(kind="hot" if payload is None else repr(payload)):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary) / "store"
+                    with AgentEventLog(root) as log:
+                        database = log.database_path
+                    journal = Path(f"{database}-journal")
+                    if payload is None:
+                        _leave_hot_rollback_journal_then_crash(database)
+                    else:
+                        journal.write_bytes(payload)
+                    before = _store_byte_evidence(root)
+                    namespace = {path.name for path in root.parent.iterdir()}
+
+                    with self.assertRaisesRegex(
+                        AgentEventLogError,
+                        "event_log_recovery_rollback_journal_unsupported",
+                    ) as raised:
+                        AgentEventLog.recovery(root)
+
+                    self.assertEqual(
+                        "event_log_recovery_rollback_journal_unsupported",
+                        raised.exception.reason_code,
+                    )
+                    self.assertEqual(before, _store_byte_evidence(root))
+                    self.assertEqual(namespace, {path.name for path in root.parent.iterdir()})
 
     def test_failed_recovery_never_mutates_a_corrupt_crash_wal(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1684,25 +2399,15 @@ class AgentEventLogTests(unittest.TestCase):
                 subject_id="memory_projection_01",
                 subject_hash="f" * 64,
             )
-            with mock.patch.object(
-                event_log_module,
-                "_lifecycle_fold",
-                wraps=event_log_module._lifecycle_fold,
-            ) as reducer:
-                with self.assertRaisesRegex(AgentEventLogConflict, "event_log_lifecycle_conflict"):
-                    log.append_event(
-                        str(activation["execution_id"]),
-                        memory_event,
-                        expected_sequence=0,
-                        expected_previous_hash=None,
-                        expected_generation=0,
-                    )
-                self.assertTrue(
-                    any(
-                        call.args[0] and call.args[0][-1]["event_type"] == "memory.projected"
-                        for call in reducer.call_args_list
-                    )
+            with self.assertRaisesRegex(AgentEventLogConflict, "event_log_lifecycle_conflict"):
+                log.append_event(
+                    str(activation["execution_id"]),
+                    memory_event,
+                    expected_sequence=0,
+                    expected_previous_hash=None,
+                    expected_generation=0,
                 )
+            self.assertEqual([], log.connection.execute("SELECT * FROM events").fetchall())
             log.append_event(
                 str(activation["execution_id"]),
                 events[0],
@@ -1918,7 +2623,10 @@ class AgentEventLogTests(unittest.TestCase):
                     check=False,
                 )
                 self.assertEqual(0, child.returncode, child.stderr)
-                self.assertEqual("1", child.stdout.strip())
+                self.assertEqual(
+                    str(AGENT_EVENT_LOG_SCHEMA_VERSION),
+                    child.stdout.strip(),
+                )
                 with self.assertRaisesRegex(AgentEventLogConflict, "event_log_recovery_active"):
                     AgentEventLog.recovery(root)
 

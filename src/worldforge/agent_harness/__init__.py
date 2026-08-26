@@ -3,6 +3,11 @@
 from .capability_broker import CapabilityBroker
 from .event_log import AgentEventLog, AgentExecutionCoordinator
 from .kernel import AgentExecutionKernel, KernelError
+from .memory_approvals import InMemoryMemoryApprovalAuthority
+from .memory_projection import (
+    InMemoryMemoryProposalSource,
+    MemoryProjectionCoordinator,
+)
 from .ports import ExecutionLimits, ExecutionRequest
 from .supervisor import OneShotProviderSupervisor
 
@@ -14,5 +19,8 @@ __all__ = (
     "ExecutionLimits",
     "ExecutionRequest",
     "KernelError",
+    "InMemoryMemoryApprovalAuthority",
+    "InMemoryMemoryProposalSource",
+    "MemoryProjectionCoordinator",
     "OneShotProviderSupervisor",
 )

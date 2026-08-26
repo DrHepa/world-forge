@@ -684,10 +684,11 @@ class LinuxRuntimeDispatchTests(unittest.TestCase):
                 "telemetry_attestation_hash": H3,
             }
         )
-        for unavailable in (production, networked):
-            with self.subTest(unavailable=unavailable.runtime_id):
-                with self.assertRaisesRegex(ProviderCatalogError, "provider_runtime_unavailable"):
-                    ProviderRuntimeCatalog.create((unavailable,))
+        with self.assertRaisesRegex(ProviderCatalogError, "provider_runtime_unavailable"):
+            ProviderRuntimeCatalog.create((production,))
+        # Loopback descriptors remain valid policy data.  They become executable
+        # only through the exact code-owned gateway catalog captured by a supervisor.
+        self.assertEqual(networked, ProviderRuntimeCatalog.create((networked,)).specs[0])
         self.assertEqual(0, provider.spawn_count)
 
 

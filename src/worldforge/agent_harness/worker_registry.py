@@ -1,4 +1,4 @@
-"""Closed private registry for code-owned, offline provider workers."""
+"""Closed private registry for exact code-owned provider workers."""
 
 from __future__ import annotations
 
@@ -7,6 +7,10 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import Enum
 
+from .loopback_gateway import (
+    LoopbackGatewayPolicy,
+    code_owned_no_telemetry_branch_hash,
+)
 from .provider_catalog import (
     ProviderCatalogError,
     ProviderRuntimeCatalog,
@@ -87,6 +91,7 @@ def _expected_spec(
     key: _CodeOwnedRuntimeKey,
     artifact: _WorkerArtifact,
     egress_enforcement: ProviderEgressEnforcementProfile,
+    gateway_policy: LoopbackGatewayPolicy | None = None,
 ) -> ProviderRuntimeSpec:
     if key is _CodeOwnedRuntimeKey.CONFORMANCE:
         model_id = "conformance"
@@ -94,6 +99,27 @@ def _expected_spec(
         model_id = "deterministic_probe"
     else:
         raise RuntimeError(_REGISTRY_ERROR)
+    if gateway_policy is not None:
+        if key is not _CodeOwnedRuntimeKey.DETERMINISTIC_PROBE:
+            raise RuntimeError(_REGISTRY_ERROR)
+        try:
+            checked_policy = LoopbackGatewayPolicy.create(gateway_policy.endpoint_origin)
+        except Exception:
+            raise RuntimeError(_REGISTRY_ERROR) from None
+        if (
+            gateway_policy != checked_policy
+            or gateway_policy.canonical_document != checked_policy.canonical_document
+        ):
+            raise RuntimeError(_REGISTRY_ERROR)
+        network_scope = "loopback"
+        endpoint_origin = checked_policy.endpoint_origin
+        endpoint_policy_hash = checked_policy.content_hash
+        telemetry_attestation_hash = code_owned_no_telemetry_branch_hash()
+    else:
+        network_scope = "none"
+        endpoint_origin = None
+        endpoint_policy_hash = None
+        telemetry_attestation_hash = None
     return ProviderRuntimeSpec.create(
         runtime_id=artifact.identifier,
         runtime_revision=artifact.revision,
@@ -102,11 +128,11 @@ def _expected_spec(
         model_id=model_id,
         model_version=str(artifact.revision),
         deployment_class="local",
-        network_scope="none",
-        endpoint_origin=None,
-        endpoint_policy_hash=None,
+        network_scope=network_scope,
+        endpoint_origin=endpoint_origin,
+        endpoint_policy_hash=endpoint_policy_hash,
         egress_enforcement_hash=egress_enforcement.content_hash,
-        telemetry_attestation_hash=None,
+        telemetry_attestation_hash=telemetry_attestation_hash,
         pricing_policy_hash=None,
         pricing_currency=None,
         credential_requirement_hash=None,
@@ -203,8 +229,19 @@ def _validate_entry(value: object) -> _CodeOwnedRuntimeEntry:
     try:
         artifact = _validate_artifact(value.artifact)
         egress_enforcement = _validate_provider_egress_profile(value.egress_enforcement)
-        expected_spec = _expected_spec(value.key, artifact, egress_enforcement)
         supplied_spec = ProviderRuntimeCatalog.create((value.spec,)).specs[0]
+        gateway_policy = None
+        if (
+            value.key is _CodeOwnedRuntimeKey.DETERMINISTIC_PROBE
+            and supplied_spec.network_scope == "loopback"
+        ):
+            gateway_policy = LoopbackGatewayPolicy.create(supplied_spec.endpoint_origin)
+        expected_spec = _expected_spec(
+            value.key,
+            artifact,
+            egress_enforcement,
+            gateway_policy,
+        )
     except Exception:
         raise RuntimeError(_REGISTRY_ERROR) from None
     if (
@@ -216,7 +253,8 @@ def _validate_entry(value: object) -> _CodeOwnedRuntimeEntry:
         )
         or tuple(tuple.__iter__(value.environment_profile)) != _ENVIRONMENT_PROFILE
         or artifact != canonical_artifact
-        or supplied_spec != canonical_spec
+        or gateway_policy is None
+        and supplied_spec != canonical_spec
         or tuple(value.environment_profile) != canonical_environment
         or egress_enforcement != canonical_egress_enforcement
         or supplied_spec != expected_spec
@@ -256,7 +294,11 @@ def _validated_entries() -> tuple[_CodeOwnedRuntimeEntry, ...]:
     return entries
 
 
-def runtime_entry(key: _CodeOwnedRuntimeKey) -> _CodeOwnedRuntimeEntry:
+def runtime_entry(
+    key: _CodeOwnedRuntimeKey,
+    *,
+    gateway_policy: LoopbackGatewayPolicy | None = None,
+) -> _CodeOwnedRuntimeEntry:
     """Return a detached validated entry for one internal enum key."""
 
     if type(key) is not _CodeOwnedRuntimeKey:
@@ -264,15 +306,31 @@ def runtime_entry(key: _CodeOwnedRuntimeKey) -> _CodeOwnedRuntimeEntry:
     matches = tuple(entry for entry in _validated_entries() if entry.key is key)
     if len(matches) != 1:
         raise RuntimeError(_REGISTRY_ERROR)
-    return _validate_entry(matches[0])
+    entry = _validate_entry(matches[0])
+    if gateway_policy is None:
+        return entry
+    if key is not _CodeOwnedRuntimeKey.DETERMINISTIC_PROBE:
+        raise RuntimeError(_REGISTRY_ERROR)
+    return replace(
+        entry,
+        spec=_expected_spec(key, entry.artifact, entry.egress_enforcement, gateway_policy),
+    )
 
 
-def runtime_identity(key: _CodeOwnedRuntimeKey) -> dict[str, object]:
-    return runtime_entry(key).runtime_binding
+def runtime_identity(
+    key: _CodeOwnedRuntimeKey,
+    *,
+    gateway_policy: LoopbackGatewayPolicy | None = None,
+) -> dict[str, object]:
+    return runtime_entry(key, gateway_policy=gateway_policy).runtime_binding
 
 
-def runtime_spec(key: _CodeOwnedRuntimeKey) -> ProviderRuntimeSpec:
-    return replace(runtime_entry(key).spec)
+def runtime_spec(
+    key: _CodeOwnedRuntimeKey,
+    *,
+    gateway_policy: LoopbackGatewayPolicy | None = None,
+) -> ProviderRuntimeSpec:
+    return replace(runtime_entry(key, gateway_policy=gateway_policy).spec)
 
 
 def runtime_artifact(key: _CodeOwnedRuntimeKey) -> _WorkerArtifact:
@@ -299,17 +357,42 @@ def _matches_runtime(key: _CodeOwnedRuntimeKey, value: object) -> bool:
     )
 
 
-def code_owned_provider_catalog() -> ProviderRuntimeCatalog:
-    entries = _validated_entries()
+def code_owned_provider_catalog(
+    *,
+    gateway_policy: LoopbackGatewayPolicy | None = None,
+) -> ProviderRuntimeCatalog:
+    entries = tuple(
+        runtime_entry(
+            entry.key,
+            gateway_policy=(
+                gateway_policy if entry.key is _CodeOwnedRuntimeKey.DETERMINISTIC_PROBE else None
+            ),
+        )
+        for entry in _validated_entries()
+    )
     return ProviderRuntimeCatalog.create(tuple(entry.spec for entry in entries)).snapshot()
 
 
-def runtime_entry_for_selection(selection: object) -> _CodeOwnedRuntimeEntry:
-    catalog = code_owned_provider_catalog()
+def runtime_entry_for_selection(
+    selection: object,
+    *,
+    gateway_policy: LoopbackGatewayPolicy | None = None,
+) -> _CodeOwnedRuntimeEntry:
+    catalog = code_owned_provider_catalog(gateway_policy=gateway_policy)
     resolved = catalog.resolve(selection)
     matches = tuple(
         entry
-        for entry in _validated_entries()
+        for entry in tuple(
+            runtime_entry(
+                candidate.key,
+                gateway_policy=(
+                    gateway_policy
+                    if candidate.key is _CodeOwnedRuntimeKey.DETERMINISTIC_PROBE
+                    else None
+                ),
+            )
+            for candidate in _validated_entries()
+        )
         if (
             entry.spec == resolved.spec
             and entry.identifier == resolved.selection.runtime_id
@@ -319,7 +402,10 @@ def runtime_entry_for_selection(selection: object) -> _CodeOwnedRuntimeEntry:
     )
     if len(matches) != 1:
         raise ProviderCatalogError("provider_runtime_unavailable")
-    return _validate_entry(matches[0])
+    entry = matches[0]
+    if gateway_policy is None:
+        return _validate_entry(entry)
+    return replace(entry)
 
 
 def fixed_runtime_identity() -> dict[str, object]:

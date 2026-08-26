@@ -782,6 +782,22 @@ unchanged. This is not a complete OS network sandbox, firewall, filesystem
 boundary, trusted-parent loopback gateway, or real-provider claim. See
 [ADR-0039](decisions/0039-deny-all-provider-worker-egress.md).
 
+ADR-0040 adds that trusted-parent loopback gateway as a separate positive
+authority, not as an exception inside the worker filter. The revision-3
+deterministic probe emits one authenticated semantic side-band request through
+its existing pipes; the broker authenticates and relays it, while the main
+parent alone owns one exact numeric-loopback nonblocking HTTP/1.1 socket. The
+socket closes before a fresh parent response challenge can authorize the
+exchange-bound worker final and before worker-domain cleanup returns. Every
+network wait uses the earlier of the policy and private-turn absolute
+deadlines. The frozen origin/policy, ADR-0039 profile, no-telemetry branch,
+catalog, selection, governance destination facet, and private fingerprint are
+hash-aligned. Post-send ambiguity is non-retriable containment uncertainty and
+leaves the EventLog prefix open. This proves no server identity, exposure
+policy, vendor telemetry, provider, credentials, Internet route, Windows
+backend, or production readiness. See
+[ADR-0040](decisions/0040-parent-owned-exact-origin-loopback-gateway.md).
+
 Slice 2B retains the closed, identity/evidence-only plan, observation, and report
 boundary for an optional codebase-memory comparison and adds a pure evaluator
 plus an explicit-input, atomic no-replace CLI. Validators resolve the exact plan

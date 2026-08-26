@@ -3,6 +3,10 @@
 - Status: accepted
 - Date: 2026-08-26
 
+> Supersession note: ADR-0040 advances the deterministic probe to revision 3
+> and permits its exact governed loopback variant through a parent-owned
+> gateway; the conformance runtime and closed two-ID registry remain unchanged.
+
 ## Context
 
 ADR-0033 proved one killable Linux worker around a fixed conformance runtime,

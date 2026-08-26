@@ -106,6 +106,8 @@ class _ProviderAuthority:
     adapter: ProviderAdapter
     runtime_binding: _ProviderRuntimeBinding
     turn: Callable[..., object]
+    provider_catalog: ProviderRuntimeCatalog | None
+    provider_selection: ProviderExecutionSelection | None
 
 
 def _snapshot_provider_runtime_binding(provider: object) -> _ProviderRuntimeBinding:
@@ -149,7 +151,7 @@ def _snapshot_provider_authority(provider: object) -> _ProviderAuthority:
         raise KernelError("provider_runtime_binding_invalid") from None
     if not callable(turn):
         raise KernelError("provider_runtime_binding_invalid")
-    return _ProviderAuthority(provider, runtime_binding, turn)
+    return _ProviderAuthority(provider, runtime_binding, turn, None, None)
 
 
 def _bounded_integer(value: object, *, minimum: int = 0) -> int:
@@ -672,7 +674,7 @@ class AgentExecutionKernel:
         provider_catalog: ProviderRuntimeCatalog | None = None,
         provider_governance_authority: InMemoryProviderGovernanceAuthority | None = None,
     ) -> None:
-        self._provider_authority = _snapshot_provider_authority(provider)
+        provider_authority = _snapshot_provider_authority(provider)
         if (
             approval_authority is not None
             and type(approval_authority) is not InMemoryHumanApprovalAuthority
@@ -688,7 +690,27 @@ class AgentExecutionKernel:
         except ProviderCatalogError:
             raise KernelError("provider_catalog_invalid") from None
         if frozen_provider_catalog is not None:
-            fixed_catalog = code_owned_provider_catalog()
+            has_loopback = any(
+                spec.network_scope == "loopback" for spec in frozen_provider_catalog.specs
+            )
+            if has_loopback:
+                from .supervisor import OneShotProviderSupervisor
+
+                try:
+                    gateway_selection = OneShotProviderSupervisor._require_gateway_authority(
+                        provider,
+                        frozen_provider_catalog,
+                    )
+                except Exception:
+                    raise KernelError("provider_gateway_authority_invalid") from None
+                provider_authority = replace(
+                    provider_authority,
+                    provider_catalog=frozen_provider_catalog,
+                    provider_selection=gateway_selection,
+                )
+                fixed_catalog = frozen_provider_catalog
+            else:
+                fixed_catalog = code_owned_provider_catalog()
             if (
                 frozen_provider_catalog.catalog_hash != fixed_catalog.catalog_hash
                 or frozen_provider_catalog.specs != fixed_catalog.specs
@@ -699,6 +721,7 @@ class AgentExecutionKernel:
             and type(provider_governance_authority) is not InMemoryProviderGovernanceAuthority
         ):
             raise KernelError("provider_governance_authority_invalid")
+        self._provider_authority = provider_authority
         self._provider_catalog = frozen_provider_catalog
         self._provider_governance_authority = provider_governance_authority
         self.broker = broker
@@ -715,9 +738,28 @@ class AgentExecutionKernel:
     def _provider(self) -> ProviderAdapter:
         return self._provider_authority.adapter
 
+    def _require_current_gateway_authority(self) -> None:
+        expected = self._provider_authority.provider_selection
+        if expected is None:
+            return
+        if self._provider_catalog is None:
+            raise KernelError("provider_gateway_authority_invalid")
+        from .supervisor import OneShotProviderSupervisor
+
+        try:
+            current = OneShotProviderSupervisor._require_gateway_authority(
+                self._provider_authority.adapter,
+                self._provider_catalog,
+            )
+        except Exception:
+            raise KernelError("provider_gateway_authority_invalid") from None
+        if current != expected:
+            raise KernelError("provider_gateway_authority_invalid")
+
     def prepare_approval_review(self, request: ExecutionRequest) -> ExecutionApprovalReview:
         """Mint one exact host-side review; provider workers cannot call this surface."""
 
+        self._require_current_gateway_authority()
         if self._active_execution_id is not None:
             raise KernelError("execution_reentrant")
         request, activation, grant = _prepared_execution_request(request)
@@ -753,6 +795,7 @@ class AgentExecutionKernel:
     ) -> ProviderGovernanceReview:
         """Prepare one exact provider review without exposing it to the worker."""
 
+        self._require_current_gateway_authority()
         if self._active_execution_id is not None:
             raise KernelError("execution_reentrant")
         request, activation, grant = _prepared_execution_request(request)
@@ -778,6 +821,11 @@ class AgentExecutionKernel:
             resolved = self._provider_catalog.resolve(request.provider_selection)
         except ProviderCatalogError as exc:
             raise KernelError(exc.reason_code) from None
+        if (
+            self._provider_authority.provider_selection is not None
+            and resolved.selection != self._provider_authority.provider_selection
+        ):
+            raise KernelError("provider_execution_selection_invalid")
         review = _build_provider_governance_review(
             request,
             activation,
@@ -862,6 +910,7 @@ class AgentExecutionKernel:
         return None if reason is None else "tool_not_authorized"
 
     def execute(self, request: ExecutionRequest) -> ExecutionResult:
+        self._require_current_gateway_authority()
         if type(request) is not ExecutionRequest:
             raise KernelError("execution_request_invalid")
         if self._active_execution_id is not None:
@@ -946,6 +995,11 @@ class AgentExecutionKernel:
                         )
                     except ProviderCatalogError:
                         raise KernelError("provider_execution_selection_invalid") from None
+                    if (
+                        provider_authority.provider_selection is not None
+                        and provider_resolved.selection != provider_authority.provider_selection
+                    ):
+                        raise KernelError("provider_execution_selection_invalid")
                     provider_spec_hash = provider_resolved.spec.content_hash
                     provider_config_hash = provider_resolved.selection.non_secret_config_hash
                     provider_selection_hash = provider_resolved.selection.content_hash

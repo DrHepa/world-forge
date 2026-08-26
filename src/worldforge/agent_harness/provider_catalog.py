@@ -514,7 +514,7 @@ class ProviderRuntimeCatalog:
             raise
         except Exception:
             raise ProviderCatalogError(reason) from None
-        if any(spec.production_eligible or spec.network_scope != "none" for spec in checked):
+        if any(spec.production_eligible or spec.network_scope == "internet" for spec in checked):
             raise ProviderCatalogError("provider_runtime_unavailable")
         ordered = tuple(
             sorted(

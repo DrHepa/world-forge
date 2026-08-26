@@ -728,6 +728,66 @@ def parse_result_frame(
         raise WorkerProtocolError("worker_protocol_result_invalid") from None
 
 
+def _strip_gateway_result_proof(
+    frame: bytes,
+    *,
+    key: bytes,
+    nonce: str,
+    request_hash: str,
+    expected_exchange_hash: str,
+    runtime_key: _CodeOwnedRuntimeKey = _CodeOwnedRuntimeKey.CONFORMANCE,
+    runtime_authority: _CodeOwnedRuntimeEntry | None = None,
+) -> bytes:
+    """Authenticate one response-bound proof and return the ordinary final frame."""
+
+    checked_key = _require_key(key)
+    expected = _validate_sha256(
+        expected_exchange_hash,
+        reason_code="worker_protocol_correlation_failed",
+    )
+    document = _decode_canonical(_extract_frame(frame, maximum=MAX_WORKER_RESPONSE_BYTES))
+    if set(document) != {
+        "format",
+        "format_version",
+        "gateway_exchange_hash",
+        "mac",
+        "nonce",
+        "request_hash",
+        "result",
+        "result_hash",
+        "runtime",
+    }:
+        raise WorkerProtocolError("worker_protocol_result_invalid")
+    supplied = document["mac"]
+    proof = document["gateway_exchange_hash"]
+    if (
+        type(supplied) is not str
+        or not hmac.compare_digest(supplied, _mac(document, checked_key))
+        or type(proof) is not str
+        or not hmac.compare_digest(
+            _validate_sha256(proof, reason_code="worker_protocol_correlation_failed"),
+            expected,
+        )
+    ):
+        raise WorkerProtocolError("worker_protocol_authentication_failed")
+    ordinary = {
+        name: value
+        for name, value in document.items()
+        if name not in {"gateway_exchange_hash", "mac"}
+    }
+    ordinary["mac"] = _mac(ordinary, checked_key)
+    stripped = _frame(_canonical(ordinary), maximum=MAX_WORKER_RESPONSE_BYTES)
+    parse_result_frame(
+        stripped,
+        key=checked_key,
+        nonce=nonce,
+        request_hash=request_hash,
+        runtime_key=runtime_key,
+        runtime_authority=runtime_authority,
+    )
+    return stripped
+
+
 __all__ = (
     "MAX_WORKER_REQUEST_BYTES",
     "MAX_WORKER_RESPONSE_BYTES",

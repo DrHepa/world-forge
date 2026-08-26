@@ -22,6 +22,21 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from .loopback_gateway import (
+    LoopbackGatewayError,
+    LoopbackGatewayIndeterminate,
+    LoopbackGatewayPolicy,
+    LoopbackGatewayStopped,
+    execute_loopback_exchange,
+)
+from .loopback_protocol import (
+    MAX_LOOPBACK_REQUEST_FRAME_BYTES,
+    MAX_LOOPBACK_RESPONSE_FRAME_BYTES,
+    LoopbackProtocolError,
+    LoopbackProtocolSession,
+    parse_loopback_context_frame,
+    parse_loopback_response_frame,
+)
 from .ports import ProviderBoundaryControl
 from .provider_egress import (
     ProviderEgressEnforcementProfile,
@@ -33,6 +48,8 @@ from .provider_egress import (
 from .worker_protocol import (
     MAX_WORKER_RESPONSE_BYTES,
     MAX_WORKER_STDERR_BYTES,
+    WorkerProtocolError,
+    _strip_gateway_result_proof,
 )
 from .worker_registry import (
     _CodeOwnedRuntimeEntry,
@@ -54,6 +71,8 @@ _CONTROL_SEQUENCE_BY_KIND = {
     "ready": 0,
     "release": 0,
     "start": 0,
+    "gateway_request": 1,
+    "gateway_response": 2,
 }
 _ALLOWED_STOP_REASONS = frozenset(
     {
@@ -106,6 +125,22 @@ class _ProcessIdentity:
 class _BrokerReport:
     status: str
     response: bytes | None
+
+
+@dataclass(frozen=True, slots=True)
+class _LoopbackTurnAuthority:
+    policy: LoopbackGatewayPolicy
+    worker_nonce: str
+    original_request_hash: str
+    context_frame: bytes
+
+    @property
+    def correlation(self) -> dict[str, object]:
+        return {
+            "nonce": self.worker_nonce,
+            "original_request_hash": self.original_request_hash,
+            "gateway_policy_hash": self.policy.content_hash,
+        }
 
 
 class _DuplicateControlKey(ValueError):
@@ -169,6 +204,50 @@ def _validate_control_payload(kind: str, payload: dict[str, object]) -> None:
         valid = not payload
     elif kind == "release":
         valid = set(payload) == {"release"} and type(payload["release"]) is bool
+    elif kind in {"gateway_request", "gateway_response"}:
+        encoded = payload.get("frame_base64")
+        runtime = payload.get("runtime")
+        maximum = (
+            MAX_LOOPBACK_REQUEST_FRAME_BYTES + 4
+            if kind == "gateway_request"
+            else MAX_LOOPBACK_RESPONSE_FRAME_BYTES + 4
+        )
+        valid = (
+            set(payload)
+            == {
+                "frame_base64",
+                "frame_hash",
+                "gateway_policy_hash",
+                "original_request_hash",
+                "runtime",
+                "worker_nonce",
+            }
+            and type(encoded) is str
+            and type(payload.get("frame_hash")) is str
+            and _HEX_RE.fullmatch(payload["frame_hash"]) is not None
+            and type(payload.get("gateway_policy_hash")) is str
+            and _HEX_RE.fullmatch(payload["gateway_policy_hash"]) is not None
+            and type(payload.get("original_request_hash")) is str
+            and _HEX_RE.fullmatch(payload["original_request_hash"]) is not None
+            and type(payload.get("worker_nonce")) is str
+            and _HEX_RE.fullmatch(payload["worker_nonce"]) is not None
+            and type(runtime) is dict
+            and set(runtime) == {"id", "revision", "content_hash"}
+            and type(runtime.get("id")) is str
+            and type(runtime.get("revision")) is int
+            and type(runtime.get("content_hash")) is str
+            and _HEX_RE.fullmatch(runtime["content_hash"]) is not None
+        )
+        if valid:
+            try:
+                decoded = base64.b64decode(encoded, validate=True)
+            except Exception:
+                valid = False
+            else:
+                valid = (
+                    len(decoded) <= maximum
+                    and hashlib.sha256(decoded).hexdigest() == payload["frame_hash"]
+                )
     elif kind == "ready":
         valid = (
             set(payload) == {"worker_pid", "worker_start_time"}
@@ -353,6 +432,90 @@ def _recv_control_frame(stream: socket.socket) -> bytes:
     if size > _CONTROL_LIMIT:
         raise ProviderBoundaryIndeterminate()
     return _recv_exact(stream, size)
+
+
+def _gateway_control_payload(
+    frame: bytes,
+    *,
+    runtime: dict[str, object],
+    authority: _LoopbackTurnAuthority,
+) -> dict[str, object]:
+    return {
+        "frame_base64": base64.b64encode(frame).decode("ascii"),
+        "frame_hash": hashlib.sha256(frame).hexdigest(),
+        "gateway_policy_hash": authority.policy.content_hash,
+        "original_request_hash": authority.original_request_hash,
+        "runtime": dict(runtime),
+        "worker_nonce": authority.worker_nonce,
+    }
+
+
+def _validate_gateway_control_payload(
+    payload: object,
+    *,
+    runtime: dict[str, object],
+    authority: _LoopbackTurnAuthority,
+    kind: str,
+) -> bytes:
+    if type(payload) is not dict:
+        raise ProviderBoundaryIndeterminate()
+    _validate_control_payload(kind, payload)
+    if (
+        payload["runtime"] != runtime
+        or payload["gateway_policy_hash"] != authority.policy.content_hash
+        or payload["original_request_hash"] != authority.original_request_hash
+        or payload["worker_nonce"] != authority.worker_nonce
+    ):
+        raise ProviderBoundaryIndeterminate()
+    try:
+        frame = base64.b64decode(payload["frame_base64"], validate=True)
+    except Exception:
+        raise ProviderBoundaryIndeterminate() from None
+    if hashlib.sha256(frame).hexdigest() != payload["frame_hash"]:
+        raise ProviderBoundaryIndeterminate()
+    return frame
+
+
+def _validate_loopback_turn_authority(
+    value: object,
+    *,
+    worker_key: bytes,
+    runtime_launch: _CodeOwnedRuntimeLaunch,
+) -> _LoopbackTurnAuthority:
+    if type(value) is not _LoopbackTurnAuthority:
+        raise ProviderBoundaryFailure()
+    try:
+        policy = LoopbackGatewayPolicy.create(value.policy.endpoint_origin)
+        if policy != value.policy or policy.canonical_document != value.policy.canonical_document:
+            raise ValueError
+        if (
+            runtime_launch.authority.key is not _CodeOwnedRuntimeKey.DETERMINISTIC_PROBE
+            or runtime_launch.authority.spec.network_scope != "loopback"
+            or runtime_launch.authority.spec.endpoint_origin != policy.endpoint_origin
+            or runtime_launch.authority.spec.endpoint_policy_hash != policy.content_hash
+            or type(value.worker_nonce) is not str
+            or _HEX_RE.fullmatch(value.worker_nonce) is None
+            or type(value.original_request_hash) is not str
+            or _HEX_RE.fullmatch(value.original_request_hash) is None
+            or type(value.context_frame) is not bytes
+        ):
+            raise ValueError
+        parse_loopback_context_frame(
+            value.context_frame,
+            key=worker_key,
+            nonce=value.worker_nonce,
+            runtime=runtime_launch.authority.runtime_binding,
+            original_request_hash=value.original_request_hash,
+            gateway_policy_hash=policy.content_hash,
+        )
+    except Exception:
+        raise ProviderBoundaryFailure() from None
+    return _LoopbackTurnAuthority(
+        policy,
+        value.worker_nonce,
+        value.original_request_hash,
+        bytes(value.context_frame),
+    )
 
 
 def _minimal_environment(
@@ -994,6 +1157,7 @@ def _linux_broker_main(
     worker_key: bytes,
     request_frame: bytes,
     scratch: str,
+    loopback_turn: _LoopbackTurnAuthority | None = None,
 ) -> int:
     if type(runtime_launch) is not _CodeOwnedRuntimeLaunch:
         raise ProviderBoundaryIndeterminate()
@@ -1065,25 +1229,71 @@ def _linux_broker_main(
             assert process.stderr is not None
             for stream in (process.stdin, process.stdout, process.stderr):
                 os.set_blocking(stream.fileno(), False)
-            pending = memoryview(worker_key + request_frame)
+            if loopback_turn is not None:
+                loopback_turn = _validate_loopback_turn_authority(
+                    loopback_turn,
+                    worker_key=worker_key,
+                    runtime_launch=runtime_launch,
+                )
+            pending = memoryview(
+                worker_key
+                + request_frame
+                + (b"" if loopback_turn is None else loopback_turn.context_frame)
+            )
             cancelled = False
             protocol_failure = False
+            gateway_requested = False
+            gateway_response_received = False
+            gateway_exchange_hash: str | None = None
             while True:
                 frame = reader.poll()
                 if frame is not None:
                     try:
-                        _decode_control(
-                            frame,
-                            key=broker_key,
-                            nonce=broker_nonce,
-                            kind="cancel",
-                            sequence=1,
-                        )
+                        if gateway_requested and not gateway_response_received:
+                            assert loopback_turn is not None
+                            payload = _decode_control(
+                                frame,
+                                key=broker_key,
+                                nonce=broker_nonce,
+                                kind="gateway_response",
+                                sequence=2,
+                            )
+                            response_frame = _validate_gateway_control_payload(
+                                payload,
+                                runtime=runtime_launch.authority.runtime_binding,
+                                authority=loopback_turn,
+                                kind="gateway_response",
+                            )
+                            parsed_gateway_response = parse_loopback_response_frame(
+                                response_frame,
+                                key=worker_key,
+                                nonce=loopback_turn.worker_nonce,
+                                runtime=runtime_launch.authority.runtime_binding,
+                                original_request_hash=loopback_turn.original_request_hash,
+                                gateway_policy_hash=loopback_turn.policy.content_hash,
+                            )
+                            if (
+                                parsed_gateway_response.response_challenge is None
+                                or parsed_gateway_response.exchange_hash is None
+                            ):
+                                raise ProviderBoundaryIndeterminate()
+                            gateway_exchange_hash = parsed_gateway_response.exchange_hash
+                            pending = memoryview(response_frame)
+                            gateway_response_received = True
+                        else:
+                            _decode_control(
+                                frame,
+                                key=broker_key,
+                                nonce=broker_nonce,
+                                kind="cancel",
+                                sequence=1,
+                            )
+                            cancelled = True
                     except ProviderBoundaryIndeterminate:
                         status = "containment_lost"
                         break
-                    cancelled = True
-                    break
+                    if cancelled:
+                        break
                 if reader.closed:
                     cancelled = True
                     break
@@ -1096,7 +1306,7 @@ def _linux_broker_main(
                         pending = pending[0:0]
                     if written:
                         pending = pending[written:]
-                    if not pending:
+                    if not pending and (loopback_turn is None or gateway_response_received):
                         process.stdin.close()
                 _read_pipe_nonblocking(process.stdout, MAX_WORKER_RESPONSE_BYTES + 4, stdout)
                 _read_pipe_nonblocking(process.stderr, MAX_WORKER_STDERR_BYTES, stderr)
@@ -1115,7 +1325,52 @@ def _linux_broker_main(
                 if stderr:
                     protocol_failure = True
                     break
+                if loopback_turn is not None and not gateway_requested and len(stdout) >= 4:
+                    size = int.from_bytes(stdout[:4], "big")
+                    if size > MAX_LOOPBACK_REQUEST_FRAME_BYTES:
+                        protocol_failure = True
+                        break
+                    if len(stdout) >= size + 4:
+                        gateway_frame = bytes(stdout[: size + 4])
+                        del stdout[: size + 4]
+                        try:
+                            gateway_session = LoopbackProtocolSession(
+                                key=worker_key,
+                                nonce=loopback_turn.worker_nonce,
+                                runtime=runtime_launch.authority.runtime_binding,
+                                original_request_hash=loopback_turn.original_request_hash,
+                                gateway_policy_hash=loopback_turn.policy.content_hash,
+                            )
+                            gateway_session.accept_request(gateway_frame)
+                            _send_all(
+                                control,
+                                _encode_control(
+                                    kind="gateway_request",
+                                    sequence=1,
+                                    nonce=broker_nonce,
+                                    payload=_gateway_control_payload(
+                                        gateway_frame,
+                                        runtime=runtime_launch.authority.runtime_binding,
+                                        authority=loopback_turn,
+                                    ),
+                                    key=broker_key,
+                                ),
+                            )
+                        except (LoopbackProtocolError, ProviderBoundaryIndeterminate):
+                            protocol_failure = True
+                            break
+                        gateway_requested = True
                 if process.poll() is not None:
+                    # A worker may exit after emitting bytes that predate the
+                    # parent response.  Wait for that response so only its
+                    # fresh exchange proof can authorize the final envelope.
+                    if (
+                        loopback_turn is not None
+                        and gateway_requested
+                        and not gateway_response_received
+                    ):
+                        time.sleep(0.001)
+                        continue
                     break
                 time.sleep(0.001)
 
@@ -1126,6 +1381,8 @@ def _linux_broker_main(
             elif protocol_failure:
                 status = "provider_failed"
             elif process.poll() is None:
+                status = "provider_failed"
+            elif loopback_turn is not None and not gateway_response_received:
                 status = "provider_failed"
             else:
                 status = "response" if process.returncode == 0 else "provider_failed"
@@ -1158,6 +1415,24 @@ def _linux_broker_main(
                 status = "provider_failed"
             else:
                 response = bytes(stdout)
+                if loopback_turn is not None:
+                    if gateway_exchange_hash is None:
+                        status = "provider_failed"
+                        response = None
+                    else:
+                        try:
+                            response = _strip_gateway_result_proof(
+                                response,
+                                key=worker_key,
+                                nonce=loopback_turn.worker_nonce,
+                                request_hash=loopback_turn.original_request_hash,
+                                expected_exchange_hash=gateway_exchange_hash,
+                                runtime_key=runtime_launch.authority.key,
+                                runtime_authority=runtime_launch.authority,
+                            )
+                        except WorkerProtocolError:
+                            status = "provider_failed"
+                            response = None
 
         payload: dict[str, object] = {"status": status}
         if response is not None:
@@ -1226,6 +1501,7 @@ def _linux_broker_process_entry(
     worker_key: bytes,
     request_frame: bytes,
     scratch: str,
+    loopback_turn: _LoopbackTurnAuthority | None = None,
 ) -> None:
     descriptor = control.detach()
     gate = socket.socket(fileno=descriptor)
@@ -1248,6 +1524,7 @@ def _linux_broker_process_entry(
             worker_key=worker_key,
             request_frame=request_frame,
             scratch=scratch,
+            loopback_turn=loopback_turn,
         )
     except BaseException:
         try:
@@ -1300,6 +1577,7 @@ class LinuxProcessSupervisor:
         self.active_broker_pid: int | None = None
         self.active_worker_pid: int | None = None
         self._lock = threading.Lock()
+        self._turn_lock = threading.Lock()
 
     def _set_active(self, pid: int | None) -> None:
         with self._lock:
@@ -1363,6 +1641,10 @@ class LinuxProcessSupervisor:
         turn_timeout_ms: int,
         runtime_key: _CodeOwnedRuntimeKey = _CodeOwnedRuntimeKey.CONFORMANCE,
         runtime_launch: _CodeOwnedRuntimeLaunch | None = None,
+        gateway_policy: LoopbackGatewayPolicy | None = None,
+        worker_nonce: str | None = None,
+        original_request_hash: str | None = None,
+        gateway_context_frame: bytes | None = None,
     ) -> _BrokerReport:
         if type(runtime_key) is not _CodeOwnedRuntimeKey:
             raise ProviderBoundaryFailure()
@@ -1373,10 +1655,34 @@ class LinuxProcessSupervisor:
             or runtime_launch.authority.key is not runtime_key
         ):
             raise ProviderBoundaryFailure()
-        started = time.monotonic()
+        supplied_gateway = (
+            gateway_policy,
+            worker_nonce,
+            original_request_hash,
+            gateway_context_frame,
+        )
+        if all(value is None for value in supplied_gateway):
+            loopback_turn = None
+        elif any(value is None for value in supplied_gateway):
+            raise ProviderBoundaryFailure()
+        else:
+            loopback_turn = _validate_loopback_turn_authority(
+                _LoopbackTurnAuthority(
+                    gateway_policy,  # type: ignore[arg-type]
+                    worker_nonce,  # type: ignore[arg-type]
+                    original_request_hash,  # type: ignore[arg-type]
+                    gateway_context_frame,  # type: ignore[arg-type]
+                ),
+                worker_key=worker_key,
+                runtime_launch=runtime_launch,
+            )
+        if not self._turn_lock.acquire(blocking=False):
+            raise ProviderBoundaryFailure()
+        started = 0.0
         scratch: str | None = None
         original: BaseException | None = None
         try:
+            started = time.monotonic()
             scratch = tempfile.mkdtemp(prefix="worldforge-worker-")
             os.chmod(scratch, 0o700)
             return self._execute_with_scratch(
@@ -1387,6 +1693,7 @@ class LinuxProcessSupervisor:
                 runtime_launch=runtime_launch,
                 scratch=scratch,
                 started=started,
+                loopback_turn=loopback_turn,
             )
         except BaseException as exc:
             original = exc
@@ -1403,13 +1710,16 @@ class LinuxProcessSupervisor:
                 raise ProviderBoundaryFailure() from None
             raise
         finally:
-            if scratch is not None and not _remove_scratch(scratch):
-                if original is None or isinstance(original, Exception):
-                    raise ProviderBoundaryIndeterminate() from None
-                try:
-                    original.add_note("provider scratch cleanup was indeterminate")
-                except BaseException:
-                    pass
+            try:
+                if scratch is not None and not _remove_scratch(scratch):
+                    if original is None or isinstance(original, Exception):
+                        raise ProviderBoundaryIndeterminate() from None
+                    try:
+                        original.add_note("provider scratch cleanup was indeterminate")
+                    except BaseException:
+                        pass
+            finally:
+                self._turn_lock.release()
 
     def _execute_with_scratch(
         self,
@@ -1421,6 +1731,7 @@ class LinuxProcessSupervisor:
         runtime_launch: _CodeOwnedRuntimeLaunch,
         scratch: str,
         started: float,
+        loopback_turn: _LoopbackTurnAuthority | None = None,
     ) -> _BrokerReport:
         initial = boundary.poll_stop_reason()
         if initial is not None:
@@ -1439,17 +1750,20 @@ class LinuxProcessSupervisor:
             # ``spawn`` avoids unsafe post-fork Python in a multi-threaded Studio
             # host and creates no persistent fork-server/RPC process.
             context = multiprocessing.get_context("spawn")
+            broker_args = (
+                child,
+                runtime_launch,
+                broker_key,
+                broker_nonce,
+                worker_key,
+                request_frame,
+                scratch,
+            )
+            if loopback_turn is not None:
+                broker_args = (*broker_args, loopback_turn)
             broker = context.Process(
                 target=_linux_broker_process_entry,
-                args=(
-                    child,
-                    runtime_launch,
-                    broker_key,
-                    broker_nonce,
-                    worker_key,
-                    request_frame,
-                    scratch,
-                ),
+                args=broker_args,
                 daemon=False,
             )
             broker.start()
@@ -1547,6 +1861,8 @@ class LinuxProcessSupervisor:
         control_latched = False
         tracked: dict[int, int] = {}
         report: _BrokerReport | None = None
+        gateway_exchanged = False
+        gateway_response_accepted = False
         domain_report_proven = False
         cleanup_attempted = False
         cleanup_domain_proven = False
@@ -1583,6 +1899,18 @@ class LinuxProcessSupervisor:
                 ):
                     try:
                         pending_control_error.add_note("provider cleanup was indeterminate")
+                    except BaseException:
+                        pass
+                    raise pending_control_error
+                raise ProviderBoundaryIndeterminate()
+            if gateway_response_accepted:
+                if pending_control_error is not None and not isinstance(
+                    pending_control_error, Exception
+                ):
+                    try:
+                        pending_control_error.add_note(
+                            "provider outcome is indeterminate after loopback response"
+                        )
                     except BaseException:
                         pass
                     raise pending_control_error
@@ -1659,13 +1987,84 @@ class LinuxProcessSupervisor:
                         )
                         released = True
                     else:
-                        payload = _decode_control(
-                            frame,
-                            key=broker_key,
-                            nonce=broker_nonce,
-                            kind="domain_empty",
-                            sequence=1,
-                        )
+                        if loopback_turn is not None and not gateway_exchanged:
+                            try:
+                                gateway_payload = _decode_control(
+                                    frame,
+                                    key=broker_key,
+                                    nonce=broker_nonce,
+                                    kind="gateway_request",
+                                    sequence=1,
+                                )
+                            except ProviderBoundaryIndeterminate:
+                                payload = _decode_control(
+                                    frame,
+                                    key=broker_key,
+                                    nonce=broker_nonce,
+                                    kind="domain_empty",
+                                    sequence=1,
+                                )
+                            else:
+                                gateway_frame = _validate_gateway_control_payload(
+                                    gateway_payload,
+                                    runtime=runtime_launch.authority.runtime_binding,
+                                    authority=loopback_turn,
+                                    kind="gateway_request",
+                                )
+                                session = LoopbackProtocolSession(
+                                    key=worker_key,
+                                    nonce=loopback_turn.worker_nonce,
+                                    runtime=runtime_launch.authority.runtime_binding,
+                                    original_request_hash=loopback_turn.original_request_hash,
+                                    gateway_policy_hash=loopback_turn.policy.content_hash,
+                                )
+                                request = session.accept_request(gateway_frame)
+                                try:
+                                    response_body = execute_loopback_exchange(
+                                        loopback_turn.policy,
+                                        request.body,
+                                        boundary=boundary.poll_stop_reason,
+                                        started=started,
+                                        private_deadline=(started + turn_timeout_ms / 1000.0),
+                                    )
+                                    gateway_response_accepted = True
+                                except LoopbackGatewayStopped as exc:
+                                    raise ProviderBoundaryStopped(exc.reason_code) from None
+                                except LoopbackGatewayError:
+                                    raise ProviderBoundaryFailure() from None
+                                except LoopbackGatewayIndeterminate:
+                                    raise ProviderBoundaryIndeterminate() from None
+                                poll_control_once()
+                                if control_latched:
+                                    raise ProviderBoundaryIndeterminate()
+                                response_frame = session.build_response(
+                                    response_body,
+                                    response_challenge=os.urandom(32).hex(),
+                                )
+                                _send_all(
+                                    parent,
+                                    _encode_control(
+                                        kind="gateway_response",
+                                        sequence=2,
+                                        nonce=broker_nonce,
+                                        payload=_gateway_control_payload(
+                                            response_frame,
+                                            runtime=runtime_launch.authority.runtime_binding,
+                                            authority=loopback_turn,
+                                        ),
+                                        key=broker_key,
+                                    ),
+                                )
+                                gateway_exchanged = True
+                                continue
+                        else:
+                            payload = _decode_control(
+                                frame,
+                                key=broker_key,
+                                nonce=broker_nonce,
+                                kind="domain_empty",
+                                sequence=1,
+                            )
                         status = payload.get("status")
                         if status not in {
                             "response",
@@ -1718,11 +2117,15 @@ class LinuxProcessSupervisor:
             reader.require_clean_eof(timeout_seconds=_BROKER_EXIT_SECONDS)
             if report.status == "containment_lost":
                 raise ProviderBoundaryIndeterminate()
+            if loopback_turn is not None and not gateway_exchanged and report.status == "response":
+                raise ProviderBoundaryIndeterminate()
             domain_report_proven = True
             poll_control_once()
             if control_latched:
                 raise_latched_control_outcome(domain_empty=True)
             if report.status != "response":
+                if gateway_response_accepted:
+                    raise ProviderBoundaryIndeterminate()
                 raise ProviderBoundaryFailure()
             return report
         except BaseException as exc:
@@ -1768,6 +2171,8 @@ class LinuxProcessSupervisor:
                         tracked=tracked,
                     )
                 if not (domain_report_proven or cleanup_domain_proven):
+                    raise ProviderBoundaryIndeterminate() from None
+                if gateway_response_accepted:
                     raise ProviderBoundaryIndeterminate() from None
                 raise ProviderBoundaryFailure() from None
             if domain_report_proven or cleanup_attempted:

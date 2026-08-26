@@ -434,7 +434,7 @@ WORKER_BOOTSTRAP = WORKER_BOOTSTRAP_TEMPLATE.replace(
 
 
 _DETERMINISTIC_PROBE_RUNTIME_ID = "worldforge_deterministic_probe_provider"
-_DETERMINISTIC_PROBE_RUNTIME_REVISION = 1
+_DETERMINISTIC_PROBE_RUNTIME_REVISION = 3
 _DETERMINISTIC_PROBE_BOOTSTRAP_TEMPLATE = r"""
 import hashlib
 import hmac
@@ -445,9 +445,13 @@ import struct
 import sys
 
 MAX_REQUEST = 256 * 1024
+MAX_GATEWAY_REQUEST = 16 * 1024
+MAX_GATEWAY_RESPONSE = 80 * 1024
+MAX_GATEWAY_REQUEST_BODY = 8 * 1024
+MAX_GATEWAY_RESPONSE_BODY = 64 * 1024
 RUNTIME = {
     "id": "worldforge_deterministic_probe_provider",
-    "revision": 1,
+    "revision": 3,
     "content_hash": "__WORLD_FORGE_RUNTIME_CONTENT_HASH__",
 }
 MAX_DEPTH = 64
@@ -634,7 +638,6 @@ def read_request(key):
     if size > MAX_REQUEST:
         raise ValueError()
     raw = read_exact(size)
-    require_eof()
     document = json.loads(
         raw.decode("utf-8"),
         object_pairs_hook=pairs,
@@ -662,22 +665,160 @@ def read_request(key):
         raise ValueError()
     return document
 
+def read_optional_frame(maximum):
+    first = os.read(0, 4)
+    if not first:
+        return None
+    while len(first) < 4:
+        chunk = os.read(0, 4 - len(first))
+        if not chunk:
+            raise EOFError()
+        first += chunk
+    size = struct.unpack(">I", first)[0]
+    if size > maximum:
+        raise ValueError()
+    return read_exact(size)
+
+def decode_frame(raw):
+    document = json.loads(
+        raw.decode("utf-8"),
+        object_pairs_hook=pairs,
+        parse_constant=lambda _value: (_ for _ in ()).throw(ValueError()),
+    )
+    if type(document) is not dict or canonical(document) != raw:
+        raise ValueError()
+    return document
+
+def exact_context(document, request_document, key):
+    if type(document) is not dict or set(document) != {
+        "format", "format_version", "gateway_policy_hash", "mac", "nonce",
+        "original_request_hash", "runtime", "sequence"
+    }:
+        return False
+    supplied = document["mac"]
+    return (
+        document["format"] == "world-forge.private.loopback_gateway_context"
+        and type(document["format_version"]) is int
+        and document["format_version"] == 1
+        and type(document["sequence"]) is int
+        and document["sequence"] == 0
+        and exact_sha256(document["gateway_policy_hash"])
+        and document["nonce"] == request_document["nonce"]
+        and document["original_request_hash"] == request_document["request_hash"]
+        and document["runtime"] == RUNTIME
+        and exact_sha256(supplied)
+        and hmac.compare_digest(supplied, mac(document, key))
+    )
+
+def gateway_document(format_name, context, body, key, response_challenge=None):
+    body_bytes = canonical(body)
+    maximum = (
+        MAX_GATEWAY_REQUEST_BODY
+        if format_name == "world-forge.private.loopback_gateway_request"
+        else MAX_GATEWAY_RESPONSE_BODY
+    )
+    if len(body_bytes) > maximum:
+        raise ValueError()
+    document = {
+        "body": body,
+        "body_hash": hashlib.sha256(body_bytes).hexdigest(),
+        "body_length": len(body_bytes),
+        "format": format_name,
+        "format_version": 1,
+        "gateway_policy_hash": context["gateway_policy_hash"],
+        "nonce": context["nonce"],
+        "original_request_hash": context["original_request_hash"],
+        "runtime": RUNTIME,
+        "sequence": 0,
+    }
+    if format_name == "world-forge.private.loopback_gateway_response":
+        if not exact_sha256(response_challenge):
+            raise ValueError()
+        document["response_challenge"] = response_challenge
+        document["exchange_hash"] = digest(document)
+    elif response_challenge is not None:
+        raise ValueError()
+    document["mac"] = mac(document, key)
+    return document
+
+def exact_gateway_response(document, context, key):
+    if type(document) is not dict or set(document) != {
+        "body", "body_hash", "body_length", "format", "format_version",
+        "gateway_policy_hash", "mac", "nonce", "original_request_hash",
+        "runtime", "sequence", "response_challenge", "exchange_hash"
+    }:
+        return False
+    try:
+        expected = gateway_document(
+            "world-forge.private.loopback_gateway_response",
+            context,
+            document["body"],
+            key,
+            document["response_challenge"],
+        )
+    except BaseException:
+        return False
+    return document == expected
+
+def write_frame(document, maximum):
+    raw = canonical(document)
+    if len(raw) > maximum:
+        raise ValueError()
+    write_all(1, struct.pack(">I", len(raw)) + raw)
+
 def main():
     if len(sys.argv) != 1:
         raise ValueError()
     key = read_exact(32)
     request_document = read_request(key)
     request = request_document["request"]
-    result = {
-        "private_output": {
+    context_raw = read_optional_frame(MAX_GATEWAY_REQUEST)
+    gateway_response = None
+    gateway_response_hash = None
+    gateway_exchange_hash = None
+    if context_raw is not None:
+        context = decode_frame(context_raw)
+        if not exact_context(context, request_document, key):
+            raise ValueError()
+        gateway_body = {
             "execution_id": request["execution_id"],
-            "exposed_tool_count": len(request["exposed_tools"]),
             "history_hash": digest(request["history"]),
             "private_input_hash": digest(request["private_input"]),
-            "runtime_id": RUNTIME["id"],
-            "tool_summary_count": len(request["tool_summaries"]),
             "turn_index": request["turn_index"],
-        },
+        }
+        write_frame(
+            gateway_document(
+                "world-forge.private.loopback_gateway_request",
+                context,
+                gateway_body,
+                key,
+            ),
+            MAX_GATEWAY_REQUEST,
+        )
+        response_raw = read_optional_frame(MAX_GATEWAY_RESPONSE)
+        if response_raw is None:
+            raise EOFError()
+        require_eof()
+        response_document = decode_frame(response_raw)
+        if not exact_gateway_response(response_document, context, key):
+            raise ValueError()
+        gateway_response = response_document["body"]
+        gateway_response_hash = response_document["body_hash"]
+        gateway_exchange_hash = response_document["exchange_hash"]
+    private_output = {
+        "execution_id": request["execution_id"],
+        "exposed_tool_count": len(request["exposed_tools"]),
+        "history_hash": digest(request["history"]),
+        "private_input_hash": digest(request["private_input"]),
+        "runtime_id": RUNTIME["id"],
+        "tool_summary_count": len(request["tool_summaries"]),
+        "turn_index": request["turn_index"],
+    }
+    if gateway_response is not None:
+        private_output["gateway_response"] = gateway_response
+        private_output["gateway_response_hash"] = gateway_response_hash
+    result = {
+        "private_output": private_output,
         "usage": {
             "input_tokens": 1,
             "output_tokens": 1,
@@ -700,6 +841,8 @@ def main():
         "result_hash": digest(result),
         "runtime": RUNTIME,
     }
+    if gateway_exchange_hash is not None:
+        document["gateway_exchange_hash"] = gateway_exchange_hash
     document["mac"] = mac(document, key)
     raw = canonical(document)
     write_all(1, struct.pack(">I", len(raw)) + raw)

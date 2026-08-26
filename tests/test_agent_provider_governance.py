@@ -219,7 +219,9 @@ class ProviderRuntimeCatalogTests(unittest.TestCase):
             catalog.resolve(selection).runtime_binding["id"],
         )
 
-    def test_catalog_rejects_duplicates_aliases_tamper_and_networked_execution(self) -> None:
+    def test_catalog_rejects_duplicates_aliases_tamper_but_accepts_loopback_policy_data(
+        self,
+    ) -> None:
         spec = _spec()
         with self.assertRaisesRegex(ProviderCatalogError, "provider_catalog_invalid"):
             ProviderRuntimeCatalog.create([spec])
@@ -243,8 +245,7 @@ class ProviderRuntimeCatalogTests(unittest.TestCase):
             egress_enforcement_hash=H3,
             telemetry_attestation_hash=H4,
         )
-        with self.assertRaisesRegex(ProviderCatalogError, "provider_runtime_unavailable"):
-            ProviderRuntimeCatalog.create((loopback,))
+        self.assertEqual(loopback, ProviderRuntimeCatalog.create((loopback,)).specs[0])
 
     def test_catalog_rejects_every_production_eligible_runtime_as_unavailable(self) -> None:
         production_specs = (

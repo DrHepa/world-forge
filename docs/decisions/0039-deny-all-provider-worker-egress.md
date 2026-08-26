@@ -3,6 +3,10 @@
 - Status: accepted
 - Date: 2026-08-26
 
+> Supersession note: ADR-0040 adds one parent-owned loopback socket and an
+> authenticated pipe relay without weakening this worker-side deny-all profile
+> or passing a socket into the worker.
+
 ## Context
 
 ADR-0038 closes provider dispatch over exactly two code-owned offline workers,

@@ -994,6 +994,23 @@ Windows claim. Public Agent Harness bytes, EventLog records, and the private
 worker on-wire version remain unchanged. See
 [ADR-0039](docs/decisions/0039-deny-all-provider-worker-egress.md).
 
+The deterministic probe can now prove one governed local exchange without
+weakening that worker boundary. Its revision-3 bootstrap submits one
+authenticated semantic request over stdin/stdout to the existing broker; the
+main parent alone opens one nonblocking socket to an exact numeric IPv4 or IPv6
+loopback origin, performs strict bounded HTTP/1.1, closes the socket, and only
+then issues a fresh authenticated response challenge. The worker final must
+bind the resulting exchange hash before result acceptance after the worker
+domain is empty. The private turn deadline can shorten the two-second gateway
+policy deadline. The exact
+origin, policy, ADR-0039 enforcement, code-owned no-telemetry branch, catalog,
+selection, and provider approval hashes remain aligned. There is no DNS,
+proxy, redirect, retry, socket inheritance, real provider, credential, vendor
+telemetry claim, or production eligibility. An uncertain outcome after request
+bytes may have been sent leaves the durable prefix open for offline recovery.
+See
+[ADR-0040](docs/decisions/0040-parent-owned-exact-origin-loopback-gateway.md).
+
 Slice 2B adds a pure deterministic evaluator and explicit-input, atomic
 no-replace CLI for the closed recorded-result plan, observation, and report
 documents. They evaluate supplied evidence only; they do not execute a

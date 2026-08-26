@@ -47,6 +47,18 @@ class ArchitectureTests(unittest.TestCase):
         self.assertIn("no network-isolation claim", text)
         self.assertFalse((RUNTIME / "agent_harness").exists())
 
+    def test_provider_worker_direct_egress_enforcement_is_private_and_bounded(self) -> None:
+        adr = ROOT / "docs/decisions/0039-deny-all-provider-worker-egress.md"
+        text = adr.read_text(encoding="utf-8")
+        self.assertIn("deny_all_direct_network", text)
+        self.assertIn("PR_SET_NO_NEW_PRIVS", text)
+        self.assertIn("seccomp-BPF", text)
+        self.assertIn("aarch64", text)
+        self.assertIn("x86_64", text)
+        self.assertIn("not a complete OS network sandbox", text)
+        self.assertIn("public Agent Harness", text)
+        self.assertFalse((RUNTIME / "agent_harness").exists())
+
     def test_runtime_audit_catches_current_and_dynamic_provider_imports(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

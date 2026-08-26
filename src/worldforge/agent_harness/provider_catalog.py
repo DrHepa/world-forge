@@ -230,7 +230,6 @@ class ProviderRuntimeSpec:
                 deployment_class == "local"
                 and endpoint is None
                 and endpoint_hash is None
-                and egress_hash is None
                 and telemetry_hash is None
                 and pricing_hash is None
                 and currency is None

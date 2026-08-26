@@ -22,6 +22,7 @@ from worldforge.agent_harness import (
     KernelError,
 )
 from worldforge.agent_harness import process_supervisor as process_supervisor_module
+from worldforge.agent_harness import provider_egress as provider_egress_module
 from worldforge.agent_harness import supervisor as supervisor_module
 from worldforge.agent_harness import worker as worker_module
 from worldforge.agent_harness import worker_registry as worker_registry_module
@@ -146,7 +147,9 @@ class CodeOwnedRuntimeRegistryTests(unittest.TestCase):
         self.assertFalse(hasattr(entry, "artifact_factory"))
         self.assertEqual(artifact, entry.artifact)
 
-        expected_source = runtime_entry(key).artifact.bootstrap_source
+        expected_source = provider_egress_module._provider_worker_launcher_source(
+            runtime_entry(key).artifact.bootstrap_source
+        )
         with mock.patch.object(
             worker_module,
             "_conformance_worker_artifact",
@@ -351,7 +354,12 @@ class RuntimeBoundProtocolTests(unittest.TestCase):
             with self.subTest(key=key):
                 self.assertEqual(os.path.abspath(sys.executable), command[0])
                 self.assertEqual(("-I", "-B", "-S", "-u", "-X", "utf8", "-c"), command[1:8])
-                self.assertEqual(runtime_entry(key).bootstrap_source, command[8])
+                self.assertEqual(
+                    provider_egress_module._provider_worker_launcher_source(
+                        runtime_entry(key).bootstrap_source
+                    ),
+                    command[8],
+                )
                 self.assertIn(runtime_entry(key).identifier, command[8])
                 for other in _CodeOwnedRuntimeKey:
                     if other is not key:

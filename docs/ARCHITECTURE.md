@@ -731,8 +731,8 @@ approval, and memory approval. A code-owned immutable runtime catalog resolves
 an exact runtime triple and specification; requests cannot inject executable or
 endpoint machinery. Exactly two Linux descriptors are executable: the pinned
 conformance runtime and a distinct deterministic offline probe. Both are
-network-free and non-production. Valid networked descriptors are still
-catalog-unavailable because this layer has no enforced egress runtime.
+network-free and non-production. Valid networked descriptors remain
+catalog-unavailable.
 Each code-owned artifact factory runs once during registry construction and is
 discarded; entries retain only validated immutable artifacts. Supervisor
 construction freezes the selected entry/spec/protocol binding, complete command
@@ -760,6 +760,27 @@ adapter, SDK, network call, secret service, authenticated Studio approval,
 billing proof, or Windows worker is implemented. See
 [ADR-0037](decisions/0037-provider-execution-governance.md) and
 [ADR-0038](decisions/0038-code-owned-provider-runtime-dispatch.md).
+
+Every closed runtime entry additionally binds one private immutable
+`deny_all_direct_network` enforcement profile into its exact specification and
+captured launch authority. On reviewed native Linux `aarch64` and `x86_64`
+identities, the fixed worker launch closes every non-pipe descriptor and passes
+none. After that outer exec/descriptor close, a code-owned single-threaded
+launcher rejects any remaining socket descriptor before installing
+`PR_SET_NO_NEW_PRIVS` and the profile's exact seccomp-BPF filter, then execs the
+fixed worker bootstrap. The filter rejects x32 syscall aliases on x86_64,
+socket operations, `pidfd_open` and
+`pidfd_getfd`, SCM_RIGHTS receive paths, `io_uring_setup`, BPF, namespace
+entry/creation syscalls, and namespace-bearing clone flags. Ordinary fork/exec
+and anonymous-pipe `read`/`write` remain available; safety depends on the
+composite clean-descriptor launch plus acquisition-denial filter, and descendants
+inherit both seccomp and `no_new_privs`. Unsupported platforms/architectures,
+descriptor-census uncertainty, and filter setup failures produce no worker
+action or public raw error evidence. The fixed worker IDs, bootstrap bytes,
+private protocol v1, public contracts, EventLog schema, and `src/isoworld` remain
+unchanged. This is not a complete OS network sandbox, firewall, filesystem
+boundary, trusted-parent loopback gateway, or real-provider claim. See
+[ADR-0039](decisions/0039-deny-all-provider-worker-egress.md).
 
 Slice 2B retains the closed, identity/evidence-only plan, observation, and report
 boundary for an optional codebase-memory comparison and adds a pure evaluator

@@ -23,6 +23,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .ports import ProviderBoundaryControl
+from .provider_egress import (
+    ProviderEgressEnforcementProfile,
+    ProviderEgressEnforcementUnavailable,
+    _preflight_provider_egress_enforcement,
+    _provider_worker_launcher_source,
+    _validate_provider_egress_profile,
+)
 from .worker_protocol import (
     MAX_WORKER_RESPONSE_BYTES,
     MAX_WORKER_STDERR_BYTES,
@@ -30,6 +37,7 @@ from .worker_protocol import (
 from .worker_registry import (
     _CodeOwnedRuntimeEntry,
     _CodeOwnedRuntimeKey,
+    _validate_entry,
     runtime_entry,
 )
 
@@ -369,7 +377,7 @@ def fixed_worker_command(
     if not os.path.isabs(executable) or not os.path.isfile(executable):
         raise ProviderBoundaryUnsupported()
     try:
-        bootstrap = authority.artifact.bootstrap_source
+        bootstrap = _provider_worker_launcher_source(authority.artifact.bootstrap_source)
     except Exception:
         raise ProviderBoundaryFailure() from None
     return (executable, "-I", "-B", "-S", "-u", "-X", "utf8", "-c", bootstrap)
@@ -399,6 +407,7 @@ class _CodeOwnedRuntimeLaunch:
     authority: _CodeOwnedRuntimeEntry
     command: tuple[str, ...]
     environment: tuple[tuple[str, str], ...]
+    egress_enforcement: ProviderEgressEnforcementProfile
 
 
 def _capture_runtime_launch(
@@ -406,8 +415,17 @@ def _capture_runtime_launch(
 ) -> _CodeOwnedRuntimeLaunch:
     if type(authority) is not _CodeOwnedRuntimeEntry:
         raise ProviderBoundaryFailure()
-    command = fixed_worker_command(authority.key, runtime_authority=authority)
-    environment = tuple(authority.environment_profile)
+    try:
+        authority = _validate_entry(authority)
+        egress_enforcement = _validate_provider_egress_profile(authority.egress_enforcement)
+        if authority.spec.egress_enforcement_hash != egress_enforcement.content_hash:
+            raise RuntimeError
+        command = fixed_worker_command(authority.key, runtime_authority=authority)
+        environment = tuple(authority.environment_profile)
+    except ProviderEgressEnforcementUnavailable:
+        raise ProviderBoundaryUnsupported() from None
+    except Exception:
+        raise ProviderBoundaryFailure() from None
     if (
         type(command) is not tuple
         or len(command) != 9
@@ -419,7 +437,79 @@ def _capture_runtime_launch(
         )
     ):
         raise ProviderBoundaryFailure()
-    return _CodeOwnedRuntimeLaunch(authority, command, environment)
+    try:
+        _preflight_provider_egress_enforcement(egress_enforcement)
+    except ProviderEgressEnforcementUnavailable:
+        raise ProviderBoundaryUnsupported() from None
+    return _validate_runtime_launch(
+        _CodeOwnedRuntimeLaunch(authority, command, environment, egress_enforcement)
+    )
+
+
+def _validate_runtime_launch(value: object) -> _CodeOwnedRuntimeLaunch:
+    try:
+        if type(value) is not _CodeOwnedRuntimeLaunch:
+            raise RuntimeError
+        authority = _validate_entry(value.authority)
+        egress_enforcement = _validate_provider_egress_profile(value.egress_enforcement)
+        launcher_source = _provider_worker_launcher_source(authority.artifact.bootstrap_source)
+        expected_command = (
+            os.path.abspath(sys.executable),
+            "-I",
+            "-B",
+            "-S",
+            "-u",
+            "-X",
+            "utf8",
+            "-c",
+            launcher_source,
+        )
+        expected_environment = tuple(authority.environment_profile)
+        if (
+            type(value.command) is not tuple
+            or any(type(part) is not str for part in tuple.__iter__(value.command))
+            or value.command != expected_command
+            or type(value.environment) is not tuple
+            or any(
+                type(item) is not tuple
+                or len(item) != 2
+                or any(type(part) is not str for part in tuple.__iter__(item))
+                for item in tuple.__iter__(value.environment)
+            )
+            or value.environment != expected_environment
+            or egress_enforcement != authority.egress_enforcement
+            or authority.spec.egress_enforcement_hash != egress_enforcement.content_hash
+        ):
+            raise RuntimeError
+    except Exception:
+        raise ProviderBoundaryFailure() from None
+    return _CodeOwnedRuntimeLaunch(
+        authority=authority,
+        command=expected_command,
+        environment=expected_environment,
+        egress_enforcement=egress_enforcement,
+    )
+
+
+def _spawn_code_owned_worker(
+    runtime_launch: _CodeOwnedRuntimeLaunch,
+    scratch: str,
+) -> subprocess.Popen[bytes]:
+    try:
+        runtime_launch = _validate_runtime_launch(runtime_launch)
+        return subprocess.Popen(
+            runtime_launch.command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=scratch,
+            env=dict(runtime_launch.environment),
+            shell=False,
+            close_fds=True,
+            pass_fds=(),
+        )
+    except Exception:
+        raise ProviderBoundaryFailure() from None
 
 
 def _proc_identity(pid: int) -> tuple[int, int, str] | None:
@@ -920,16 +1010,7 @@ def _linux_broker_main(
         _set_linux_subreaper()
         if not os.path.isabs(scratch) or not os.path.isdir(scratch):
             raise ProviderBoundaryIndeterminate()
-        process = subprocess.Popen(
-            runtime_launch.command,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            cwd=scratch,
-            env=dict(runtime_launch.environment),
-            shell=False,
-            close_fds=True,
-        )
+        process = _spawn_code_owned_worker(runtime_launch, scratch)
         worker_identity = _retain_linux_identity(process.pid, None)
         if worker_identity is None:
             raise ProviderBoundaryIndeterminate()

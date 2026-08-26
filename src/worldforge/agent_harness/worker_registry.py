@@ -12,6 +12,11 @@ from .provider_catalog import (
     ProviderRuntimeCatalog,
     ProviderRuntimeSpec,
 )
+from .provider_egress import (
+    ProviderEgressEnforcementProfile,
+    _validate_provider_egress_profile,
+    provider_egress_enforcement_profile,
+)
 from .worker import (
     RUNTIME_CONTENT_HASH_TOKEN,
     _conformance_worker_artifact,
@@ -43,6 +48,7 @@ class _CodeOwnedRuntimeEntry:
     artifact: _WorkerArtifact
     spec: ProviderRuntimeSpec
     environment_profile: tuple[tuple[str, str], ...]
+    egress_enforcement: ProviderEgressEnforcementProfile
 
     @property
     def identifier(self) -> str:
@@ -80,6 +86,7 @@ class _CodeOwnedRuntimeEntry:
 def _expected_spec(
     key: _CodeOwnedRuntimeKey,
     artifact: _WorkerArtifact,
+    egress_enforcement: ProviderEgressEnforcementProfile,
 ) -> ProviderRuntimeSpec:
     if key is _CodeOwnedRuntimeKey.CONFORMANCE:
         model_id = "conformance"
@@ -98,7 +105,7 @@ def _expected_spec(
         network_scope="none",
         endpoint_origin=None,
         endpoint_policy_hash=None,
-        egress_enforcement_hash=None,
+        egress_enforcement_hash=egress_enforcement.content_hash,
         telemetry_attestation_hash=None,
         pricing_policy_hash=None,
         pricing_currency=None,
@@ -142,13 +149,15 @@ def _build_entry(
         raise RuntimeError(_REGISTRY_ERROR)
     try:
         artifact = _validate_artifact(factory())
+        egress_enforcement = provider_egress_enforcement_profile()
     except Exception:
         raise RuntimeError(_REGISTRY_ERROR) from None
     return _CodeOwnedRuntimeEntry(
         key=key,
         artifact=artifact,
-        spec=_expected_spec(key, artifact),
+        spec=_expected_spec(key, artifact, egress_enforcement),
         environment_profile=_ENVIRONMENT_PROFILE,
+        egress_enforcement=egress_enforcement,
     )
 
 
@@ -170,6 +179,7 @@ _CANONICAL_ENTRY_SNAPSHOTS = tuple(
         replace(entry.artifact),
         replace(entry.spec),
         tuple(entry.environment_profile),
+        replace(entry.egress_enforcement),
     )
     for entry in _RUNTIME_ENTRIES
 )
@@ -183,10 +193,17 @@ def _validate_entry(value: object) -> _CodeOwnedRuntimeEntry:
     )
     if len(canonical_matches) != 1:
         raise RuntimeError(_REGISTRY_ERROR)
-    _canonical_key, canonical_artifact, canonical_spec, canonical_environment = canonical_matches[0]
+    (
+        _canonical_key,
+        canonical_artifact,
+        canonical_spec,
+        canonical_environment,
+        canonical_egress_enforcement,
+    ) = canonical_matches[0]
     try:
         artifact = _validate_artifact(value.artifact)
-        expected_spec = _expected_spec(value.key, artifact)
+        egress_enforcement = _validate_provider_egress_profile(value.egress_enforcement)
+        expected_spec = _expected_spec(value.key, artifact, egress_enforcement)
         supplied_spec = ProviderRuntimeCatalog.create((value.spec,)).specs[0]
     except Exception:
         raise RuntimeError(_REGISTRY_ERROR) from None
@@ -201,6 +218,7 @@ def _validate_entry(value: object) -> _CodeOwnedRuntimeEntry:
         or artifact != canonical_artifact
         or supplied_spec != canonical_spec
         or tuple(value.environment_profile) != canonical_environment
+        or egress_enforcement != canonical_egress_enforcement
         or supplied_spec != expected_spec
         or value.spec != supplied_spec
         or value.runtime_binding != expected_spec.runtime_binding
@@ -211,6 +229,7 @@ def _validate_entry(value: object) -> _CodeOwnedRuntimeEntry:
         artifact=replace(artifact),
         spec=replace(expected_spec),
         environment_profile=tuple(value.environment_profile),
+        egress_enforcement=replace(egress_enforcement),
     )
 
 

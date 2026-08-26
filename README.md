@@ -965,12 +965,34 @@ authority; normal reassignment/deletion, later selector mutation, or later
 registry/factory rebinding cannot redirect an approved runtime. This does not
 claim protection against explicit `object.__setattr__`, malicious private/module
 reflection before construction, or hostile-process memory corruption.
-Networked descriptors remain unavailable until enforcement exists. This adds
+Networked descriptors remain unavailable. This adds
 no real provider, SDK, network call, credential vault, authenticated Studio
 reviewer, Windows support, or production claim. Public Harness v1 bytes remain
 unchanged. See
 [ADR-0037](docs/decisions/0037-provider-execution-governance.md) and
 [ADR-0038](docs/decisions/0038-code-owned-provider-runtime-dispatch.md).
+
+Every code-owned provider worker now binds one private immutable
+`deny_all_direct_network` profile. On reviewed Linux `aarch64` and `x86_64`
+identities, the fixed launch uses `close_fds=True` and no passed descriptors; a
+code-owned launcher runs after that outer exec/descriptor close and performs a
+single-threaded census that rejects any socket descriptor before installing
+`PR_SET_NO_NEW_PRIVS` and the exact seccomp-BPF filter. Only then does it exec
+the fixed worker bootstrap. The filter rejects all x32 syscall aliases on
+x86_64, direct IPv4/IPv6/Unix socket
+operations, descriptor acquisition through `pidfd`, SCM_RIGHTS receive paths,
+`io_uring` and BPF entry points, and namespace-changing calls. Ordinary
+fork/exec and anonymous-pipe IPC remain available, and descendants inherit the
+filter. Generic `read`/`write` are intentionally available for that pipe IPC;
+the invariant therefore depends on both the clean-descriptor launch proof and
+the acquisition-denial filter, not seccomp alone. The two offline runtime IDs
+and bootstrap bytes remain fixed, while their private specifications and catalog
+bind the profile hash. Unsupported systems and setup failures fail closed
+through existing private boundaries. This is not a complete OS network sandbox,
+host firewall, filesystem sandbox, trusted-parent gateway, real-provider, or
+Windows claim. Public Agent Harness bytes, EventLog records, and the private
+worker on-wire version remain unchanged. See
+[ADR-0039](docs/decisions/0039-deny-all-provider-worker-egress.md).
 
 Slice 2B adds a pure deterministic evaluator and explicit-input, atomic
 no-replace CLI for the closed recorded-result plan, observation, and report

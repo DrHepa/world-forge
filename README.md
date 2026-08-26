@@ -897,6 +897,28 @@ template built from those same scalars. Public schemas and canonical fixtures
 are unchanged. See
 [ADR-0034](docs/decisions/0034-exact-provider-runtime-attestation.md).
 
+Concrete tools now require a private per-execution human decision before the
+provider boundary can run with them. The host prepares an exact in-memory
+review over the execution, runtime, limits, private-input hash, and immutable
+eligible tool-descriptor catalog; generation/hash CAS governs approve, deny,
+expiry, and revoke. One atomic authority snapshot is fingerprinted before
+durable begin, so a decision arriving during begin is not adopted by that
+attempt. Reviewer IDs are asserted labels, not authenticated users,
+and this slice persists no approval metadata. Approved tools enter the first
+turn as bounded summary/hash pairs only; adapters must supply exact summary and
+schema metadata. A provider may request full definitions, which retain request
+order and become visible and invocable on the next turn; any same-result request
+and call fails whole-batch preflight without effects. Hidden, unapproved,
+incompatible, and unexposed tools share `tool_not_authorized`. Cancellation, runtime mismatch,
+and incurred provider budget evidence retain their defined precedence, and a
+revocation can stop a blocked Linux worker through the existing proven-empty
+containment boundary. Exact terminal duplicates remain evidence-only even after
+revocation, while changed approval or descriptor evidence conflicts. This is
+tool approval only: it does not authorize provider/cloud use, cost, data,
+credentials, artifacts, or memory promotion. Public Harness bytes remain
+unchanged. See
+[ADR-0035](docs/decisions/0035-human-approval-and-progressive-tool-exposure.md).
+
 Slice 2B adds a pure deterministic evaluator and explicit-input, atomic
 no-replace CLI for the closed recorded-result plan, observation, and report
 documents. They evaluate supplied evidence only; they do not execute a

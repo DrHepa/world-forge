@@ -665,6 +665,33 @@ built from the same immutable scalars. This adds neither a provider registry nor
 selection authority. See
 [ADR-0034](decisions/0034-exact-provider-runtime-attestation.md).
 
+The next private Harness boundary adds instance-scoped human tool approval and
+progressive definition exposure without widening the public contracts. A
+canonical generation/hash-CAS review binds the execution, activation/grant and
+private-input hashes, exact runtime and limits, and immutable eligible
+descriptor catalog. Its decision is an approved ordered subset, denial, expiry,
+or later revocation. The kernel fingerprints one atomic detached authority
+snapshot before durable begin and never adopts a decision that arrives during
+that begin. The reviewer ID is only an asserted in-memory label; Studio
+authentication and durable approval evidence are not implemented. The broker
+requires adapter-supplied exact summary/schema metadata and gives the provider
+only approved summary/hash pairs initially. Ordered unique exposure requests
+preserve their first-request order and make full bounded canonical schemas
+available on the next turn, never the current one. Any overlap between exposure
+requests and calls in one result is rejected before all tool/proposal effects,
+and all remaining tool/proposal authority is preflighted before the first
+effect. Missing, hidden, incompatible, unapproved, revoked,
+expired, and unexposed tools remain a non-oracle `tool_not_authorized` boundary.
+Cancellation/deadline/duration and runtime mismatch retain precedence; incurred
+usage and budgets are accounted before post-provider approval. Linux can stop a
+blocked worker after revocation but still requires its existing process-domain
+empty proof. Fingerprints bind catalog/review/decision hashes, exact terminal
+duplicates remain evidence-only after revocation, and interrupted executions
+are never resumed. Approval covers tools only, not providers, cloud, cost, data,
+credentials, artifacts, or memory promotion. The private conformance runtime is
+revision 2; Windows remains unsupported and `UNTESTED`. See
+[ADR-0035](decisions/0035-human-approval-and-progressive-tool-exposure.md).
+
 Slice 2B retains the closed, identity/evidence-only plan, observation, and report
 boundary for an optional codebase-memory comparison and adds a pure evaluator
 plus an explicit-input, atomic no-replace CLI. Validators resolve the exact plan

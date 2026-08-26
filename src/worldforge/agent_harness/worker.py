@@ -7,7 +7,7 @@ import hashlib
 # This source is deliberately self-contained.  ``-I -S`` prevents the child
 # from importing the checkout, so the supervisor passes no module or path.
 _CONFORMANCE_RUNTIME_ID = "worldforge_conformance_provider"
-_CONFORMANCE_RUNTIME_REVISION = 1
+_CONFORMANCE_RUNTIME_REVISION = 2
 _RUNTIME_ID_TOKEN = "__WORLD_FORGE_RUNTIME_ID__"
 _RUNTIME_REVISION_TOKEN = "__WORLD_FORGE_RUNTIME_REVISION__"
 RUNTIME_CONTENT_HASH_TOKEN = "__WORLD_FORGE_RUNTIME_CONTENT_HASH__"
@@ -32,6 +32,10 @@ RUNTIME = {
 MAX_DEPTH = 64
 MAX_HISTORY = 256
 MAX_SAFE_INTEGER = (1 << 53) - 1
+CAPABILITIES = frozenset({
+    "artifact.propose", "artifact.read", "memory.propose",
+    "memory.read", "project.read", "tool.invoke",
+})
 
 class DuplicateKey(Exception):
     pass
@@ -92,8 +96,14 @@ def exact_identifier(value):
         and all(character in "abcdefghijklmnopqrstuvwxyz0123456789_" for character in value[1:])
     )
 
-def exact_json(value, depth=1):
-    if depth > MAX_DEPTH:
+def exact_tool_id(value):
+    if type(value) is not str or len(value) > 1024:
+        return False
+    parts = value.split(".")
+    return len(parts) >= 2 and all(exact_identifier(part) for part in parts)
+
+def exact_json(value, depth=1, max_depth=MAX_DEPTH):
+    if depth > max_depth:
         return False
     if value is None or type(value) in {bool, str}:
         return True
@@ -102,20 +112,71 @@ def exact_json(value, depth=1):
     if type(value) is float:
         return math.isfinite(value)
     if type(value) is list:
-        return all(exact_json(item, depth + 1) for item in value)
+        return all(exact_json(item, depth + 1, max_depth) for item in value)
     if type(value) is dict:
         return all(
-            type(key) is str and exact_json(item, depth + 1)
+            type(key) is str and exact_json(item, depth + 1, max_depth)
             for key, item in value.items()
         )
     return False
 
 def exact_request(value):
     if type(value) is not dict or set(value) != {
-        "execution_id", "turn_index", "private_input", "history"
+        "execution_id", "turn_index", "private_input", "history",
+        "tool_summaries", "exposed_tools"
     }:
         return False
     history = value["history"]
+    summaries = value["tool_summaries"]
+    definitions = value["exposed_tools"]
+    if type(summaries) is not list or len(summaries) > 128:
+        return False
+    summary_snapshots = {}
+    for item in summaries:
+        if type(item) is not dict or set(item) != {"tool_id", "summary", "descriptor_hash"}:
+            return False
+        tool_id = item["tool_id"]
+        summary = item["summary"]
+        if (
+            not exact_tool_id(tool_id)
+            or tool_id in summary_snapshots
+            or type(summary) is not str
+            or not summary
+            or len(summary.encode("utf-8")) > 1024
+            or any(ord(character) < 32 or ord(character) == 127 for character in summary)
+            or not exact_sha256(item["descriptor_hash"])
+        ):
+            return False
+        summary_snapshots[tool_id] = (item["descriptor_hash"], summary)
+    if type(definitions) is not list or len(definitions) > 128:
+        return False
+    definition_ids = set()
+    for item in definitions:
+        if type(item) is not dict or set(item) != {
+            "tool_id", "required_capability_id", "summary", "input_schema", "descriptor_hash"
+        }:
+            return False
+        tool_id = item["tool_id"]
+        if (
+            not exact_tool_id(tool_id)
+            or tool_id in definition_ids
+            or not exact_tool_id(item["required_capability_id"])
+            or item["required_capability_id"] not in CAPABILITIES
+            or type(item["summary"]) is not str
+            or type(item["input_schema"]) is not dict
+            or not exact_json(item["input_schema"], max_depth=32)
+            or len(canonical(item["input_schema"])) > 16 * 1024
+            or summary_snapshots.get(tool_id)
+            != (item["descriptor_hash"], item["summary"])
+            or digest({
+                "tool_id": tool_id,
+                "required_capability_id": item["required_capability_id"],
+                "summary": item["summary"],
+                "input_schema": item["input_schema"],
+            }) != item["descriptor_hash"]
+        ):
+            return False
+        definition_ids.add(tool_id)
     return (
         exact_identifier(value["execution_id"])
         and type(value["turn_index"]) is int
@@ -305,6 +366,16 @@ def main():
         candidate = private_input.get("__worldforge_conformance__", {})
         if type(candidate) is dict:
             config = candidate
+    turn_plan = config.get("turn_plan")
+    if turn_plan is not None:
+        if (
+            type(turn_plan) is not list
+            or len(turn_plan) > 64
+            or not all(type(item) is dict and exact_json(item) for item in turn_plan)
+        ):
+            raise ValueError()
+        turn_index = request_document["request"]["turn_index"]
+        config = turn_plan[turn_index] if turn_index < len(turn_plan) else {}
     action = config.get("action", "echo")
     if action == "crash":
         os._exit(17)
@@ -335,6 +406,7 @@ def main():
         "tool_calls": config.get("tool_calls", []),
         "artifact_proposals": config.get("artifact_proposals", []),
         "memory_proposals": config.get("memory_proposals", []),
+        "tool_exposure_requests": config.get("tool_exposure_requests", []),
         "completed": config.get("completed", True),
     }
     document = result_document(request_document, result)

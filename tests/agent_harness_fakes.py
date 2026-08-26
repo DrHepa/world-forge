@@ -86,9 +86,14 @@ class FakeTool:
         tool_id: str,
         required_capability_id: str,
         result: ToolResult | BaseException | Callable[[ToolCall], ToolResult],
+        *,
+        summary: object | None = None,
+        input_schema: object | None = None,
     ) -> None:
         self.tool_id = tool_id
         self.required_capability_id = required_capability_id
+        self.summary = tool_id if summary is None else summary
+        self.input_schema = {"type": "object"} if input_schema is None else input_schema
         self.result = result
         self.calls: list[ToolCall] = []
 

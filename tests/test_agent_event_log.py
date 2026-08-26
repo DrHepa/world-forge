@@ -31,6 +31,10 @@ from worldforge.agent_harness import (
     KernelError,
 )
 from worldforge.agent_harness import event_log as event_log_module
+from worldforge.agent_harness.approvals import (
+    ExecutionApprovalDecision,
+    InMemoryHumanApprovalAuthority,
+)
 from worldforge.agent_harness.event_log import (
     AGENT_EVENT_LOG_DATABASE_NAME,
     AGENT_EVENT_LOG_SCHEMA_VERSION,
@@ -966,7 +970,7 @@ class AgentEventLogTests(unittest.TestCase):
             event_id_prefix="kernel_event",
             invocation_id_prefix="kernel_invocation",
             limits=ExecutionLimits(
-                max_turns=2,
+                max_turns=3,
                 max_tool_calls=1,
                 max_total_tokens=20,
                 max_cost_minor_units=10,
@@ -979,6 +983,7 @@ class AgentEventLogTests(unittest.TestCase):
                 "credential": "PRIVATE_CREDENTIAL_VALUE",
                 "path": "/private/operational/path",
             },
+            approval_id="approval_coordinator_01",
         )
         tool = FakeTool(
             "source.read",
@@ -987,6 +992,12 @@ class AgentEventLogTests(unittest.TestCase):
         )
         provider = FakeProvider(
             [
+                ProviderTurnResult(
+                    private_output="request schema",
+                    usage=ProviderUsage(0, 0, 0, 0, "USD"),
+                    tool_exposure_requests=("source.read",),
+                    completed=False,
+                ),
                 ProviderTurnResult(
                     private_output={"payload": "PRIVATE_COORDINATOR_OUTPUT"},
                     usage=ProviderUsage(3, 2, 1, 0, "USD"),
@@ -1009,33 +1020,48 @@ class AgentEventLogTests(unittest.TestCase):
             ]
         )
         with tempfile.TemporaryDirectory() as temporary, AgentEventLog(temporary) as log:
+            authority = InMemoryHumanApprovalAuthority()
             kernel = AgentExecutionKernel(
                 provider=provider,
                 broker=CapabilityBroker(tools=(tool,)),
                 journal=log,
                 clock=FakeClock(),
                 cancellation=FakeCancellation(),
+                approval_authority=authority,
+            )
+            review = kernel.prepare_approval_review(request)
+            decision = ExecutionApprovalDecision.create(
+                review=review,
+                reviewer_id="reviewer_coordinator",
+                outcome="approved",
+                approved_tool_ids=("source.read",),
+                expires_at_ms=2_000,
+            )
+            authority.decide(
+                decision,
+                expected_generation=0,
+                expected_review_hash=review.content_hash,
             )
             coordinator = AgentExecutionCoordinator(kernel=kernel, event_log=log)
             first = coordinator.execute(request)
             self.assertEqual("executed", first.disposition)
             self.assertIsNotNone(first.result)
-            self.assertEqual(1, len(provider.requests))
+            self.assertEqual(2, len(provider.requests))
             self.assertEqual(1, provider.runtime_binding_reads)
             second = coordinator.execute(request)
             self.assertEqual("existing_terminal", second.disposition)
             self.assertIsNone(second.result)
             self.assertEqual(first.records, second.records)
-            self.assertEqual(1, len(provider.requests))
+            self.assertEqual(2, len(provider.requests))
             self.assertEqual(1, provider.runtime_binding_reads)
             with self.assertRaisesRegex(KernelError, "execution_already_recorded"):
                 kernel.execute(request)
-            self.assertEqual(1, len(provider.requests))
+            self.assertEqual(2, len(provider.requests))
 
             kernel.journal = FakeJournal()
             with self.assertRaisesRegex(AgentEventLogError, "event_log_coordinator_mismatch"):
                 coordinator.execute(request)
-            self.assertEqual(1, len(provider.requests))
+            self.assertEqual(2, len(provider.requests))
             kernel.journal = log
 
             before_changes = log.connection.total_changes

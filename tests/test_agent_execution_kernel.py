@@ -26,6 +26,11 @@ from worldforge.agent_harness import (
     ExecutionRequest,
     KernelError,
 )
+from worldforge.agent_harness.approvals import (
+    ApprovalError,
+    ExecutionApprovalDecision,
+    InMemoryHumanApprovalAuthority,
+)
 from worldforge.agent_harness.capability_broker import BrokerError
 from worldforge.agent_harness.ports import (
     ArtifactProposal,
@@ -133,9 +138,58 @@ def _kernel(
     clock = clock or FakeClock()
     cancellation = cancellation or FakeCancellation()
     journal = journal or FakeJournal()
-    broker = CapabilityBroker(tools=tools, artifact_port=artifact_port, memory_port=memory_port)
-    return AgentExecutionKernel(
-        provider=provider, broker=broker, journal=journal, clock=clock, cancellation=cancellation
+    authority = InMemoryHumanApprovalAuthority()
+
+    class LegacyTestBroker(CapabilityBroker):
+        def preflight(self, execution_id, **kwargs):
+            kwargs["exposed_tools"] = None
+            return super().preflight(execution_id, **kwargs)
+
+    class AutoApprovingTestKernel(AgentExecutionKernel):
+        def execute(self, request):
+            prepared = replace(request, approval_id="approval_legacy_test_01")
+            try:
+                review = self.prepare_approval_review(prepared)
+            except KernelError as exc:
+                if exc.reason_code not in {
+                    "approval_required",
+                    "private_field_invalid",
+                    "provider_runtime_binding_invalid",
+                }:
+                    raise
+            else:
+                decision = ExecutionApprovalDecision.create(
+                    review=review,
+                    reviewer_id="reviewer_legacy_test",
+                    outcome="approved",
+                    approved_tool_ids=tuple(
+                        tool_id for tool_id, _descriptor_hash in review.tool_candidates
+                    ),
+                    expires_at_ms=MAX_SAFE_INTEGER,
+                )
+                try:
+                    authority.decide(
+                        decision,
+                        expected_generation=0,
+                        expected_review_hash=review.content_hash,
+                    )
+                except ApprovalError as exc:
+                    if exc.reason_code != "approval_stale":
+                        raise
+            return super().execute(prepared)
+
+    broker = LegacyTestBroker(
+        tools=tools,
+        artifact_port=artifact_port,
+        memory_port=memory_port,
+    )
+    return AutoApprovingTestKernel(
+        provider=provider,
+        broker=broker,
+        journal=journal,
+        clock=clock,
+        cancellation=cancellation,
+        approval_authority=authority,
     ), journal
 
 
@@ -665,6 +719,8 @@ class AgentExecutionKernelTests(unittest.TestCase):
 
         class VolatileTool:
             tool_id = "source.read"
+            summary = "Read source."
+            input_schema = {"type": "object"}
 
             def __init__(self, second_value: object) -> None:
                 self.reads = 0

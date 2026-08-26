@@ -1858,7 +1858,7 @@ if __name__ == "__main__":
     def test_fixed_runtime_identity_and_bootstrap_are_not_caller_injectable(self) -> None:
         expected = {
             "id": "worldforge_conformance_provider",
-            "revision": 1,
+            "revision": 2,
             "content_hash": hashlib.sha256(
                 worker_module.WORKER_BOOTSTRAP_TEMPLATE.encode("utf-8")
             ).hexdigest(),

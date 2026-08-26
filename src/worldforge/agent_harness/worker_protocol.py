@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from .ports import (
     ArtifactProposal,
     MemoryProposal,
+    ProviderToolDefinition,
+    ProviderToolSummary,
     ProviderTurnRequest,
     ProviderTurnResult,
     ProviderUsage,
@@ -31,6 +33,19 @@ _HEX_64_RE = re.compile(r"^[0-9a-f]{64}$")
 _ID_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
 _TOOL_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}(?:\.[a-z][a-z0-9_]{1,63})+$")
 _CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
+_MAX_TOOL_SUMMARY_BYTES = 1024
+_MAX_TOOL_SCHEMA_BYTES = 16 * 1024
+_MAX_TOOL_ID_CHARACTERS = 1024
+_CAPABILITIES = frozenset(
+    {
+        "artifact.propose",
+        "artifact.read",
+        "memory.propose",
+        "memory.read",
+        "project.read",
+        "tool.invoke",
+    }
+)
 
 
 class WorkerProtocolError(ValueError):
@@ -51,8 +66,14 @@ class ParsedWorkerRequest:
     request: ProviderTurnRequest
 
 
-def _snapshot(value: object, *, depth: int = 1, active: set[int] | None = None) -> object:
-    if depth > MAX_WORKER_JSON_DEPTH:
+def _snapshot(
+    value: object,
+    *,
+    depth: int = 1,
+    active: set[int] | None = None,
+    maximum_depth: int = MAX_WORKER_JSON_DEPTH,
+) -> object:
+    if depth > maximum_depth:
         raise WorkerProtocolError("worker_protocol_depth_exceeded")
     if active is None:
         active = set()
@@ -66,7 +87,12 @@ def _snapshot(value: object, *, depth: int = 1, active: set[int] | None = None) 
             for key, item in dict.items(value):
                 if type(key) is not str:
                     raise WorkerProtocolError("worker_protocol_invalid")
-                result[key] = _snapshot(item, depth=depth + 1, active=active)
+                result[key] = _snapshot(
+                    item,
+                    depth=depth + 1,
+                    active=active,
+                    maximum_depth=maximum_depth,
+                )
             return result
         finally:
             active.remove(identity)
@@ -77,7 +103,13 @@ def _snapshot(value: object, *, depth: int = 1, active: set[int] | None = None) 
         active.add(identity)
         try:
             return [
-                _snapshot(item, depth=depth + 1, active=active) for item in list.__iter__(value)
+                _snapshot(
+                    item,
+                    depth=depth + 1,
+                    active=active,
+                    maximum_depth=maximum_depth,
+                )
+                for item in list.__iter__(value)
             ]
         finally:
             active.remove(identity)
@@ -194,13 +226,103 @@ def _request_payload(request: ProviderTurnRequest) -> dict[str, object]:
         or not 0 <= request.turn_index <= 64
         or type(request.history) is not tuple
         or len(request.history) > MAX_WORKER_HISTORY_ITEMS
+        or type(request.tool_summaries) is not tuple
+        or type(request.exposed_tools) is not tuple
+        or len(request.tool_summaries) > 128
+        or len(request.exposed_tools) > 128
     ):
         raise WorkerProtocolError("worker_protocol_request_invalid")
+    summaries: list[dict[str, object]] = []
+    summary_snapshots: dict[str, tuple[str, str]] = {}
+    for item in tuple.__iter__(request.tool_summaries):
+        if type(item) is not ProviderToolSummary:
+            raise WorkerProtocolError("worker_protocol_request_invalid")
+        summary = _tool_summary_payload(item)
+        if summary["tool_id"] in summary_snapshots:
+            raise WorkerProtocolError("worker_protocol_request_invalid")
+        summary_snapshots[summary["tool_id"]] = (
+            summary["descriptor_hash"],
+            summary["summary"],
+        )
+        summaries.append(summary)
+    definitions: list[dict[str, object]] = []
+    definition_ids: set[str] = set()
+    for item in tuple.__iter__(request.exposed_tools):
+        if type(item) is not ProviderToolDefinition:
+            raise WorkerProtocolError("worker_protocol_request_invalid")
+        definition = _tool_definition_payload(item)
+        tool_id = definition["tool_id"]
+        if tool_id in definition_ids or summary_snapshots.get(tool_id) != (
+            definition["descriptor_hash"],
+            definition["summary"],
+        ):
+            raise WorkerProtocolError("worker_protocol_request_invalid")
+        definition_ids.add(tool_id)
+        definitions.append(definition)
     return {
         "execution_id": request.execution_id,
         "turn_index": request.turn_index,
         "private_input": _snapshot(request.private_input),
         "history": [_snapshot(item) for item in tuple.__iter__(request.history)],
+        "tool_summaries": summaries,
+        "exposed_tools": definitions,
+    }
+
+
+def _tool_summary_payload(value: ProviderToolSummary) -> dict[str, object]:
+    if (
+        type(value.tool_id) is not str
+        or len(value.tool_id) > _MAX_TOOL_ID_CHARACTERS
+        or _TOOL_RE.fullmatch(value.tool_id) is None
+        or type(value.summary) is not str
+        or not value.summary
+        or any(ord(character) < 32 or ord(character) == 127 for character in value.summary)
+        or type(value.descriptor_hash) is not str
+        or _HEX_64_RE.fullmatch(value.descriptor_hash) is None
+    ):
+        raise WorkerProtocolError("worker_protocol_request_invalid")
+    try:
+        summary_bytes = value.summary.encode("utf-8")
+    except Exception:
+        raise WorkerProtocolError("worker_protocol_request_invalid") from None
+    if len(summary_bytes) > _MAX_TOOL_SUMMARY_BYTES:
+        raise WorkerProtocolError("worker_protocol_request_invalid")
+    return {
+        "tool_id": value.tool_id,
+        "summary": value.summary,
+        "descriptor_hash": value.descriptor_hash,
+    }
+
+
+def _tool_definition_payload(value: ProviderToolDefinition) -> dict[str, object]:
+    summary = _tool_summary_payload(
+        ProviderToolSummary(value.tool_id, value.summary, value.descriptor_hash)
+    )
+    if (
+        type(value.required_capability_id) is not str
+        or len(value.required_capability_id) > _MAX_TOOL_ID_CHARACTERS
+        or _TOOL_RE.fullmatch(value.required_capability_id) is None
+        or value.required_capability_id not in _CAPABILITIES
+        or type(value.input_schema) is not dict
+    ):
+        raise WorkerProtocolError("worker_protocol_request_invalid")
+    try:
+        schema = _snapshot(value.input_schema, maximum_depth=32)
+    except WorkerProtocolError:
+        raise WorkerProtocolError("worker_protocol_request_invalid") from None
+    if len(_canonical(schema)) > _MAX_TOOL_SCHEMA_BYTES:
+        raise WorkerProtocolError("worker_protocol_request_invalid")
+    descriptor_body = {
+        "tool_id": summary["tool_id"],
+        "required_capability_id": value.required_capability_id,
+        "summary": summary["summary"],
+        "input_schema": schema,
+    }
+    if not hmac.compare_digest(value.descriptor_hash, _digest(descriptor_body)):
+        raise WorkerProtocolError("worker_protocol_request_invalid")
+    return {
+        **descriptor_body,
+        "descriptor_hash": summary["descriptor_hash"],
     }
 
 
@@ -256,6 +378,8 @@ def parse_request_frame(frame: bytes, *, key: bytes) -> ParsedWorkerRequest:
         "turn_index",
         "private_input",
         "history",
+        "tool_summaries",
+        "exposed_tools",
     }:
         raise WorkerProtocolError("worker_protocol_request_invalid")
     request_hash = _validate_sha256(
@@ -264,13 +388,47 @@ def parse_request_frame(frame: bytes, *, key: bytes) -> ParsedWorkerRequest:
     if not hmac.compare_digest(request_hash, _digest(payload)):
         raise WorkerProtocolError("worker_protocol_hash_mismatch")
     history = payload["history"]
-    if type(history) is not list:
+    summary_values = payload["tool_summaries"]
+    definition_values = payload["exposed_tools"]
+    if (
+        type(history) is not list
+        or type(summary_values) is not list
+        or type(definition_values) is not list
+    ):
         raise WorkerProtocolError("worker_protocol_request_invalid")
+    summaries: list[ProviderToolSummary] = []
+    for item in summary_values:
+        if type(item) is not dict or set(item) != {"tool_id", "summary", "descriptor_hash"}:
+            raise WorkerProtocolError("worker_protocol_request_invalid")
+        summaries.append(
+            ProviderToolSummary(item["tool_id"], item["summary"], item["descriptor_hash"])
+        )
+    definitions: list[ProviderToolDefinition] = []
+    for item in definition_values:
+        if type(item) is not dict or set(item) != {
+            "tool_id",
+            "required_capability_id",
+            "summary",
+            "input_schema",
+            "descriptor_hash",
+        }:
+            raise WorkerProtocolError("worker_protocol_request_invalid")
+        definitions.append(
+            ProviderToolDefinition(
+                item["tool_id"],
+                item["required_capability_id"],
+                item["summary"],
+                item["input_schema"],
+                item["descriptor_hash"],
+            )
+        )
     request = ProviderTurnRequest(
         execution_id=payload["execution_id"],
         turn_index=payload["turn_index"],
         private_input=payload["private_input"],
         history=tuple(history),
+        tool_summaries=tuple(summaries),
+        exposed_tools=tuple(definitions),
     )
     _request_payload(request)
     return ParsedWorkerRequest(nonce, runtime, request_hash, request)
@@ -326,6 +484,7 @@ def _parse_result_payload(payload: object) -> ProviderTurnResult:
         "tool_calls",
         "artifact_proposals",
         "memory_proposals",
+        "tool_exposure_requests",
         "completed",
     }:
         raise WorkerProtocolError("worker_protocol_result_invalid")
@@ -334,18 +493,40 @@ def _parse_result_payload(payload: object) -> ProviderTurnResult:
     tool_values = payload["tool_calls"]
     artifact_values = payload["artifact_proposals"]
     memory_values = payload["memory_proposals"]
-    if not all(type(value) is list for value in (tool_values, artifact_values, memory_values)):
+    exposure_values = payload["tool_exposure_requests"]
+    if not all(
+        type(value) is list
+        for value in (tool_values, artifact_values, memory_values, exposure_values)
+    ):
         raise WorkerProtocolError("worker_protocol_result_invalid")
-    if len(tool_values) > 128 or len(artifact_values) > 64 or len(memory_values) > 64:
+    if (
+        len(tool_values) > 128
+        or len(artifact_values) > 64
+        or len(memory_values) > 64
+        or len(exposure_values) > 128
+    ):
+        raise WorkerProtocolError("worker_protocol_result_invalid")
+    if any(
+        type(tool_id) is not str
+        or len(tool_id) > _MAX_TOOL_ID_CHARACTERS
+        or _TOOL_RE.fullmatch(tool_id) is None
+        for tool_id in exposure_values
+    ) or len(exposure_values) != len(set(exposure_values)):
         raise WorkerProtocolError("worker_protocol_result_invalid")
     tool_calls: list[ToolCall] = []
     for item in tool_values:
         if type(item) is not dict or set(item) != {"tool_id", "private_arguments"}:
             raise WorkerProtocolError("worker_protocol_result_invalid")
         tool_id = item["tool_id"]
-        if type(tool_id) is not str or _TOOL_RE.fullmatch(tool_id) is None:
+        if (
+            type(tool_id) is not str
+            or len(tool_id) > _MAX_TOOL_ID_CHARACTERS
+            or _TOOL_RE.fullmatch(tool_id) is None
+        ):
             raise WorkerProtocolError("worker_protocol_result_invalid")
         tool_calls.append(ToolCall(tool_id, item["private_arguments"]))
+    if set(exposure_values).intersection(call.tool_id for call in tool_calls):
+        raise WorkerProtocolError("worker_protocol_result_invalid")
     artifact_proposals: list[ArtifactProposal] = []
     for item in artifact_values:
         if type(item) is not dict or set(item) != {"private_payload"}:
@@ -362,6 +543,7 @@ def _parse_result_payload(payload: object) -> ProviderTurnResult:
         tool_calls=tuple(tool_calls),
         artifact_proposals=tuple(artifact_proposals),
         memory_proposals=tuple(memory_proposals),
+        tool_exposure_requests=tuple(exposure_values),
         completed=payload["completed"],
     )
 
@@ -373,6 +555,7 @@ def _result_payload(result: ProviderTurnResult) -> dict[str, object]:
         type(result.tool_calls) is not tuple
         or type(result.artifact_proposals) is not tuple
         or type(result.memory_proposals) is not tuple
+        or type(result.tool_exposure_requests) is not tuple
         or type(result.completed) is not bool
     ):
         raise WorkerProtocolError("worker_protocol_result_invalid")
@@ -394,6 +577,7 @@ def _result_payload(result: ProviderTurnResult) -> dict[str, object]:
             for proposal in result.memory_proposals
             if type(proposal) is MemoryProposal
         ],
+        "tool_exposure_requests": list(result.tool_exposure_requests),
         "completed": result.completed,
     }
     _parse_result_payload(payload)
@@ -417,6 +601,7 @@ def build_result_frame(
         len(payload["tool_calls"]) != len(result.tool_calls)
         or len(payload["artifact_proposals"]) != len(result.artifact_proposals)
         or len(payload["memory_proposals"]) != len(result.memory_proposals)
+        or len(payload["tool_exposure_requests"]) != len(result.tool_exposure_requests)
     ):
         raise WorkerProtocolError("worker_protocol_result_invalid")
     document: dict[str, object] = {

@@ -28,6 +28,7 @@ class ExecutionRequest:
     invocation_id_prefix: str
     limits: ExecutionLimits
     private_input: object = None
+    approval_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,11 +62,29 @@ class MemoryProposal:
 
 
 @dataclass(frozen=True, slots=True)
+class ProviderToolSummary:
+    tool_id: str
+    summary: str
+    descriptor_hash: str
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderToolDefinition:
+    tool_id: str
+    required_capability_id: str
+    summary: str
+    input_schema: object
+    descriptor_hash: str
+
+
+@dataclass(frozen=True, slots=True)
 class ProviderTurnRequest:
     execution_id: str
     turn_index: int
     private_input: object
     history: tuple[object, ...] = ()
+    tool_summaries: tuple[ProviderToolSummary, ...] = ()
+    exposed_tools: tuple[ProviderToolDefinition, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +94,7 @@ class ProviderTurnResult:
     tool_calls: tuple[ToolCall, ...] = ()
     artifact_proposals: tuple[ArtifactProposal, ...] = ()
     memory_proposals: tuple[MemoryProposal, ...] = ()
+    tool_exposure_requests: tuple[str, ...] = ()
     completed: bool = False
 
 
@@ -108,6 +128,8 @@ class ProviderAdapter(Protocol):
 class ToolAdapter(Protocol):
     tool_id: str
     required_capability_id: str
+    summary: str
+    input_schema: dict[str, object]
 
     def invoke(self, call: ToolCall) -> ToolResult: ...
 

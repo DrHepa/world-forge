@@ -51,7 +51,22 @@ from .ports import (
     ToolCall,
 )
 from .process_supervisor import ProviderBoundaryIndeterminate, ProviderBoundaryStopped
+from .provider_catalog import (
+    ProviderCatalogError,
+    ProviderExecutionSelection,
+    ProviderRuntimeCatalog,
+    ResolvedProviderExecution,
+    _validate_selection,
+)
+from .provider_governance import (
+    InMemoryProviderGovernanceAuthority,
+    ProviderGovernanceCheck,
+    ProviderGovernanceError,
+    ProviderGovernanceReview,
+    ProviderGovernanceSnapshot,
+)
 from .records import build_event, build_receipt
+from .worker_registry import fixed_provider_catalog
 
 _PORTABLE_ID_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -262,6 +277,8 @@ def _prepared_execution_request(
         limits_value = request.limits
         private_input = request.private_input
         approval_id = request.approval_id
+        provider_approval_id = request.provider_approval_id
+        provider_selection = request.provider_selection
     except Exception:
         raise KernelError("execution_request_invalid") from None
 
@@ -275,6 +292,16 @@ def _prepared_execution_request(
         type(approval_id) is not str or _PORTABLE_ID_RE.fullmatch(approval_id) is None
     ):
         raise KernelError("execution_request_invalid")
+    if provider_approval_id is not None and (
+        type(provider_approval_id) is not str
+        or _PORTABLE_ID_RE.fullmatch(provider_approval_id) is None
+    ):
+        raise KernelError("execution_request_invalid")
+    if provider_selection is not None:
+        try:
+            provider_selection = _validate_selection(provider_selection)
+        except ProviderCatalogError:
+            raise KernelError("provider_execution_selection_invalid") from None
 
     activation, _ = _exact_json_snapshot(activation_value, reason_code="execution_request_invalid")
     grant, _ = _exact_json_snapshot(grant_value, reason_code="execution_request_invalid")
@@ -294,6 +321,8 @@ def _prepared_execution_request(
         limits=limits,
         private_input=private_input,
         approval_id=approval_id,
+        provider_approval_id=provider_approval_id,
+        provider_selection=provider_selection,
     )
     return prepared, aggregate.activation, aggregate.grant
 
@@ -319,11 +348,31 @@ def _execution_request_fingerprint(
     tool_catalog_hash: str,
     approval_review_hash: str | None,
     approval_decision_hash: str | None,
+    provider_catalog_hash: str | None,
+    provider_spec_hash: str | None,
+    provider_config_hash: str | None,
+    provider_selection_hash: str | None,
+    provider_review_hash: str | None,
+    provider_decision_hash: str | None,
+    approval_authority_present: bool,
+    provider_catalog_present: bool,
+    provider_governance_authority_present: bool,
 ) -> str:
+    def identifier_control(value: str | None) -> dict[str, object]:
+        return {
+            "state": "absent" if value is None else "present",
+            "value_hash": (
+                None if value is None else hashlib.sha256(value.encode("utf-8")).hexdigest()
+            ),
+        }
+
+    def presence_control(value: bool) -> str:
+        return "present" if value else "absent"
+
     limits = request.limits
     controls = {
         "format": "world-forge.private.agent_execution_request_fingerprint",
-        "format_version": 1,
+        "format_version": 2,
         "execution_id": activation["execution_id"],
         "activation_hash": activation["content_hash"],
         "grant_hash": grant["content_hash"],
@@ -342,8 +391,25 @@ def _execution_request_fingerprint(
         },
         "private_input_hash": hashlib.sha256(private_input_bytes).hexdigest(),
         "tool_catalog_hash": tool_catalog_hash,
+        "approval_id_control": identifier_control(request.approval_id),
+        "approval_authority_state": presence_control(approval_authority_present),
         "approval_review_hash": approval_review_hash,
         "approval_decision_hash": approval_decision_hash,
+        "provider_approval_id_control": identifier_control(request.provider_approval_id),
+        "provider_selection_control": {
+            "state": "absent" if provider_selection_hash is None else "present",
+            "content_hash": provider_selection_hash,
+        },
+        "provider_catalog_state": presence_control(provider_catalog_present),
+        "provider_catalog_hash": provider_catalog_hash,
+        "provider_governance_authority_state": presence_control(
+            provider_governance_authority_present
+        ),
+        "provider_spec_hash": provider_spec_hash,
+        "provider_config_hash": provider_config_hash,
+        "provider_selection_hash": provider_selection_hash,
+        "provider_review_hash": provider_review_hash,
+        "provider_decision_hash": provider_decision_hash,
     }
     return hashlib.sha256(
         json.dumps(
@@ -388,6 +454,64 @@ def _build_approval_review(
         )
     except ApprovalError:
         raise KernelError("execution_request_invalid") from None
+
+
+def _selection_matches_execution(
+    resolved: ResolvedProviderExecution,
+    request: ExecutionRequest,
+    private_input_bytes: bytes,
+    provider_runtime: _ProviderRuntimeBinding,
+    catalog: ToolCatalogSnapshot,
+) -> bool:
+    selection = resolved.selection
+    limits = request.limits
+    return (
+        provider_runtime.matches(resolved.runtime_binding)
+        and selection.base_payload_hash == hashlib.sha256(private_input_bytes).hexdigest()
+        and selection.tool_catalog_hash == catalog.catalog_hash
+        and selection.max_turns == limits.max_turns
+        and selection.max_tool_calls == limits.max_tool_calls
+        and selection.max_total_tokens == limits.max_total_tokens
+        and selection.max_cost_minor_units == limits.max_cost_minor_units
+        and selection.currency == limits.currency
+        and selection.max_duration_ms == limits.max_duration_ms
+        and selection.deadline_ms == limits.deadline_ms
+    )
+
+
+def _build_provider_governance_review(
+    request: ExecutionRequest,
+    activation: dict[str, object],
+    grant: dict[str, object],
+    private_input_bytes: bytes,
+    resolved: ResolvedProviderExecution,
+    provider_runtime: _ProviderRuntimeBinding,
+    catalog: ToolCatalogSnapshot,
+) -> ProviderGovernanceReview:
+    if request.provider_approval_id is None or not _selection_matches_execution(
+        resolved,
+        request,
+        private_input_bytes,
+        provider_runtime,
+        catalog,
+    ):
+        raise KernelError("provider_execution_selection_invalid")
+    _work_order, work_order_bytes = _exact_json_snapshot(
+        activation["work_order"],
+        reason_code="execution_request_invalid",
+    )
+    try:
+        return ProviderGovernanceReview.create(
+            approval_id=request.provider_approval_id,
+            execution_id=activation["execution_id"],
+            activation_hash=activation["content_hash"],
+            grant_hash=grant["content_hash"],
+            work_order_hash=hashlib.sha256(work_order_bytes).hexdigest(),
+            private_input_hash=hashlib.sha256(private_input_bytes).hexdigest(),
+            resolved=resolved,
+        )
+    except ProviderGovernanceError:
+        raise KernelError("provider_execution_selection_invalid") from None
 
 
 def _sealed_private_value(value: object) -> object:
@@ -512,7 +636,12 @@ class BudgetLedger:
 
 class AgentExecutionKernel:
     def __setattr__(self, name: str, value: object) -> None:
-        if name in {"_provider_authority", "_approval_authority"}:
+        if name in {
+            "_provider_authority",
+            "_approval_authority",
+            "_provider_catalog",
+            "_provider_governance_authority",
+        }:
             try:
                 object.__getattribute__(self, name)
             except AttributeError:
@@ -522,7 +651,12 @@ class AgentExecutionKernel:
         object.__setattr__(self, name, value)
 
     def __delattr__(self, name: str) -> None:
-        if name in {"_provider_authority", "_approval_authority"}:
+        if name in {
+            "_provider_authority",
+            "_approval_authority",
+            "_provider_catalog",
+            "_provider_governance_authority",
+        }:
             raise AttributeError("kernel authority is immutable")
         object.__delattr__(self, name)
 
@@ -535,6 +669,8 @@ class AgentExecutionKernel:
         clock: Clock,
         cancellation: CancellationToken,
         approval_authority: InMemoryHumanApprovalAuthority | None = None,
+        provider_catalog: ProviderRuntimeCatalog | None = None,
+        provider_governance_authority: InMemoryProviderGovernanceAuthority | None = None,
     ) -> None:
         self._provider_authority = _snapshot_provider_authority(provider)
         if (
@@ -543,6 +679,28 @@ class AgentExecutionKernel:
         ):
             raise KernelError("approval_authority_invalid")
         self._approval_authority = approval_authority
+        if provider_catalog is not None and type(provider_catalog) is not ProviderRuntimeCatalog:
+            raise KernelError("provider_catalog_invalid")
+        try:
+            frozen_provider_catalog = (
+                None if provider_catalog is None else provider_catalog.snapshot()
+            )
+        except ProviderCatalogError:
+            raise KernelError("provider_catalog_invalid") from None
+        if frozen_provider_catalog is not None:
+            fixed_catalog = fixed_provider_catalog()
+            if (
+                frozen_provider_catalog.catalog_hash != fixed_catalog.catalog_hash
+                or frozen_provider_catalog.specs != fixed_catalog.specs
+            ):
+                raise KernelError("provider_catalog_invalid")
+        if (
+            provider_governance_authority is not None
+            and type(provider_governance_authority) is not InMemoryProviderGovernanceAuthority
+        ):
+            raise KernelError("provider_governance_authority_invalid")
+        self._provider_catalog = frozen_provider_catalog
+        self._provider_governance_authority = provider_governance_authority
         self.broker = broker
         self.journal = journal
         self.clock = clock
@@ -588,6 +746,87 @@ class AgentExecutionKernel:
             return self._approval_authority.prepare(review, expected_generation=0)
         except ApprovalError as exc:
             raise KernelError(exc.reason_code) from None
+
+    def prepare_provider_governance_review(
+        self,
+        request: ExecutionRequest,
+    ) -> ProviderGovernanceReview:
+        """Prepare one exact provider review without exposing it to the worker."""
+
+        if self._active_execution_id is not None:
+            raise KernelError("execution_reentrant")
+        request, activation, grant = _prepared_execution_request(request)
+        if not self._provider_authority.runtime_binding.matches(activation["runtime"]):
+            raise KernelError("provider_runtime_binding_invalid")
+        if (
+            self._provider_catalog is None
+            or self._provider_governance_authority is None
+            or request.provider_approval_id is None
+            or type(request.provider_selection) is not ProviderExecutionSelection
+        ):
+            raise KernelError("provider_approval_required")
+        try:
+            private_input, private_input_bytes = _private_snapshot(request.private_input)
+        except KernelError:
+            raise KernelError("private_field_invalid") from None
+        request = replace(request, private_input=private_input)
+        catalog = self.broker.eligible_tool_catalog(
+            effective_capabilities=frozenset(grant["effective_capability_ids"]),
+            effective_tools=frozenset(grant["effective_tool_ids"]),
+        )
+        try:
+            resolved = self._provider_catalog.resolve(request.provider_selection)
+        except ProviderCatalogError as exc:
+            raise KernelError(exc.reason_code) from None
+        review = _build_provider_governance_review(
+            request,
+            activation,
+            grant,
+            private_input_bytes,
+            resolved,
+            self._provider_authority.runtime_binding,
+            catalog,
+        )
+        try:
+            return self._provider_governance_authority.prepare(
+                review,
+                expected_generation=0,
+            )
+        except ProviderGovernanceError as exc:
+            raise KernelError(exc.reason_code) from None
+
+    def _provider_governance_state(
+        self,
+        review: ProviderGovernanceReview | None,
+        expected_snapshot: ProviderGovernanceSnapshot | None,
+    ) -> tuple[ProviderGovernanceCheck | None, str | None]:
+        if (
+            review is None
+            or self._provider_governance_authority is None
+            or expected_snapshot is None
+        ):
+            return None, "provider_approval_required"
+        try:
+            return (
+                self._provider_governance_authority.check_snapshot(
+                    review,
+                    expected_snapshot,
+                    now_ms=self._safe_now(),
+                ),
+                None,
+            )
+        except ProviderGovernanceError as exc:
+            return None, exc.reason_code
+        except Exception:
+            return None, "provider_approval_check_failed"
+
+    def _provider_governance_boundary_reason(
+        self,
+        review: ProviderGovernanceReview | None,
+        expected_snapshot: ProviderGovernanceSnapshot | None,
+    ) -> str | None:
+        _check, reason = self._provider_governance_state(review, expected_snapshot)
+        return None if reason is None else "provider_not_authorized"
 
     def _approval_state(
         self,
@@ -649,6 +888,9 @@ class AgentExecutionKernel:
                 request_fingerprint = None
                 approval_review = None
                 approval_snapshot = None
+                provider_review = None
+                provider_snapshot = None
+                provider_reason = "provider_approval_required"
             else:
                 approval_review = _build_approval_review(
                     request,
@@ -675,6 +917,61 @@ class AgentExecutionKernel:
                         approval_snapshot = None
                         approval_review_hash = approval_review.content_hash
                         approval_decision_hash = None
+                provider_catalog_hash = (
+                    None if self._provider_catalog is None else self._provider_catalog.catalog_hash
+                )
+                provider_spec_hash = None
+                provider_config_hash = None
+                provider_selection_hash = (
+                    None
+                    if request.provider_selection is None
+                    else request.provider_selection.content_hash
+                )
+                provider_review_hash = None
+                provider_decision_hash = None
+                provider_review = None
+                provider_snapshot = None
+                provider_reason: str | None = None
+                if (
+                    self._provider_catalog is None
+                    or self._provider_governance_authority is None
+                    or request.provider_approval_id is None
+                    or request.provider_selection is None
+                ):
+                    provider_reason = "provider_approval_required"
+                else:
+                    try:
+                        provider_resolved = self._provider_catalog.resolve(
+                            request.provider_selection
+                        )
+                    except ProviderCatalogError:
+                        raise KernelError("provider_execution_selection_invalid") from None
+                    provider_spec_hash = provider_resolved.spec.content_hash
+                    provider_config_hash = provider_resolved.selection.non_secret_config_hash
+                    provider_selection_hash = provider_resolved.selection.content_hash
+                    try:
+                        provider_review = _build_provider_governance_review(
+                            request,
+                            activation,
+                            grant,
+                            private_input_bytes,
+                            provider_resolved,
+                            provider_authority.runtime_binding,
+                            tool_catalog,
+                        )
+                    except KernelError:
+                        provider_reason = "provider_approval_stale"
+                    else:
+                        provider_review_hash = provider_review.content_hash
+                        try:
+                            provider_snapshot = self._provider_governance_authority.snapshot(
+                                provider_review
+                            )
+                        except ProviderGovernanceError:
+                            provider_reason = "provider_approval_stale"
+                        else:
+                            provider_review_hash = provider_snapshot.review_hash
+                            provider_decision_hash = provider_snapshot.decision_hash
                 request_fingerprint = _execution_request_fingerprint(
                     request,
                     activation,
@@ -683,6 +980,17 @@ class AgentExecutionKernel:
                     tool_catalog_hash=tool_catalog.catalog_hash,
                     approval_review_hash=approval_review_hash,
                     approval_decision_hash=approval_decision_hash,
+                    provider_catalog_hash=provider_catalog_hash,
+                    provider_spec_hash=provider_spec_hash,
+                    provider_config_hash=provider_config_hash,
+                    provider_selection_hash=provider_selection_hash,
+                    provider_review_hash=provider_review_hash,
+                    provider_decision_hash=provider_decision_hash,
+                    approval_authority_present=self._approval_authority is not None,
+                    provider_catalog_present=self._provider_catalog is not None,
+                    provider_governance_authority_present=(
+                        self._provider_governance_authority is not None
+                    ),
                 )
             request = replace(request, private_input=private_input)
             journal_activation = copy.deepcopy(activation)
@@ -735,12 +1043,23 @@ class AgentExecutionKernel:
             approval_check: ApprovalCheck | None = None
             approval_reason: str | None = None
             if initial_reason is None and provider_runtime_matches:
+                if provider_reason is None:
+                    _provider_check, provider_reason = self._provider_governance_state(
+                        provider_review,
+                        provider_snapshot,
+                    )
+            if initial_reason is None and provider_runtime_matches and provider_reason is None:
                 approval_check, approval_reason = self._approval_state(
                     approval_review,
                     tool_catalog,
                     approval_snapshot,
                 )
-            if initial_reason is None and provider_runtime_matches and approval_reason is None:
+            if (
+                initial_reason is None
+                and provider_runtime_matches
+                and provider_reason is None
+                and approval_reason is None
+            ):
                 try:
                     lease = self.broker.activate(execution_id)
                 except BrokerError:
@@ -760,6 +1079,9 @@ class AgentExecutionKernel:
                 approval_snapshot=approval_snapshot,
                 approval_check=approval_check,
                 approval_reason=approval_reason,
+                provider_review=provider_review,
+                provider_snapshot=provider_snapshot,
+                provider_reason=provider_reason,
             )
         finally:
             try:
@@ -783,6 +1105,9 @@ class AgentExecutionKernel:
         approval_snapshot: ApprovalAuthoritySnapshot | None,
         approval_check: ApprovalCheck | None,
         approval_reason: str | None,
+        provider_review: ProviderGovernanceReview | None,
+        provider_snapshot: ProviderGovernanceSnapshot | None,
+        provider_reason: str | None,
     ) -> ExecutionResult:
         ledger = BudgetLedger(request.limits)
         events: list[dict[str, object]] = []
@@ -800,6 +1125,10 @@ class AgentExecutionKernel:
         if initial_reason is not None:
             outcome, failure_codes = "cancelled", [initial_reason]
         elif not provider_runtime_matches:
+            outcome, failure_codes = "failed", ["provider_failed"]
+        elif request.private_input is _INVALID_PRIVATE_INPUT:
+            outcome, failure_codes = "failed", ["private_field_invalid"]
+        elif provider_reason is not None:
             outcome, failure_codes = "failed", ["provider_failed"]
         elif approval_reason is not None:
             outcome, failure_codes = "failed", ["tool_not_authorized"]
@@ -861,6 +1190,8 @@ class AgentExecutionKernel:
                         approval_review,
                         approval_snapshot,
                         tool_catalog,
+                        provider_review,
+                        provider_snapshot,
                     )
 
         return self._finalize_result(
@@ -878,6 +1209,8 @@ class AgentExecutionKernel:
             approval_review=approval_review,
             approval_snapshot=approval_snapshot,
             tool_catalog=tool_catalog,
+            provider_review=provider_review,
+            provider_snapshot=provider_snapshot,
         )
 
     def _run_turns(
@@ -898,6 +1231,8 @@ class AgentExecutionKernel:
         approval_review: ExecutionApprovalReview | None,
         approval_snapshot: ApprovalAuthoritySnapshot | None,
         tool_catalog: ToolCatalogSnapshot,
+        provider_review: ProviderGovernanceReview | None,
+        provider_snapshot: ProviderGovernanceSnapshot | None,
     ) -> tuple[str, list[str], object]:
         execution_id = str(activation["execution_id"])
         private_output: object = None
@@ -913,6 +1248,14 @@ class AgentExecutionKernel:
             reason = self._cancellation_reason(request.limits, start_ms)
             if reason is not None:
                 return "cancelled", [reason], None
+            if (
+                self._provider_governance_boundary_reason(
+                    provider_review,
+                    provider_snapshot,
+                )
+                is not None
+            ):
+                return "failed", ["provider_failed"], None
             if (
                 self._approval_boundary_reason(approval_review, tool_catalog, approval_snapshot)
                 is not None
@@ -942,6 +1285,10 @@ class AgentExecutionKernel:
                     boundary=ProviderBoundaryControl(
                         lambda: (
                             self._cancellation_reason(request.limits, start_ms)
+                            or self._provider_governance_boundary_reason(
+                                provider_review,
+                                provider_snapshot,
+                            )
                             or self._approval_boundary_reason(
                                 approval_review, tool_catalog, approval_snapshot
                             )
@@ -953,6 +1300,8 @@ class AgentExecutionKernel:
                 # durable prefix must remain open for exclusive recovery.
                 raise
             except ProviderBoundaryStopped as exc:
+                if exc.reason_code == "provider_not_authorized":
+                    return "failed", ["provider_failed"], None
                 if exc.reason_code == "tool_not_authorized":
                     return "failed", ["tool_not_authorized"], None
                 return "cancelled", [exc.reason_code], None
@@ -986,6 +1335,14 @@ class AgentExecutionKernel:
             if reason is not None:
                 return "cancelled", [reason], None
             if (
+                self._provider_governance_boundary_reason(
+                    provider_review,
+                    provider_snapshot,
+                )
+                is not None
+            ):
+                return "failed", ["provider_failed"], None
+            if (
                 self._approval_boundary_reason(approval_review, tool_catalog, approval_snapshot)
                 is not None
             ):
@@ -1009,6 +1366,14 @@ class AgentExecutionKernel:
             reason = self._cancellation_reason(request.limits, start_ms)
             if reason is not None:
                 return "cancelled", [reason], None
+            if (
+                self._provider_governance_boundary_reason(
+                    provider_review,
+                    provider_snapshot,
+                )
+                is not None
+            ):
+                return "failed", ["provider_failed"], None
             if (
                 self._approval_boundary_reason(approval_review, tool_catalog, approval_snapshot)
                 is not None
@@ -1047,6 +1412,14 @@ class AgentExecutionKernel:
                 if reason is not None:
                     return "cancelled", [reason], None
                 if (
+                    self._provider_governance_boundary_reason(
+                        provider_review,
+                        provider_snapshot,
+                    )
+                    is not None
+                ):
+                    return "failed", ["provider_failed"], None
+                if (
                     self._approval_boundary_reason(approval_review, tool_catalog, approval_snapshot)
                     is not None
                 ):
@@ -1079,6 +1452,16 @@ class AgentExecutionKernel:
                         return "cancelled", [reason], None
                     if exc.invoked:
                         if (
+                            self._provider_governance_boundary_reason(
+                                provider_review,
+                                provider_snapshot,
+                            )
+                            is not None
+                        ):
+                            invocation["failure_codes"] = ["provider_failed"]
+                            invocations.append(invocation)
+                            return "failed", ["provider_failed"], None
+                        if (
                             self._approval_boundary_reason(
                                 approval_review, tool_catalog, approval_snapshot
                             )
@@ -1100,6 +1483,16 @@ class AgentExecutionKernel:
                         invocations.append(invocation)
                         return "cancelled", [reason], None
                     if (
+                        self._provider_governance_boundary_reason(
+                            provider_review,
+                            provider_snapshot,
+                        )
+                        is not None
+                    ):
+                        invocation["failure_codes"] = ["provider_failed"]
+                        invocations.append(invocation)
+                        return "failed", ["provider_failed"], None
+                    if (
                         self._approval_boundary_reason(
                             approval_review, tool_catalog, approval_snapshot
                         )
@@ -1117,6 +1510,16 @@ class AgentExecutionKernel:
                     invocation["failure_codes"] = [reason]
                     invocations.append(invocation)
                     return "cancelled", [reason], None
+                if (
+                    self._provider_governance_boundary_reason(
+                        provider_review,
+                        provider_snapshot,
+                    )
+                    is not None
+                ):
+                    invocation["failure_codes"] = ["provider_failed"]
+                    invocations.append(invocation)
+                    return "failed", ["provider_failed"], None
                 if (
                     self._approval_boundary_reason(approval_review, tool_catalog, approval_snapshot)
                     is not None
@@ -1146,6 +1549,14 @@ class AgentExecutionKernel:
                 if reason is not None:
                     return "cancelled", [reason], None
                 if (
+                    self._provider_governance_boundary_reason(
+                        provider_review,
+                        provider_snapshot,
+                    )
+                    is not None
+                ):
+                    return "failed", ["provider_failed"], None
+                if (
                     self._approval_boundary_reason(approval_review, tool_catalog, approval_snapshot)
                     is not None
                 ):
@@ -1165,6 +1576,15 @@ class AgentExecutionKernel:
                         return "cancelled", [reason], None
                     if (
                         exc.invoked
+                        and self._provider_governance_boundary_reason(
+                            provider_review,
+                            provider_snapshot,
+                        )
+                        is not None
+                    ):
+                        return "failed", ["provider_failed"], None
+                    if (
+                        exc.invoked
                         and self._approval_boundary_reason(
                             approval_review, tool_catalog, approval_snapshot
                         )
@@ -1176,6 +1596,14 @@ class AgentExecutionKernel:
                     reason = self._cancellation_reason(request.limits, start_ms)
                     if reason is not None:
                         return "cancelled", [reason], None
+                    if (
+                        self._provider_governance_boundary_reason(
+                            provider_review,
+                            provider_snapshot,
+                        )
+                        is not None
+                    ):
+                        return "failed", ["provider_failed"], None
                     if (
                         self._approval_boundary_reason(
                             approval_review, tool_catalog, approval_snapshot
@@ -1189,6 +1617,14 @@ class AgentExecutionKernel:
                 if reason is not None:
                     return "cancelled", [reason], None
                 if (
+                    self._provider_governance_boundary_reason(
+                        provider_review,
+                        provider_snapshot,
+                    )
+                    is not None
+                ):
+                    return "failed", ["provider_failed"], None
+                if (
                     self._approval_boundary_reason(approval_review, tool_catalog, approval_snapshot)
                     is not None
                 ):
@@ -1198,6 +1634,14 @@ class AgentExecutionKernel:
                 reason = self._cancellation_reason(request.limits, start_ms)
                 if reason is not None:
                     return "cancelled", [reason], None
+                if (
+                    self._provider_governance_boundary_reason(
+                        provider_review,
+                        provider_snapshot,
+                    )
+                    is not None
+                ):
+                    return "failed", ["provider_failed"], None
                 if (
                     self._approval_boundary_reason(approval_review, tool_catalog, approval_snapshot)
                     is not None
@@ -1218,6 +1662,15 @@ class AgentExecutionKernel:
                         return "cancelled", [reason], None
                     if (
                         exc.invoked
+                        and self._provider_governance_boundary_reason(
+                            provider_review,
+                            provider_snapshot,
+                        )
+                        is not None
+                    ):
+                        return "failed", ["provider_failed"], None
+                    if (
+                        exc.invoked
                         and self._approval_boundary_reason(
                             approval_review, tool_catalog, approval_snapshot
                         )
@@ -1230,6 +1683,14 @@ class AgentExecutionKernel:
                     if reason is not None:
                         return "cancelled", [reason], None
                     if (
+                        self._provider_governance_boundary_reason(
+                            provider_review,
+                            provider_snapshot,
+                        )
+                        is not None
+                    ):
+                        return "failed", ["provider_failed"], None
+                    if (
                         self._approval_boundary_reason(
                             approval_review, tool_catalog, approval_snapshot
                         )
@@ -1240,6 +1701,14 @@ class AgentExecutionKernel:
                 reason = self._cancellation_reason(request.limits, start_ms)
                 if reason is not None:
                     return "cancelled", [reason], None
+                if (
+                    self._provider_governance_boundary_reason(
+                        provider_review,
+                        provider_snapshot,
+                    )
+                    is not None
+                ):
+                    return "failed", ["provider_failed"], None
                 if (
                     self._approval_boundary_reason(approval_review, tool_catalog, approval_snapshot)
                     is not None
@@ -1414,6 +1883,8 @@ class AgentExecutionKernel:
         approval_review: ExecutionApprovalReview | None,
         approval_snapshot: ApprovalAuthoritySnapshot | None,
         tool_catalog: ToolCatalogSnapshot,
+        provider_review: ProviderGovernanceReview | None,
+        provider_snapshot: ProviderGovernanceSnapshot | None,
     ) -> ExecutionResult:
         cancel_event_recorded = any(
             event["event_type"] == "execution.cancel_requested" for event in events
@@ -1502,6 +1973,20 @@ class AgentExecutionKernel:
             final_reason = self._cancellation_reason(request.limits, start_ms)
             if outcome == "succeeded" and final_reason is not None:
                 outcome, failure_codes, private_output = "cancelled", [final_reason], None
+                continue
+            if (
+                outcome == "succeeded"
+                and self._provider_governance_boundary_reason(
+                    provider_review,
+                    provider_snapshot,
+                )
+                is not None
+            ):
+                outcome, failure_codes, private_output = (
+                    "failed",
+                    ["provider_failed"],
+                    None,
+                )
                 continue
             if (
                 outcome == "succeeded"

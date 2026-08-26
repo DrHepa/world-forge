@@ -49,6 +49,7 @@ _ALLOWED_STOP_REASONS = frozenset(
         "execution_cancelled",
         "execution_deadline_exceeded",
         "duration_budget_exceeded",
+        "provider_not_authorized",
         "tool_not_authorized",
     }
 )

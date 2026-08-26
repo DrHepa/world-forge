@@ -23,8 +23,8 @@ from tests.agent_harness_fakes import (
     FakeProvider,
     FakeTool,
 )
+from tests.test_agent_execution_kernel import _ProviderAutoApprovingKernel
 from worldforge.agent_harness import (
-    AgentExecutionKernel,
     CapabilityBroker,
     ExecutionLimits,
     ExecutionRequest,
@@ -1171,7 +1171,7 @@ class AgentEventLogTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as temporary, AgentEventLog(temporary) as log:
             authority = InMemoryHumanApprovalAuthority()
-            kernel = AgentExecutionKernel(
+            kernel = _ProviderAutoApprovingKernel(
                 provider=provider,
                 broker=CapabilityBroker(tools=(tool,)),
                 journal=log,
@@ -1284,7 +1284,7 @@ class AgentEventLogTests(unittest.TestCase):
         )
         provider = FakeProvider([])
         with tempfile.TemporaryDirectory() as temporary, AgentEventLog(temporary) as log:
-            kernel = AgentExecutionKernel(
+            kernel = _ProviderAutoApprovingKernel(
                 provider=provider,
                 broker=CapabilityBroker(),
                 journal=log,
@@ -2829,8 +2829,13 @@ import time
 from pathlib import Path
 
 from tests.agent_harness_fakes import FakeCancellation, FakeClock
-from tests.test_agent_execution_kernel import _documents, _request, _usage
-from worldforge.agent_harness import AgentExecutionKernel, CapabilityBroker
+from tests.test_agent_execution_kernel import (
+    _ProviderAutoApprovingKernel,
+    _documents,
+    _request,
+    _usage,
+)
+from worldforge.agent_harness import CapabilityBroker
 from worldforge.agent_harness.event_log import AgentEventLog
 from worldforge.agent_harness.ports import ProviderTurnResult
 from worldforge.agent_harness.worker_registry import fixed_runtime_identity
@@ -2857,7 +2862,7 @@ class MarkerProvider:
 
 activation, grant = _documents()
 with AgentEventLog(root) as journal:
-    kernel = AgentExecutionKernel(
+    kernel = _ProviderAutoApprovingKernel(
         provider=MarkerProvider(),
         broker=PausingBroker(),
         journal=journal,

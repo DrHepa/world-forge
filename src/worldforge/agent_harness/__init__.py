@@ -9,6 +9,17 @@ from .memory_projection import (
     MemoryProjectionCoordinator,
 )
 from .ports import ExecutionLimits, ExecutionRequest
+from .provider_catalog import (
+    ProviderExecutionSelection,
+    ProviderRuntimeCatalog,
+    ProviderRuntimeSpec,
+    ResolvedProviderExecution,
+)
+from .provider_governance import (
+    InMemoryProviderGovernanceAuthority,
+    ProviderGovernanceDecision,
+    ProviderGovernanceReview,
+)
 from .supervisor import OneShotProviderSupervisor
 
 __all__ = (
@@ -21,6 +32,13 @@ __all__ = (
     "KernelError",
     "InMemoryMemoryApprovalAuthority",
     "InMemoryMemoryProposalSource",
+    "InMemoryProviderGovernanceAuthority",
     "MemoryProjectionCoordinator",
     "OneShotProviderSupervisor",
+    "ProviderExecutionSelection",
+    "ProviderGovernanceDecision",
+    "ProviderGovernanceReview",
+    "ProviderRuntimeCatalog",
+    "ProviderRuntimeSpec",
+    "ResolvedProviderExecution",
 )

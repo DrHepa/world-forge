@@ -32,6 +32,7 @@ from worldforge.agent_harness.approvals import (
     InMemoryHumanApprovalAuthority,
 )
 from worldforge.agent_harness.capability_broker import BrokerError
+from worldforge.agent_harness.kernel import _private_snapshot
 from worldforge.agent_harness.ports import (
     ArtifactProposal,
     MemoryProposal,
@@ -40,7 +41,17 @@ from worldforge.agent_harness.ports import (
     ToolCall,
     ToolResult,
 )
-from worldforge.agent_harness.worker_registry import fixed_runtime_identity
+from worldforge.agent_harness.provider_catalog import ProviderExecutionSelection
+from worldforge.agent_harness.provider_governance import (
+    InMemoryProviderGovernanceAuthority,
+    ProviderGovernanceDecision,
+    ProviderGovernanceError,
+)
+from worldforge.agent_harness.worker_registry import (
+    fixed_provider_catalog,
+    fixed_runtime_identity,
+    fixed_runtime_spec,
+)
 from worldforge.agent_harness_contracts import (
     MAX_SAFE_INTEGER,
     canonical_agent_harness_hash,
@@ -125,6 +136,86 @@ def _request(activation, grant, **limit_changes: object) -> ExecutionRequest:
     )
 
 
+def _private_json_hash(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+class _ProviderAutoApprovingKernel(AgentExecutionKernel):
+    """Legacy-test adapter: approve the fixed private provider, never production."""
+
+    def __init__(self, **kwargs):
+        self._test_provider_governance = InMemoryProviderGovernanceAuthority()
+        kwargs.setdefault("provider_catalog", fixed_provider_catalog())
+        kwargs.setdefault(
+            "provider_governance_authority",
+            self._test_provider_governance,
+        )
+        super().__init__(**kwargs)
+
+    def execute(self, request):
+        try:
+            _, private_input_bytes = _private_snapshot(request.private_input)
+            tool_catalog = self.broker.eligible_tool_catalog(
+                effective_capabilities=frozenset(request.grant["effective_capability_ids"]),
+                effective_tools=frozenset(request.grant["effective_tool_ids"]),
+            )
+            spec = fixed_runtime_spec()
+            limits = request.limits
+            selection = ProviderExecutionSelection.create(
+                catalog_hash=fixed_provider_catalog().catalog_hash,
+                spec_hash=spec.content_hash,
+                runtime_id=spec.runtime_id,
+                runtime_revision=spec.runtime_revision,
+                runtime_content_hash=spec.runtime_content_hash,
+                non_secret_config_hash=_private_json_hash({}),
+                disclosure_plan_hash=_private_json_hash({"data_classes": ["private_test_payload"]}),
+                disclosed_data_classes=("private_test_payload",),
+                base_payload_hash=hashlib.sha256(private_input_bytes).hexdigest(),
+                tool_catalog_hash=tool_catalog.catalog_hash,
+                max_turns=limits.max_turns,
+                max_tool_calls=limits.max_tool_calls,
+                max_total_tokens=limits.max_total_tokens,
+                max_cost_minor_units=limits.max_cost_minor_units,
+                currency=limits.currency,
+                max_duration_ms=limits.max_duration_ms,
+                deadline_ms=limits.deadline_ms,
+                pricing_policy_hash=spec.pricing_policy_hash,
+                credential_revision_id=None,
+            )
+            prepared = replace(
+                request,
+                provider_approval_id=f"provider_approval_{selection.content_hash[:32]}",
+                provider_selection=selection,
+            )
+            review = self.prepare_provider_governance_review(prepared)
+            decision = ProviderGovernanceDecision.create(
+                review=review,
+                reviewer_id="provider_reviewer_legacy_test",
+                outcome="approved",
+                expires_at_ms=MAX_SAFE_INTEGER,
+            )
+            try:
+                self._test_provider_governance.decide(
+                    decision,
+                    expected_generation=0,
+                    expected_review_hash=review.content_hash,
+                )
+            except ProviderGovernanceError as exc:
+                if exc.reason_code != "provider_approval_stale":
+                    raise
+        except (KernelError, TypeError, ValueError):
+            prepared = request
+        return super().execute(prepared)
+
+
 def _kernel(
     provider,
     *,
@@ -145,7 +236,7 @@ def _kernel(
             kwargs["exposed_tools"] = None
             return super().preflight(execution_id, **kwargs)
 
-    class AutoApprovingTestKernel(AgentExecutionKernel):
+    class AutoApprovingTestKernel(_ProviderAutoApprovingKernel):
         def execute(self, request):
             prepared = replace(request, approval_id="approval_legacy_test_01")
             try:
@@ -205,9 +296,16 @@ class AgentExecutionKernelTests(unittest.TestCase):
                 "ExecutionRequest",
                 "InMemoryMemoryApprovalAuthority",
                 "InMemoryMemoryProposalSource",
+                "InMemoryProviderGovernanceAuthority",
                 "KernelError",
                 "MemoryProjectionCoordinator",
                 "OneShotProviderSupervisor",
+                "ProviderExecutionSelection",
+                "ProviderGovernanceDecision",
+                "ProviderGovernanceReview",
+                "ProviderRuntimeCatalog",
+                "ProviderRuntimeSpec",
+                "ResolvedProviderExecution",
             },
             set(agent_harness.__all__),
         )
@@ -302,7 +400,7 @@ class AgentExecutionKernelTests(unittest.TestCase):
                 journal = FakeJournal()
                 provider = FakeProvider([], runtime_binding=binding)
                 with self.assertRaises(KernelError) as raised:
-                    AgentExecutionKernel(
+                    _ProviderAutoApprovingKernel(
                         provider=provider,
                         broker=CapabilityBroker(),
                         journal=journal,
@@ -321,7 +419,7 @@ class AgentExecutionKernelTests(unittest.TestCase):
                 raise RuntimeError("PRIVATE_RUNTIME_BINDING_FAILURE")
 
         with self.assertRaises(KernelError) as raised:
-            AgentExecutionKernel(
+            _ProviderAutoApprovingKernel(
                 provider=RaisingProvider([]),
                 broker=CapabilityBroker(),
                 journal=FakeJournal(),
@@ -370,7 +468,7 @@ class AgentExecutionKernelTests(unittest.TestCase):
 
         broker = ObservingBroker()
         journal = FakeJournal()
-        kernel = AgentExecutionKernel(
+        kernel = _ProviderAutoApprovingKernel(
             provider=provider,
             broker=broker,
             journal=journal,
@@ -480,7 +578,7 @@ class AgentExecutionKernelTests(unittest.TestCase):
                 return endpoint["turn"]
 
         provider = MutableEndpointProvider()
-        kernel = AgentExecutionKernel(
+        kernel = _ProviderAutoApprovingKernel(
             provider=provider,  # type: ignore[arg-type]
             broker=CapabilityBroker(),
             journal=FakeJournal(),
@@ -905,7 +1003,7 @@ class AgentExecutionKernelTests(unittest.TestCase):
 
         broker = ObservingBroker()
         journal = FakeJournal()
-        kernel = AgentExecutionKernel(
+        kernel = _ProviderAutoApprovingKernel(
             provider=FakeProvider([]),
             broker=broker,
             journal=journal,
@@ -2054,7 +2152,7 @@ class AgentExecutionKernelTests(unittest.TestCase):
                 clock = CountingClock()
                 broker = CountingBroker()
                 journal = FakeJournal()
-                kernel = AgentExecutionKernel(
+                kernel = _ProviderAutoApprovingKernel(
                     provider=FakeProvider([]),
                     broker=broker,
                     journal=journal,
@@ -2839,7 +2937,7 @@ class AgentExecutionKernelTests(unittest.TestCase):
         token = FakeCancellation()
         clock = FakeClock()
         second_provider = FakeProvider([])
-        second = AgentExecutionKernel(
+        second = _ProviderAutoApprovingKernel(
             provider=second_provider,
             broker=broker,
             journal=FakeJournal(),
@@ -2856,7 +2954,7 @@ class AgentExecutionKernelTests(unittest.TestCase):
         def _request_factory():
             return _request(activation, grant)
 
-        first = AgentExecutionKernel(
+        first = _ProviderAutoApprovingKernel(
             provider=FakeProvider([nested]),
             broker=broker,
             journal=FakeJournal(),

@@ -18,13 +18,17 @@ from pathlib import Path
 from unittest import mock
 
 from tests.agent_harness_fakes import FakeCancellation, FakeClock
-from tests.test_agent_execution_kernel import _documents, _kernel, _request
+from tests.test_agent_execution_kernel import (
+    _documents,
+    _kernel,
+    _ProviderAutoApprovingKernel,
+    _request,
+)
 from worldforge.agent_harness import OneShotProviderSupervisor
 from worldforge.agent_harness import process_supervisor as process_supervisor_module
 from worldforge.agent_harness import worker as worker_module
 from worldforge.agent_harness import worker_registry as worker_registry_module
 from worldforge.agent_harness.event_log import AgentEventLog, AgentExecutionCoordinator
-from worldforge.agent_harness.kernel import AgentExecutionKernel
 from worldforge.agent_harness.ports import (
     ProviderBoundaryControl,
     ProviderTurnRequest,
@@ -1203,7 +1207,7 @@ class LinuxOneShotProviderSupervisorTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as temporary, AgentEventLog(temporary) as log:
             supervisor = OneShotProviderSupervisor(turn_timeout_ms=2_000)
-            kernel = AgentExecutionKernel(
+            kernel = _ProviderAutoApprovingKernel(
                 provider=supervisor,
                 broker=_kernel(supervisor)[0].broker,
                 journal=log,
@@ -1330,7 +1334,7 @@ if __name__ == "__main__":
         with tempfile.TemporaryDirectory() as temporary:
             supervisor = OneShotProviderSupervisor(turn_timeout_ms=2_000)
             with AgentEventLog(temporary) as log:
-                kernel = AgentExecutionKernel(
+                kernel = _ProviderAutoApprovingKernel(
                     provider=supervisor,
                     broker=_kernel(supervisor)[0].broker,
                     journal=log,
@@ -1403,7 +1407,7 @@ if __name__ == "__main__":
         provider = OneShotProviderSupervisor(turn_timeout_ms=1_000)
         provider._process_supervisor = IndeterminateProcessSupervisor()  # type: ignore[attr-defined]
         with tempfile.TemporaryDirectory() as temporary, AgentEventLog(temporary) as log:
-            kernel = AgentExecutionKernel(
+            kernel = _ProviderAutoApprovingKernel(
                 provider=provider,
                 broker=_kernel(provider)[0].broker,
                 journal=log,

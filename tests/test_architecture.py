@@ -23,6 +23,19 @@ class ArchitectureTests(unittest.TestCase):
     def test_runtime_has_no_ai_sdk_imports(self) -> None:
         self.assertEqual([], audit_runtime(RUNTIME))
 
+    def test_provider_governance_remains_private_and_documents_unproven_boundaries(self) -> None:
+        adr = ROOT / "docs/decisions/0037-provider-execution-governance.md"
+        text = adr.read_text(encoding="utf-8")
+        self.assertIn("code-owned runtime catalog", text)
+        self.assertIn("four independently bound review facets", text)
+        self.assertIn("public Agent Harness v1", text)
+        self.assertIn("Windows remains unsupported", text)
+        self.assertIn("No real provider", text)
+        self.assertFalse((RUNTIME / "agent_harness").exists())
+        self.assertFalse(
+            any("provider-governance" in path.name for path in (ROOT / "schemas").glob("*"))
+        )
+
     def test_runtime_audit_catches_current_and_dynamic_provider_imports(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

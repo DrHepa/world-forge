@@ -22,7 +22,7 @@
     },
     {
       "category": "migration",
-      "file_sha256": "6712792a8e97a56ab417ce90639198fb7997f764d43627339d94a3264fbb935a",
+      "file_sha256": "c2c53c10d173d15f9d88068be5cce417e41d2d60f60b44f16b700c10e2ba0e20",
       "justification": "The compatibility bridge retains this old public location until the authorized cutover.",
       "offsets": [
         4147,
@@ -999,7 +999,7 @@
     },
     {
       "category": "legacy_contract",
-      "file_sha256": "6261d92688c3722011465963588318452a3b73ffb03743362032650cb5344769",
+      "file_sha256": "d58791222200b58150d84a5fc598917bceac35fbd57dde7ae197406de646d644",
       "justification": "Published legacy format, schema, protocol, or storage identity remains immutable.",
       "offsets": [
         6882,
@@ -2980,14 +2980,14 @@
     },
     {
       "category": "regression_fixture",
-      "file_sha256": "78145ebf5404e0511ccace12f4129b4055f92cf28bf03ecb780c1ae111705bf5",
+      "file_sha256": "b40a1abcdaa261d2cfa1f62e131fda96733a6fbf89cd1b90c6a922657a4f7786",
       "justification": "Regression evidence preserves legacy identity input and reader behavior.",
       "offsets": [
-        12249,
-        12527,
-        13540,
-        14342,
-        20427
+        12953,
+        13231,
+        14244,
+        15046,
+        21131
       ],
       "path": "tests/test_architecture.py",
       "pattern": "rpg-world-forge"

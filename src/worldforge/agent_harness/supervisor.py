@@ -16,7 +16,12 @@ from .worker_protocol import (
     build_request_frame,
     parse_result_frame,
 )
-from .worker_registry import fixed_runtime_identity
+from .worker_registry import (
+    fixed_runtime_identity,
+)
+from .worker_registry import (
+    fixed_runtime_spec as _fixed_runtime_spec,
+)
 
 _MAX_PRIVATE_TURN_TIMEOUT_MS = 60_000
 
@@ -46,6 +51,12 @@ class OneShotProviderSupervisor:
         """Return the exact fixed bootstrap-derived identity without caller aliases."""
 
         return fixed_runtime_identity()
+
+    @property
+    def runtime_spec(self):
+        """Return the exact fixed catalog descriptor without caller aliases."""
+
+        return _fixed_runtime_spec()
 
     @property
     def active_broker_pid(self) -> int | None:

@@ -673,7 +673,8 @@ provider effect. The fixed supervisor's portable private ID is
 `worldforge_conformance_provider`; a frozen private binding supplies fresh
 caller-owned documents, and its content hash derives from the bootstrap template
 built from the same immutable scalars. This adds neither a provider registry nor
-selection authority. See
+selection authority at this layer; ADR-0037 adds a separate private, code-owned
+catalog and approval boundary. See
 [ADR-0034](decisions/0034-exact-provider-runtime-attestation.md).
 
 The next private Harness boundary adds instance-scoped human tool approval and
@@ -724,6 +725,30 @@ Raw values are never durable. Hydration, scope, promotion/truth, retention,
 deletion/tombstones, authenticated reviewers, and durable content remain future
 Studio authorities. See
 [ADR-0036](decisions/0036-approved-hash-only-memory-projection.md).
+
+Provider execution governance is independent of runtime attestation, tool
+approval, and memory approval. A code-owned immutable runtime catalog resolves
+an exact runtime triple and specification; requests cannot inject executable or
+endpoint machinery. Only the fixed Linux conformance descriptor is executable,
+and it is network-free and non-production. Valid networked descriptors are
+still catalog-unavailable because this layer has no enforced egress runtime.
+
+An immutable execution selection binds catalog/spec/configuration, disclosure
+and exact payload, tool catalog, limits, pricing, and opaque credential-revision
+identity. A separate in-memory CAS review has four facets: exact selection;
+destination/egress/telemetry; data classes/base payload; and
+pricing/currency/token/cost. The kernel freezes that resolution and one detached
+decision snapshot before durable begin and includes their hashes only in its
+private fingerprint. Cancellation/deadline/duration precede runtime matching;
+runtime matching precedes provider approval; provider approval precedes tool and
+broker authority. Late decisions are not adopted, and live revocation is polled
+through the Linux process boundary after valid usage accounting. Exact terminal
+duplicates return durable evidence before live revocation. Governance failures
+reuse public `provider_failed`; detailed approval state, reviewer labels, and
+credential metadata never enter workers, public records, or SQLite. No real
+adapter, SDK, network call, secret service, authenticated Studio approval,
+billing proof, or Windows worker is implemented. See
+[ADR-0037](decisions/0037-provider-execution-governance.md).
 
 Slice 2B retains the closed, identity/evidence-only plan, observation, and report
 boundary for an optional codebase-memory comparison and adds a pure evaluator

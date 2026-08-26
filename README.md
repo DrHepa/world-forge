@@ -895,8 +895,9 @@ or memory corruption in a hostile host. A newly begun activation mismatch
 records the existing `failed` / `provider_failed` receipt without activating the
 broker, provider, worker, tools, or proposals; cancellation and deadline keep
 their precedence. Matching execution binds the receipt to the same runtime, and
-an exact terminal duplicate performs no new binding read or worker spawn. The
-Harness still has no provider registry or selection authority. The fixed
+an exact terminal duplicate performs no new binding read or worker spawn. This
+attestation layer does not select a provider; the later private governance
+catalog in ADR-0037 supplies that separate authority. The fixed
 conformance runtime uses the activation-compatible private ID
 `worldforge_conformance_provider`; its frozen private scalars produce fresh
 caller-owned identity documents, and its hash remains pinned to the bootstrap
@@ -941,6 +942,26 @@ truth promotion, retention/deletion, authenticated review, and durable raw
 content remain Studio-owned and unimplemented. Public Harness bytes, worker
 protocol, runtime revision, and receipt replay claims remain unchanged. See
 [ADR-0036](docs/decisions/0036-approved-hash-only-memory-projection.md).
+
+Provider execution now has a separate private gate before any real adapter can
+be added. A code-owned immutable catalog resolves only an exact runtime triple;
+it never accepts a command, module, path, factory, SDK, URL, or environment from
+an execution request. Its sole executable entry is the Linux-only,
+network-free, non-production conformance worker. An immutable selection binds
+the catalog/spec, non-secret configuration, disclosure plan and data classes,
+base payload, tool catalog, limits, pricing, and an opaque credential-revision
+identity. A distinct in-memory CAS authority reviews four exact facets:
+selection, destination/egress/telemetry, disclosed data, and pricing/cost.
+The kernel fingerprints one detached decision snapshot before durable begin;
+late decisions are not adopted, revocation can stop a blocked Linux worker, and
+exact terminal duplicates remain evidence-only after revocation. Missing,
+denied, expired, revoked, or stale provider authority collapses publicly to the
+existing `provider_failed` code. Secret credential bytes are never accepted.
+Networked descriptors remain unavailable until enforcement exists. This adds
+no real provider, SDK, network call, credential vault, authenticated Studio
+reviewer, Windows support, or production claim. Public Harness v1 bytes remain
+unchanged. See
+[ADR-0037](docs/decisions/0037-provider-execution-governance.md).
 
 Slice 2B adds a pure deterministic evaluator and explicit-input, atomic
 no-replace CLI for the closed recorded-result plan, observation, and report

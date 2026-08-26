@@ -29,6 +29,8 @@ class ExecutionRequest:
     limits: ExecutionLimits
     private_input: object = None
     approval_id: str | None = None
+    provider_approval_id: str | None = None
+    provider_selection: object = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -20,7 +20,12 @@ from tests.agent_harness_fakes import (
     FakeProvider,
     FakeTool,
 )
-from tests.test_agent_execution_kernel import _documents, _request, _usage
+from tests.test_agent_execution_kernel import (
+    _documents,
+    _ProviderAutoApprovingKernel,
+    _request,
+    _usage,
+)
 from worldforge.agent_harness import (
     AgentEventLog,
     AgentExecutionCoordinator,
@@ -487,7 +492,7 @@ def _approval_kernel(
     cancellation: FakeCancellation | None = None,
 ) -> tuple[AgentExecutionKernel, InMemoryHumanApprovalAuthority]:
     authority = authority or InMemoryHumanApprovalAuthority()
-    kernel = AgentExecutionKernel(
+    kernel = _ProviderAutoApprovingKernel(
         provider=provider,
         broker=CapabilityBroker(tools=tools),
         journal=journal or FakeJournal(),
@@ -543,7 +548,7 @@ class KernelApprovalAndProgressiveExposureTests(unittest.TestCase):
                 return begun
 
         with tempfile.TemporaryDirectory() as temporary, DecidingBeginJournal(temporary) as journal:
-            kernel = AgentExecutionKernel(
+            kernel = _ProviderAutoApprovingKernel(
                 provider=provider,
                 broker=CapabilityBroker(tools=(tool,)),
                 journal=journal,
@@ -566,7 +571,7 @@ class KernelApprovalAndProgressiveExposureTests(unittest.TestCase):
             self.assertIsNotNone(replayed.receipt_bytes)
 
             retry_provider = FakeProvider([])
-            retry_kernel = AgentExecutionKernel(
+            retry_kernel = _ProviderAutoApprovingKernel(
                 provider=retry_provider,
                 broker=CapabilityBroker(tools=(tool,)),
                 journal=journal,
@@ -595,7 +600,7 @@ class KernelApprovalAndProgressiveExposureTests(unittest.TestCase):
                 return begun
 
         journal = BlockingBeginJournal()
-        kernel = AgentExecutionKernel(
+        kernel = _ProviderAutoApprovingKernel(
             provider=provider,
             broker=CapabilityBroker(
                 tools=(FakeTool("source.read", "tool.invoke", ToolResult("unused")),)
@@ -717,7 +722,7 @@ class KernelApprovalAndProgressiveExposureTests(unittest.TestCase):
         world = FakeTool("world.validate", "tool.invoke", ToolResult("world"))
 
         missing_provider = FakeProvider([])
-        missing = AgentExecutionKernel(
+        missing = _ProviderAutoApprovingKernel(
             provider=missing_provider,
             broker=CapabilityBroker(tools=(source, world)),
             journal=FakeJournal(),
@@ -926,6 +931,50 @@ class KernelApprovalAndProgressiveExposureTests(unittest.TestCase):
             self.assertEqual("existing_terminal", second.disposition)
             self.assertEqual(1, len(provider.requests))
             self.assertEqual([], tool.calls)
+
+    def test_unused_approval_identifier_and_authority_presence_still_bind_fingerprint(
+        self,
+    ) -> None:
+        activation, grant = _documents(capabilities=[], tools=[])
+        first_request = replace(
+            _request(activation, grant),
+            approval_id="approval_unused_first",
+        )
+        changed_request = replace(first_request, approval_id="approval_unused_second")
+        with tempfile.TemporaryDirectory() as temporary, AgentEventLog(temporary) as log:
+            provider = FakeProvider([ProviderTurnResult("done", _usage(), completed=True)])
+            kernel = _ProviderAutoApprovingKernel(
+                provider=provider,
+                broker=CapabilityBroker(),
+                journal=log,
+                clock=FakeClock(),
+                cancellation=FakeCancellation(),
+            )
+            coordinator = AgentExecutionCoordinator(kernel=kernel, event_log=log)
+            first = coordinator.execute(first_request)
+            duplicate = coordinator.execute(first_request)
+            self.assertEqual("executed", first.disposition)
+            self.assertEqual("existing_terminal", duplicate.disposition)
+            with self.assertRaisesRegex(KernelError, "journal_begin_ambiguous"):
+                coordinator.execute(changed_request)
+            self.assertEqual(1, len(provider.requests))
+
+        fingerprints: list[str] = []
+        for authority in (None, InMemoryHumanApprovalAuthority()):
+            journal = FakeJournal()
+            kernel = _ProviderAutoApprovingKernel(
+                provider=FakeProvider([ProviderTurnResult("done", _usage(), completed=True)]),
+                broker=CapabilityBroker(),
+                journal=journal,
+                clock=FakeClock(),
+                cancellation=FakeCancellation(),
+                approval_authority=authority,
+            )
+            self.assertEqual("succeeded", kernel.execute(_request(activation, grant)).outcome)
+            fingerprint = journal.begin_calls[0][-1]
+            assert fingerprint is not None
+            fingerprints.append(fingerprint)
+        self.assertNotEqual(*fingerprints)
 
     def test_same_execution_with_a_different_decision_conflicts_before_provider(self) -> None:
         activation, grant = _documents(capabilities=["tool.invoke"], tools=["source.read"])
@@ -1176,7 +1225,7 @@ class KernelApprovalAndProgressiveExposureTests(unittest.TestCase):
             ]
         )
         authority = InMemoryHumanApprovalAuthority()
-        kernel = AgentExecutionKernel(
+        kernel = _ProviderAutoApprovingKernel(
             provider=provider,
             broker=CapabilityBroker(
                 tools=(FakeTool("source.read", "tool.invoke", ToolResult("unused")),),
@@ -1202,7 +1251,7 @@ class KernelApprovalAndProgressiveExposureTests(unittest.TestCase):
             [],
             runtime_binding={"id": "other_runtime", "revision": 1, "content_hash": "0" * 64},
         )
-        mismatch = AgentExecutionKernel(
+        mismatch = _ProviderAutoApprovingKernel(
             provider=mismatch_provider,
             broker=CapabilityBroker(
                 tools=(FakeTool("source.read", "tool.invoke", ToolResult("unused")),)
@@ -1224,7 +1273,7 @@ class KernelApprovalAndProgressiveExposureTests(unittest.TestCase):
 
         def build_kernel(provider, tool, *, artifact_port=None, memory_port=None):
             authority = InMemoryHumanApprovalAuthority()
-            kernel = AgentExecutionKernel(
+            kernel = _ProviderAutoApprovingKernel(
                 provider=provider,
                 broker=CapabilityBroker(
                     tools=(tool,),
@@ -1366,7 +1415,7 @@ class KernelApprovalAndProgressiveExposureTests(unittest.TestCase):
         first_provider = FakeProvider([ProviderTurnResult("complete", _usage(), completed=True)])
         with tempfile.TemporaryDirectory() as temporary, AgentEventLog(temporary) as log:
             first_authority = InMemoryHumanApprovalAuthority()
-            first_kernel = AgentExecutionKernel(
+            first_kernel = _ProviderAutoApprovingKernel(
                 provider=first_provider,
                 broker=CapabilityBroker(tools=(first_tool,)),
                 journal=log,
@@ -1414,7 +1463,7 @@ class KernelApprovalAndProgressiveExposureTests(unittest.TestCase):
             )
             changed_provider = FakeProvider([])
             changed_authority = InMemoryHumanApprovalAuthority()
-            changed_kernel = AgentExecutionKernel(
+            changed_kernel = _ProviderAutoApprovingKernel(
                 provider=changed_provider,
                 broker=CapabilityBroker(tools=(changed_tool,)),
                 journal=log,
@@ -1793,7 +1842,7 @@ class NativeApprovalRevocationTests(unittest.TestCase):
         )
         supervisor = OneShotProviderSupervisor(turn_timeout_ms=5_000)
         authority = InMemoryHumanApprovalAuthority()
-        kernel = AgentExecutionKernel(
+        kernel = _ProviderAutoApprovingKernel(
             provider=supervisor,
             broker=CapabilityBroker(
                 tools=(FakeTool("source.read", "tool.invoke", ToolResult("unused")),)
@@ -1869,7 +1918,7 @@ class NativeApprovalRevocationTests(unittest.TestCase):
         )
         supervisor = OneShotProviderSupervisor(turn_timeout_ms=5_000)
         authority = InMemoryHumanApprovalAuthority()
-        kernel = AgentExecutionKernel(
+        kernel = _ProviderAutoApprovingKernel(
             provider=supervisor,
             broker=CapabilityBroker(
                 tools=(FakeTool("source.read", "tool.invoke", ToolResult("unused")),)
@@ -1954,7 +2003,7 @@ class NativeApprovalRevocationTests(unittest.TestCase):
         )
         supervisor = OneShotProviderSupervisor(turn_timeout_ms=3_000)
         authority = InMemoryHumanApprovalAuthority()
-        kernel = AgentExecutionKernel(
+        kernel = _ProviderAutoApprovingKernel(
             provider=supervisor,
             broker=CapabilityBroker(tools=(tool,)),
             journal=FakeJournal(),

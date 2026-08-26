@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 
+from .provider_catalog import ProviderRuntimeCatalog, ProviderRuntimeSpec
 from .worker import (
     _CONFORMANCE_RUNTIME_ID,
     _CONFORMANCE_RUNTIME_REVISION,
@@ -24,6 +25,28 @@ _FIXED_RUNTIME_BINDING = _FixedRuntimeBinding(
     revision=_CONFORMANCE_RUNTIME_REVISION,
     content_hash=hashlib.sha256(WORKER_BOOTSTRAP_TEMPLATE.encode("utf-8")).hexdigest(),
 )
+
+_FIXED_RUNTIME_SPEC = ProviderRuntimeSpec.create(
+    runtime_id=_FIXED_RUNTIME_BINDING.identifier,
+    runtime_revision=_FIXED_RUNTIME_BINDING.revision,
+    runtime_content_hash=_FIXED_RUNTIME_BINDING.content_hash,
+    provider_id="worldforge",
+    model_id="conformance",
+    model_version=str(_FIXED_RUNTIME_BINDING.revision),
+    deployment_class="local",
+    network_scope="none",
+    endpoint_origin=None,
+    endpoint_policy_hash=None,
+    egress_enforcement_hash=None,
+    telemetry_attestation_hash=None,
+    pricing_policy_hash=None,
+    pricing_currency=None,
+    credential_requirement_hash=None,
+    redirects_disabled=True,
+    supported_platforms=("linux",),
+    production_eligible=False,
+)
+_FIXED_PROVIDER_CATALOG = ProviderRuntimeCatalog.create((_FIXED_RUNTIME_SPEC,))
 
 
 def _bind_fixed_runtime(binding: _FixedRuntimeBinding):
@@ -55,4 +78,16 @@ fixed_runtime_identity, _matches_fixed_runtime = _bind_fixed_runtime(_FIXED_RUNT
 del _bind_fixed_runtime
 
 
-__all__ = ("fixed_runtime_identity",)
+def fixed_runtime_spec() -> ProviderRuntimeSpec:
+    """Return a detached copy of the only code-owned executable descriptor."""
+
+    return _FIXED_PROVIDER_CATALOG.specs[0]
+
+
+def fixed_provider_catalog() -> ProviderRuntimeCatalog:
+    """Return the immutable catalog containing only the conformance runtime."""
+
+    return _FIXED_PROVIDER_CATALOG.snapshot()
+
+
+__all__ = ("fixed_provider_catalog", "fixed_runtime_identity", "fixed_runtime_spec")

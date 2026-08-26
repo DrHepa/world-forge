@@ -1,4 +1,4 @@
-"""OS-owned containment for one fixed conformance provider turn."""
+"""OS-owned containment for one exact code-owned provider turn."""
 
 from __future__ import annotations
 
@@ -23,10 +23,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .ports import ProviderBoundaryControl
-from .worker import WORKER_BOOTSTRAP
 from .worker_protocol import (
     MAX_WORKER_RESPONSE_BYTES,
     MAX_WORKER_STDERR_BYTES,
+)
+from .worker_registry import (
+    _CodeOwnedRuntimeEntry,
+    _CodeOwnedRuntimeKey,
+    runtime_entry,
 )
 
 _CONTROL_FORMAT = "world-forge.private.worker_broker_control"
@@ -343,23 +347,79 @@ def _recv_control_frame(stream: socket.socket) -> bytes:
     return _recv_exact(stream, size)
 
 
-def _minimal_environment() -> dict[str, str]:
-    return {
-        "ANTHROPIC_DISABLE_TELEMETRY": "1",
-        "DO_NOT_TRACK": "1",
-        "HF_HUB_DISABLE_TELEMETRY": "1",
-        "OPENAI_DISABLE_TELEMETRY": "1",
-        "PYTHONDONTWRITEBYTECODE": "1",
-        "PYTHONIOENCODING": "utf-8",
-        "PYTHONUTF8": "1",
-    }
+def _minimal_environment(
+    runtime_key: _CodeOwnedRuntimeKey = _CodeOwnedRuntimeKey.CONFORMANCE,
+    *,
+    runtime_authority: _CodeOwnedRuntimeEntry | None = None,
+) -> dict[str, str]:
+    authority = _resolve_runtime_authority(runtime_key, runtime_authority)
+    try:
+        return dict(tuple.__iter__(authority.environment_profile))
+    except Exception:
+        raise ProviderBoundaryFailure() from None
 
 
-def fixed_worker_command() -> tuple[str, ...]:
+def fixed_worker_command(
+    runtime_key: _CodeOwnedRuntimeKey = _CodeOwnedRuntimeKey.CONFORMANCE,
+    *,
+    runtime_authority: _CodeOwnedRuntimeEntry | None = None,
+) -> tuple[str, ...]:
+    authority = _resolve_runtime_authority(runtime_key, runtime_authority)
     executable = os.path.abspath(sys.executable)
     if not os.path.isabs(executable) or not os.path.isfile(executable):
         raise ProviderBoundaryUnsupported()
-    return (executable, "-I", "-B", "-S", "-u", "-X", "utf8", "-c", WORKER_BOOTSTRAP)
+    try:
+        bootstrap = authority.artifact.bootstrap_source
+    except Exception:
+        raise ProviderBoundaryFailure() from None
+    return (executable, "-I", "-B", "-S", "-u", "-X", "utf8", "-c", bootstrap)
+
+
+def _resolve_runtime_authority(
+    runtime_key: object,
+    runtime_authority: _CodeOwnedRuntimeEntry | None,
+) -> _CodeOwnedRuntimeEntry:
+    if type(runtime_key) is not _CodeOwnedRuntimeKey:
+        raise ProviderBoundaryFailure()
+    if runtime_authority is not None:
+        if (
+            type(runtime_authority) is not _CodeOwnedRuntimeEntry
+            or runtime_authority.key is not runtime_key
+        ):
+            raise ProviderBoundaryFailure()
+        return runtime_authority
+    try:
+        return runtime_entry(runtime_key)
+    except RuntimeError:
+        raise ProviderBoundaryFailure() from None
+
+
+@dataclass(frozen=True, slots=True)
+class _CodeOwnedRuntimeLaunch:
+    authority: _CodeOwnedRuntimeEntry
+    command: tuple[str, ...]
+    environment: tuple[tuple[str, str], ...]
+
+
+def _capture_runtime_launch(
+    authority: _CodeOwnedRuntimeEntry,
+) -> _CodeOwnedRuntimeLaunch:
+    if type(authority) is not _CodeOwnedRuntimeEntry:
+        raise ProviderBoundaryFailure()
+    command = fixed_worker_command(authority.key, runtime_authority=authority)
+    environment = tuple(authority.environment_profile)
+    if (
+        type(command) is not tuple
+        or len(command) != 9
+        or any(type(part) is not str for part in command)
+        or type(environment) is not tuple
+        or any(
+            type(item) is not tuple or len(item) != 2 or any(type(part) is not str for part in item)
+            for item in environment
+        )
+    ):
+        raise ProviderBoundaryFailure()
+    return _CodeOwnedRuntimeLaunch(authority, command, environment)
 
 
 def _proc_identity(pid: int) -> tuple[int, int, str] | None:
@@ -838,12 +898,15 @@ def _read_pipe_nonblocking(stream: object, maximum: int, buffer: bytearray) -> b
 def _linux_broker_main(
     control_fd: int,
     *,
+    runtime_launch: _CodeOwnedRuntimeLaunch,
     broker_key: bytes,
     broker_nonce: str,
     worker_key: bytes,
     request_frame: bytes,
     scratch: str,
 ) -> int:
+    if type(runtime_launch) is not _CodeOwnedRuntimeLaunch:
+        raise ProviderBoundaryIndeterminate()
     control = socket.socket(fileno=control_fd)
     control.setblocking(False)
     reader = _ControlReader(control)
@@ -858,12 +921,12 @@ def _linux_broker_main(
         if not os.path.isabs(scratch) or not os.path.isdir(scratch):
             raise ProviderBoundaryIndeterminate()
         process = subprocess.Popen(
-            fixed_worker_command(),
+            runtime_launch.command,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             cwd=scratch,
-            env=_minimal_environment(),
+            env=dict(runtime_launch.environment),
             shell=False,
             close_fds=True,
         )
@@ -1076,6 +1139,7 @@ def _linux_broker_main(
 
 def _linux_broker_process_entry(
     control: socket.socket,
+    runtime_launch: _CodeOwnedRuntimeLaunch,
     broker_key: bytes,
     broker_nonce: str,
     worker_key: bytes,
@@ -1093,8 +1157,11 @@ def _linux_broker_process_entry(
             kind="start",
             sequence=0,
         )
+        if type(runtime_launch) is not _CodeOwnedRuntimeLaunch:
+            raise ProviderBoundaryIndeterminate()
         code = _linux_broker_main(
             gate.detach(),
+            runtime_launch=runtime_launch,
             broker_key=broker_key,
             broker_nonce=broker_nonce,
             worker_key=worker_key,
@@ -1134,13 +1201,20 @@ def _remove_scratch(path: str) -> bool:
 class LinuxProcessSupervisor:
     """A per-turn subreaper broker whose private domain contains only one worker tree."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, runtime_launch: _CodeOwnedRuntimeLaunch | None = None) -> None:
         if not sys.platform.startswith("linux") or not Path("/proc/self/stat").is_file():
             raise ProviderBoundaryUnsupported()
         if not callable(getattr(os, "pidfd_open", None)) or not callable(
             getattr(signal, "pidfd_send_signal", None)
         ):
             raise ProviderBoundaryUnsupported()
+        if runtime_launch is None:
+            runtime_launch = _capture_runtime_launch(
+                runtime_entry(_CodeOwnedRuntimeKey.CONFORMANCE)
+            )
+        elif type(runtime_launch) is not _CodeOwnedRuntimeLaunch:
+            raise ProviderBoundaryFailure()
+        self._runtime_launch = runtime_launch
         self.spawn_count = 0
         self.active_broker_pid: int | None = None
         self.active_worker_pid: int | None = None
@@ -1206,7 +1280,18 @@ class LinuxProcessSupervisor:
         worker_key: bytes,
         boundary: ProviderBoundaryControl,
         turn_timeout_ms: int,
+        runtime_key: _CodeOwnedRuntimeKey = _CodeOwnedRuntimeKey.CONFORMANCE,
+        runtime_launch: _CodeOwnedRuntimeLaunch | None = None,
     ) -> _BrokerReport:
+        if type(runtime_key) is not _CodeOwnedRuntimeKey:
+            raise ProviderBoundaryFailure()
+        if runtime_launch is None:
+            runtime_launch = self._runtime_launch
+        if (
+            type(runtime_launch) is not _CodeOwnedRuntimeLaunch
+            or runtime_launch.authority.key is not runtime_key
+        ):
+            raise ProviderBoundaryFailure()
         started = time.monotonic()
         scratch: str | None = None
         original: BaseException | None = None
@@ -1218,6 +1303,7 @@ class LinuxProcessSupervisor:
                 worker_key=worker_key,
                 boundary=boundary,
                 turn_timeout_ms=turn_timeout_ms,
+                runtime_launch=runtime_launch,
                 scratch=scratch,
                 started=started,
             )
@@ -1251,6 +1337,7 @@ class LinuxProcessSupervisor:
         worker_key: bytes,
         boundary: ProviderBoundaryControl,
         turn_timeout_ms: int,
+        runtime_launch: _CodeOwnedRuntimeLaunch,
         scratch: str,
         started: float,
     ) -> _BrokerReport:
@@ -1273,7 +1360,15 @@ class LinuxProcessSupervisor:
             context = multiprocessing.get_context("spawn")
             broker = context.Process(
                 target=_linux_broker_process_entry,
-                args=(child, broker_key, broker_nonce, worker_key, request_frame, scratch),
+                args=(
+                    child,
+                    runtime_launch,
+                    broker_key,
+                    broker_nonce,
+                    worker_key,
+                    request_frame,
+                    scratch,
+                ),
                 daemon=False,
             )
             broker.start()

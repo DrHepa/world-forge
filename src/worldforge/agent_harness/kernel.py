@@ -66,7 +66,7 @@ from .provider_governance import (
     ProviderGovernanceSnapshot,
 )
 from .records import build_event, build_receipt
-from .worker_registry import fixed_provider_catalog
+from .worker_registry import code_owned_provider_catalog
 
 _PORTABLE_ID_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -688,7 +688,7 @@ class AgentExecutionKernel:
         except ProviderCatalogError:
             raise KernelError("provider_catalog_invalid") from None
         if frozen_provider_catalog is not None:
-            fixed_catalog = fixed_provider_catalog()
+            fixed_catalog = code_owned_provider_catalog()
             if (
                 frozen_provider_catalog.catalog_hash != fixed_catalog.catalog_hash
                 or frozen_provider_catalog.specs != fixed_catalog.specs

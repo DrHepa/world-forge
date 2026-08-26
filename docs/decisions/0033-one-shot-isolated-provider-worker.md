@@ -3,6 +3,10 @@
 - Status: accepted
 - Date: 2026-08-25
 
+> Supersession note: ADR-0038 preserves this conformance runtime and containment
+> contract byte-for-byte while adding one second code-owned offline probe behind
+> the same enum-only supervisor boundary.
+
 ## Context
 
 ADR-0031 proves only cooperative, in-process provider turns. ADR-0032 can retain

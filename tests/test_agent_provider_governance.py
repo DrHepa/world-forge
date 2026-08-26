@@ -41,8 +41,10 @@ from worldforge.agent_harness.provider_governance import (
 )
 from worldforge.agent_harness.supervisor import OneShotProviderSupervisor
 from worldforge.agent_harness.worker_registry import (
+    _CodeOwnedRuntimeKey,
     fixed_provider_catalog,
     fixed_runtime_spec,
+    runtime_spec,
 )
 
 H0 = "0" * 64
@@ -727,21 +729,22 @@ class ProviderGovernanceKernelTests(unittest.TestCase):
             expected_review_hash=review.content_hash,
         )
 
-    def test_fixed_supervisor_binds_the_only_nonproduction_catalog_descriptor(self) -> None:
+    def test_default_supervisor_binds_conformance_in_closed_nonproduction_catalog(self) -> None:
         spec = fixed_runtime_spec()
+        probe = runtime_spec(_CodeOwnedRuntimeKey.DETERMINISTIC_PROBE)
         catalog = fixed_provider_catalog()
         supervisor = OneShotProviderSupervisor(turn_timeout_ms=1_000)
         self.assertEqual("none", spec.network_scope)
         self.assertFalse(spec.production_eligible)
         self.assertEqual(spec.runtime_binding, supervisor.runtime_binding)
         self.assertEqual(spec, supervisor.runtime_spec)
-        self.assertEqual((spec,), catalog.specs)
+        self.assertEqual((spec, probe), catalog.specs)
 
         leaked = supervisor.runtime_spec
         object.__setattr__(leaked, "model_id", "forged")
         self.assertEqual("conformance", supervisor.runtime_spec.model_id)
 
-    def test_kernel_rejects_any_catalog_other_than_the_fixed_conformance_catalog(self) -> None:
+    def test_kernel_rejects_any_catalog_other_than_the_closed_code_owned_catalog(self) -> None:
         fixed = fixed_runtime_spec()
         values = {
             field: getattr(fixed, field)

@@ -1,93 +1,329 @@
-"""Fixed private worker registry for the non-production conformance runtime."""
+"""Closed private registry for code-owned, offline provider workers."""
 
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, replace
+from enum import Enum
 
-from .provider_catalog import ProviderRuntimeCatalog, ProviderRuntimeSpec
-from .worker import (
-    _CONFORMANCE_RUNTIME_ID,
-    _CONFORMANCE_RUNTIME_REVISION,
-    WORKER_BOOTSTRAP_TEMPLATE,
+from .provider_catalog import (
+    ProviderCatalogError,
+    ProviderRuntimeCatalog,
+    ProviderRuntimeSpec,
 )
+from .worker import (
+    RUNTIME_CONTENT_HASH_TOKEN,
+    _conformance_worker_artifact,
+    _deterministic_probe_worker_artifact,
+    _WorkerArtifact,
+)
+
+_REGISTRY_ERROR = "code_owned_runtime_registry_invalid"
+_PROTOCOL_VERSION = 1
+_ENVIRONMENT_PROFILE = (
+    ("ANTHROPIC_DISABLE_TELEMETRY", "1"),
+    ("DO_NOT_TRACK", "1"),
+    ("HF_HUB_DISABLE_TELEMETRY", "1"),
+    ("OPENAI_DISABLE_TELEMETRY", "1"),
+    ("PYTHONDONTWRITEBYTECODE", "1"),
+    ("PYTHONIOENCODING", "utf-8"),
+    ("PYTHONUTF8", "1"),
+)
+
+
+class _CodeOwnedRuntimeKey(Enum):
+    CONFORMANCE = "conformance"
+    DETERMINISTIC_PROBE = "deterministic_probe"
 
 
 @dataclass(frozen=True, slots=True)
-class _FixedRuntimeBinding:
-    identifier: str
-    revision: int
-    content_hash: str
+class _CodeOwnedRuntimeEntry:
+    key: _CodeOwnedRuntimeKey
+    artifact: _WorkerArtifact
+    spec: ProviderRuntimeSpec
+    environment_profile: tuple[tuple[str, str], ...]
 
+    @property
+    def identifier(self) -> str:
+        return self.artifact.identifier
 
-_FIXED_RUNTIME_BINDING = _FixedRuntimeBinding(
-    identifier=_CONFORMANCE_RUNTIME_ID,
-    revision=_CONFORMANCE_RUNTIME_REVISION,
-    content_hash=hashlib.sha256(WORKER_BOOTSTRAP_TEMPLATE.encode("utf-8")).hexdigest(),
-)
+    @property
+    def revision(self) -> int:
+        return self.artifact.revision
 
-_FIXED_RUNTIME_SPEC = ProviderRuntimeSpec.create(
-    runtime_id=_FIXED_RUNTIME_BINDING.identifier,
-    runtime_revision=_FIXED_RUNTIME_BINDING.revision,
-    runtime_content_hash=_FIXED_RUNTIME_BINDING.content_hash,
-    provider_id="worldforge",
-    model_id="conformance",
-    model_version=str(_FIXED_RUNTIME_BINDING.revision),
-    deployment_class="local",
-    network_scope="none",
-    endpoint_origin=None,
-    endpoint_policy_hash=None,
-    egress_enforcement_hash=None,
-    telemetry_attestation_hash=None,
-    pricing_policy_hash=None,
-    pricing_currency=None,
-    credential_requirement_hash=None,
-    redirects_disabled=True,
-    supported_platforms=("linux",),
-    production_eligible=False,
-)
-_FIXED_PROVIDER_CATALOG = ProviderRuntimeCatalog.create((_FIXED_RUNTIME_SPEC,))
+    @property
+    def protocol_version(self) -> int:
+        return self.artifact.protocol_version
 
+    @property
+    def bootstrap_template(self) -> str:
+        return self.artifact.bootstrap_template
 
-def _bind_fixed_runtime(binding: _FixedRuntimeBinding):
-    def identity() -> dict[str, object]:
-        """Return a fresh code-owned identity; callers cannot select a runtime."""
+    @property
+    def bootstrap_source(self) -> str:
+        return self.artifact.bootstrap_source
 
+    @property
+    def content_hash(self) -> str:
+        return self.artifact.content_hash
+
+    @property
+    def runtime_binding(self) -> dict[str, object]:
         return {
-            "id": binding.identifier,
-            "revision": binding.revision,
-            "content_hash": binding.content_hash,
+            "id": self.identifier,
+            "revision": self.revision,
+            "content_hash": self.content_hash,
         }
 
-    def matches(value: object) -> bool:
-        return (
-            type(value) is dict
-            and set(value) == {"id", "revision", "content_hash"}
-            and type(value["id"]) is str
-            and value["id"] == binding.identifier
-            and type(value["revision"]) is int
-            and value["revision"] == binding.revision
-            and type(value["content_hash"]) is str
-            and value["content_hash"] == binding.content_hash
+
+def _expected_spec(
+    key: _CodeOwnedRuntimeKey,
+    artifact: _WorkerArtifact,
+) -> ProviderRuntimeSpec:
+    if key is _CodeOwnedRuntimeKey.CONFORMANCE:
+        model_id = "conformance"
+    elif key is _CodeOwnedRuntimeKey.DETERMINISTIC_PROBE:
+        model_id = "deterministic_probe"
+    else:
+        raise RuntimeError(_REGISTRY_ERROR)
+    return ProviderRuntimeSpec.create(
+        runtime_id=artifact.identifier,
+        runtime_revision=artifact.revision,
+        runtime_content_hash=artifact.content_hash,
+        provider_id="worldforge",
+        model_id=model_id,
+        model_version=str(artifact.revision),
+        deployment_class="local",
+        network_scope="none",
+        endpoint_origin=None,
+        endpoint_policy_hash=None,
+        egress_enforcement_hash=None,
+        telemetry_attestation_hash=None,
+        pricing_policy_hash=None,
+        pricing_currency=None,
+        credential_requirement_hash=None,
+        redirects_disabled=True,
+        supported_platforms=("linux",),
+        production_eligible=False,
+    )
+
+
+def _validate_artifact(value: object) -> _WorkerArtifact:
+    if type(value) is not _WorkerArtifact:
+        raise RuntimeError(_REGISTRY_ERROR)
+    if (
+        type(value.identifier) is not str
+        or type(value.revision) is not int
+        or type(value.protocol_version) is not int
+        or value.protocol_version != _PROTOCOL_VERSION
+        or type(value.bootstrap_template) is not str
+        or type(value.bootstrap_source) is not str
+        or type(value.content_hash) is not str
+        or len(value.content_hash) != 64
+        or any(character not in "0123456789abcdef" for character in value.content_hash)
+        or value.bootstrap_template.count(RUNTIME_CONTENT_HASH_TOKEN) != 1
+        or RUNTIME_CONTENT_HASH_TOKEN in value.bootstrap_source
+        or value.bootstrap_source.count(value.content_hash) != 1
+        or value.content_hash
+        != hashlib.sha256(value.bootstrap_template.encode("utf-8")).hexdigest()
+        or value.bootstrap_source
+        != value.bootstrap_template.replace(RUNTIME_CONTENT_HASH_TOKEN, value.content_hash)
+    ):
+        raise RuntimeError(_REGISTRY_ERROR)
+    return replace(value)
+
+
+def _build_entry(
+    key: _CodeOwnedRuntimeKey,
+    factory: Callable[[], _WorkerArtifact],
+) -> _CodeOwnedRuntimeEntry:
+    if type(key) is not _CodeOwnedRuntimeKey or not callable(factory):
+        raise RuntimeError(_REGISTRY_ERROR)
+    try:
+        artifact = _validate_artifact(factory())
+    except Exception:
+        raise RuntimeError(_REGISTRY_ERROR) from None
+    return _CodeOwnedRuntimeEntry(
+        key=key,
+        artifact=artifact,
+        spec=_expected_spec(key, artifact),
+        environment_profile=_ENVIRONMENT_PROFILE,
+    )
+
+
+_RUNTIME_ENTRIES = (
+    _build_entry(_CodeOwnedRuntimeKey.CONFORMANCE, _conformance_worker_artifact),
+    _build_entry(
+        _CodeOwnedRuntimeKey.DETERMINISTIC_PROBE,
+        _deterministic_probe_worker_artifact,
+    ),
+)
+# Factories are construction-only. Runtime command, protocol, and dispatch paths
+# retain only the validated immutable artifacts above.
+del _conformance_worker_artifact
+del _deterministic_probe_worker_artifact
+
+_CANONICAL_ENTRY_SNAPSHOTS = tuple(
+    (
+        entry.key,
+        replace(entry.artifact),
+        replace(entry.spec),
+        tuple(entry.environment_profile),
+    )
+    for entry in _RUNTIME_ENTRIES
+)
+
+
+def _validate_entry(value: object) -> _CodeOwnedRuntimeEntry:
+    if type(value) is not _CodeOwnedRuntimeEntry or type(value.key) is not _CodeOwnedRuntimeKey:
+        raise RuntimeError(_REGISTRY_ERROR)
+    canonical_matches = tuple(
+        snapshot for snapshot in _CANONICAL_ENTRY_SNAPSHOTS if snapshot[0] is value.key
+    )
+    if len(canonical_matches) != 1:
+        raise RuntimeError(_REGISTRY_ERROR)
+    _canonical_key, canonical_artifact, canonical_spec, canonical_environment = canonical_matches[0]
+    try:
+        artifact = _validate_artifact(value.artifact)
+        expected_spec = _expected_spec(value.key, artifact)
+        supplied_spec = ProviderRuntimeCatalog.create((value.spec,)).specs[0]
+    except Exception:
+        raise RuntimeError(_REGISTRY_ERROR) from None
+    if (
+        type(value.artifact) is not _WorkerArtifact
+        or type(value.environment_profile) is not tuple
+        or any(
+            type(item) is not tuple or len(item) != 2 or any(type(part) is not str for part in item)
+            for item in tuple.__iter__(value.environment_profile)
         )
+        or tuple(tuple.__iter__(value.environment_profile)) != _ENVIRONMENT_PROFILE
+        or artifact != canonical_artifact
+        or supplied_spec != canonical_spec
+        or tuple(value.environment_profile) != canonical_environment
+        or supplied_spec != expected_spec
+        or value.spec != supplied_spec
+        or value.runtime_binding != expected_spec.runtime_binding
+    ):
+        raise RuntimeError(_REGISTRY_ERROR)
+    return replace(
+        value,
+        artifact=replace(artifact),
+        spec=replace(expected_spec),
+        environment_profile=tuple(value.environment_profile),
+    )
 
-    return identity, matches
+
+def _validated_entries() -> tuple[_CodeOwnedRuntimeEntry, ...]:
+    if type(_RUNTIME_ENTRIES) is not tuple:
+        raise RuntimeError(_REGISTRY_ERROR)
+    supplied = tuple(tuple.__iter__(_RUNTIME_ENTRIES))
+    if len(supplied) != len(_CodeOwnedRuntimeKey):
+        raise RuntimeError(_REGISTRY_ERROR)
+    entries = tuple(_validate_entry(entry) for entry in supplied)
+    if (
+        tuple(entry.key for entry in entries) != tuple(_CodeOwnedRuntimeKey)
+        or len({entry.identifier for entry in entries}) != len(entries)
+        or len({entry.content_hash for entry in entries}) != len(entries)
+        or len({entry.spec.content_hash for entry in entries}) != len(entries)
+    ):
+        raise RuntimeError(_REGISTRY_ERROR)
+    try:
+        catalog = ProviderRuntimeCatalog.create(tuple(entry.spec for entry in entries))
+    except ProviderCatalogError:
+        raise RuntimeError(_REGISTRY_ERROR) from None
+    if catalog.specs != tuple(entry.spec for entry in entries):
+        raise RuntimeError(_REGISTRY_ERROR)
+    return entries
 
 
-fixed_runtime_identity, _matches_fixed_runtime = _bind_fixed_runtime(_FIXED_RUNTIME_BINDING)
-del _bind_fixed_runtime
+def runtime_entry(key: _CodeOwnedRuntimeKey) -> _CodeOwnedRuntimeEntry:
+    """Return a detached validated entry for one internal enum key."""
+
+    if type(key) is not _CodeOwnedRuntimeKey:
+        raise RuntimeError(_REGISTRY_ERROR)
+    matches = tuple(entry for entry in _validated_entries() if entry.key is key)
+    if len(matches) != 1:
+        raise RuntimeError(_REGISTRY_ERROR)
+    return _validate_entry(matches[0])
+
+
+def runtime_identity(key: _CodeOwnedRuntimeKey) -> dict[str, object]:
+    return runtime_entry(key).runtime_binding
+
+
+def runtime_spec(key: _CodeOwnedRuntimeKey) -> ProviderRuntimeSpec:
+    return replace(runtime_entry(key).spec)
+
+
+def runtime_artifact(key: _CodeOwnedRuntimeKey) -> _WorkerArtifact:
+    return replace(runtime_entry(key).artifact)
+
+
+def runtime_environment(key: _CodeOwnedRuntimeKey) -> dict[str, str]:
+    entry = runtime_entry(key)
+    return dict(entry.environment_profile)
+
+
+def _matches_runtime(key: _CodeOwnedRuntimeKey, value: object) -> bool:
+    try:
+        expected = runtime_identity(key)
+    except RuntimeError:
+        return False
+    return (
+        type(value) is dict
+        and set(value) == {"id", "revision", "content_hash"}
+        and type(value["id"]) is str
+        and type(value["revision"]) is int
+        and type(value["content_hash"]) is str
+        and value == expected
+    )
+
+
+def code_owned_provider_catalog() -> ProviderRuntimeCatalog:
+    entries = _validated_entries()
+    return ProviderRuntimeCatalog.create(tuple(entry.spec for entry in entries)).snapshot()
+
+
+def runtime_entry_for_selection(selection: object) -> _CodeOwnedRuntimeEntry:
+    catalog = code_owned_provider_catalog()
+    resolved = catalog.resolve(selection)
+    matches = tuple(
+        entry
+        for entry in _validated_entries()
+        if (
+            entry.spec == resolved.spec
+            and entry.identifier == resolved.selection.runtime_id
+            and entry.revision == resolved.selection.runtime_revision
+            and entry.content_hash == resolved.selection.runtime_content_hash
+        )
+    )
+    if len(matches) != 1:
+        raise ProviderCatalogError("provider_runtime_unavailable")
+    return _validate_entry(matches[0])
+
+
+def fixed_runtime_identity() -> dict[str, object]:
+    """Return the historical default conformance identity."""
+
+    return runtime_identity(_CodeOwnedRuntimeKey.CONFORMANCE)
 
 
 def fixed_runtime_spec() -> ProviderRuntimeSpec:
-    """Return a detached copy of the only code-owned executable descriptor."""
+    """Return the historical default conformance descriptor."""
 
-    return _FIXED_PROVIDER_CATALOG.specs[0]
+    return runtime_spec(_CodeOwnedRuntimeKey.CONFORMANCE)
 
 
 def fixed_provider_catalog() -> ProviderRuntimeCatalog:
-    """Return the immutable catalog containing only the conformance runtime."""
+    """Compatibility alias for the complete closed code-owned catalog."""
 
-    return _FIXED_PROVIDER_CATALOG.snapshot()
+    return code_owned_provider_catalog()
 
 
-__all__ = ("fixed_provider_catalog", "fixed_runtime_identity", "fixed_runtime_spec")
+__all__ = (
+    "code_owned_provider_catalog",
+    "fixed_provider_catalog",
+    "fixed_runtime_identity",
+    "fixed_runtime_spec",
+)

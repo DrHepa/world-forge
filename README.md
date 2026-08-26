@@ -861,9 +861,9 @@ the POSIX process fence; Windows lock behavior is seam-tested but not natively
 proven by this slice.
 
 The five public v1 contracts remain unchanged and receipts still state
-`replay_support: not_claimed`. A private one-shot supervisor now runs only a
+`replay_support: not_claimed`. A private one-shot supervisor defaults to the
 fixed, non-production conformance runtime behind an authenticated process gate.
-The fixed runtime identity hashes the actual bootstrap template, and the child
+Its runtime identity hashes the actual bootstrap template, and the child
 is launched with fixed isolated/no-bytecode flags and exact-validates every
 authenticated request before executing an action. Version 1 is Linux-only. Linux
 holds worker creation behind a parent acknowledgement, tracks `/proc` state as
@@ -946,8 +946,9 @@ protocol, runtime revision, and receipt replay claims remain unchanged. See
 Provider execution now has a separate private gate before any real adapter can
 be added. A code-owned immutable catalog resolves only an exact runtime triple;
 it never accepts a command, module, path, factory, SDK, URL, or environment from
-an execution request. Its sole executable entry is the Linux-only,
-network-free, non-production conformance worker. An immutable selection binds
+an execution request. Its exactly two executable entries are the Linux-only,
+network-free, non-production conformance worker and a distinct deterministic
+offline probe. An immutable selection binds
 the catalog/spec, non-secret configuration, disclosure plan and data classes,
 base payload, tool catalog, limits, pricing, and an opaque credential-revision
 identity. A distinct in-memory CAS authority reviews four exact facets:
@@ -957,11 +958,19 @@ late decisions are not adopted, revocation can stop a blocked Linux worker, and
 exact terminal duplicates remain evidence-only after revocation. Missing,
 denied, expired, revoked, or stale provider authority collapses publicly to the
 existing `provider_failed` code. Secret credential bytes are never accepted.
+Artifact factories run once during registry construction and are not retained.
+Supervisor construction freezes the selected artifact, specification, protocol
+binding, command/environment, process supervisor, and dispatch callable as one
+authority; normal reassignment/deletion, later selector mutation, or later
+registry/factory rebinding cannot redirect an approved runtime. This does not
+claim protection against explicit `object.__setattr__`, malicious private/module
+reflection before construction, or hostile-process memory corruption.
 Networked descriptors remain unavailable until enforcement exists. This adds
 no real provider, SDK, network call, credential vault, authenticated Studio
 reviewer, Windows support, or production claim. Public Harness v1 bytes remain
 unchanged. See
-[ADR-0037](docs/decisions/0037-provider-execution-governance.md).
+[ADR-0037](docs/decisions/0037-provider-execution-governance.md) and
+[ADR-0038](docs/decisions/0038-code-owned-provider-runtime-dispatch.md).
 
 Slice 2B adds a pure deterministic evaluator and explicit-input, atomic
 no-replace CLI for the closed recorded-result plan, observation, and report

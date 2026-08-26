@@ -3,6 +3,11 @@
 - Status: accepted
 - Date: 2026-08-26
 
+> Supersession note: ADR-0038 replaces this decision's one-entry executable
+> catalog with exactly two code-owned, network-free, non-production entries;
+> all selection, approval, fingerprint, revocation, and zero-secret rules here
+> remain authoritative.
+
 ## Context
 
 ADR-0034 attests the injected adapter's exact activation-runtime triple, while
@@ -26,8 +31,9 @@ telemetry attestation, pricing identity, credential requirement, supported
 platform, production eligibility, and a canonical content hash. A
 `ProviderRuntimeCatalog` resolves only the exact triple and specification hash.
 No execution request can supply a command, module, path, factory, SDK, URL, or
-environment. The current fixed conformance runtime is the only catalog entry;
-it is Linux-only, network-free, and explicitly `production_eligible: false`.
+environment. As superseded by ADR-0038, the closed catalog has exactly the
+conformance runtime and deterministic offline probe; both are Linux-only,
+network-free, and explicitly `production_eligible: false`.
 Valid loopback and Internet descriptors can be validated as data, but this
 catalog rejects them as unavailable because no enforced network runtime exists.
 
@@ -63,7 +69,7 @@ to prepare, decide, revoke, snapshot, and check. Expiry is exclusive. The
 reviewer label is asserted rather than authenticated, and this in-memory state
 is not a Studio durability claim.
 
-The kernel accepts only the exact fixed conformance catalog, freezes its
+The kernel accepts only the exact code-owned catalog, freezes its
 resolution and one detached authority snapshot before durable begin. Its
 private request fingerprint always binds supplied approval identifiers, the
 canonical selection hash, explicit catalog and authority presence, and any
@@ -95,8 +101,8 @@ lease or injection mechanism.
 All five public Agent Harness v1 schemas, contract-catalog rows, generated
 Studio types, and canonical fixtures remain byte-identical. Private EventLog v2,
 the worker protocol, and the fixed conformance runtime revision remain
-unchanged. `src/isoworld` remains provider-free. No GitHub Actions workflow is
-added.
+unchanged; ADR-0038 adds only its separately identified offline probe.
+`src/isoworld` remains provider-free. No GitHub Actions workflow is added.
 
 ## Proven boundary
 
@@ -116,6 +122,6 @@ No real provider, model, SDK, network call, endpoint enforcement, credential
 vault, one-use credential lease, billing reconciliation, authenticated or
 durable Studio reviewer, generalized adapter factory, deterministic provider
 replay, same-UID filesystem/network sandbox, or vendor telemetry enforcement is
-implemented. The only executable runtime is the non-production conformance
-worker. Windows remains unsupported and `UNTESTED`; hosted, native release, and
-production readiness are not claimed.
+implemented. The only executable runtimes are the two non-production
+code-owned workers defined by ADR-0038. Windows remains unsupported and
+`UNTESTED`; hosted, native release, and production readiness are not claimed.

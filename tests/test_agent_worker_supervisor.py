@@ -105,6 +105,7 @@ _NO_READY_DESCENDANT_PATH: str | None = None
 
 def _slow_no_ready_broker(
     control: object,
+    _runtime_launch: object,
     _broker_key: bytes,
     _broker_nonce: str,
     _worker_key: bytes,
@@ -1404,8 +1405,11 @@ if __name__ == "__main__":
             def execute(self, *_args: object, **_kwargs: object) -> object:
                 raise ProviderBoundaryIndeterminate()
 
-        provider = OneShotProviderSupervisor(turn_timeout_ms=1_000)
-        provider._process_supervisor = IndeterminateProcessSupervisor()  # type: ignore[attr-defined]
+        with mock.patch(
+            "worldforge.agent_harness.supervisor.LinuxProcessSupervisor",
+            return_value=IndeterminateProcessSupervisor(),
+        ):
+            provider = OneShotProviderSupervisor(turn_timeout_ms=1_000)
         with tempfile.TemporaryDirectory() as temporary, AgentEventLog(temporary) as log:
             kernel = _ProviderAutoApprovingKernel(
                 provider=provider,
@@ -2962,6 +2966,11 @@ class LinuxOwnershipRegressionTests(unittest.TestCase):
             try:
                 process_supervisor_module._linux_broker_process_entry(
                     child,
+                    process_supervisor_module._capture_runtime_launch(
+                        worker_registry_module.runtime_entry(
+                            worker_registry_module._CodeOwnedRuntimeKey.CONFORMANCE
+                        )
+                    ),
                     key,
                     nonce,
                     b"w" * 32,
@@ -3009,6 +3018,11 @@ class LinuxOwnershipRegressionTests(unittest.TestCase):
                 try:
                     process_supervisor_module._linux_broker_process_entry(
                         child,
+                        process_supervisor_module._capture_runtime_launch(
+                            worker_registry_module.runtime_entry(
+                                worker_registry_module._CodeOwnedRuntimeKey.CONFORMANCE
+                            )
+                        ),
                         b"g" * 32,
                         "78" * 32,
                         b"w" * 32,

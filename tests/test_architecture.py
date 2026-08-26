@@ -36,6 +36,17 @@ class ArchitectureTests(unittest.TestCase):
             any("provider-governance" in path.name for path in (ROOT / "schemas").glob("*"))
         )
 
+    def test_code_owned_multi_runtime_dispatch_remains_private_and_nonproduction(self) -> None:
+        adr = ROOT / "docs/decisions/0038-code-owned-provider-runtime-dispatch.md"
+        text = adr.read_text(encoding="utf-8")
+        self.assertIn("worldforge_conformance_provider", text)
+        self.assertIn("worldforge_deterministic_probe_provider", text)
+        self.assertIn("exactly two", text)
+        self.assertIn("on-wire version 1", text)
+        self.assertIn("No real provider", text)
+        self.assertIn("no network-isolation claim", text)
+        self.assertFalse((RUNTIME / "agent_harness").exists())
+
     def test_runtime_audit_catches_current_and_dynamic_provider_imports(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

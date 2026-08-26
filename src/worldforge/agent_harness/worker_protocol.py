@@ -18,7 +18,12 @@ from .ports import (
     ProviderUsage,
     ToolCall,
 )
-from .worker_registry import _matches_fixed_runtime, fixed_runtime_identity
+from .worker_registry import (
+    _CodeOwnedRuntimeEntry,
+    _CodeOwnedRuntimeKey,
+    _matches_runtime,
+    runtime_identity,
+)
 
 MAX_WORKER_REQUEST_BYTES = 256 * 1024
 MAX_WORKER_RESPONSE_BYTES = 32 * 1024 * 1024
@@ -198,10 +203,48 @@ def _mac(document: dict[str, object], key: bytes) -> str:
     return hmac.new(key, _canonical(body), hashlib.sha256).hexdigest()
 
 
-def _validate_runtime(value: object) -> dict[str, object]:
-    if not _matches_fixed_runtime(value):
+def _require_runtime_key(value: object) -> _CodeOwnedRuntimeKey:
+    if type(value) is not _CodeOwnedRuntimeKey:
         raise WorkerProtocolError("worker_protocol_runtime_mismatch")
-    return fixed_runtime_identity()
+    return value
+
+
+def _runtime_identity(
+    key: object,
+    authority: _CodeOwnedRuntimeEntry | None = None,
+) -> dict[str, object]:
+    runtime_key = _require_runtime_key(key)
+    if authority is not None:
+        if type(authority) is not _CodeOwnedRuntimeEntry or authority.key is not runtime_key:
+            raise WorkerProtocolError("worker_protocol_runtime_mismatch")
+        return authority.runtime_binding
+    try:
+        return runtime_identity(runtime_key)
+    except RuntimeError:
+        raise WorkerProtocolError("worker_protocol_runtime_mismatch") from None
+
+
+def _validate_runtime(
+    value: object,
+    runtime_key: _CodeOwnedRuntimeKey,
+    authority: _CodeOwnedRuntimeEntry | None = None,
+) -> dict[str, object]:
+    runtime_key = _require_runtime_key(runtime_key)
+    expected = _runtime_identity(runtime_key, authority)
+    if authority is None:
+        matches = _matches_runtime(runtime_key, value)
+    else:
+        matches = (
+            type(value) is dict
+            and set(value) == {"id", "revision", "content_hash"}
+            and type(value["id"]) is str
+            and type(value["revision"]) is int
+            and type(value["content_hash"]) is str
+            and value == expected
+        )
+    if not matches:
+        raise WorkerProtocolError("worker_protocol_runtime_mismatch")
+    return expected
 
 
 def _validate_nonce(value: object) -> str:
@@ -331,6 +374,8 @@ def build_request_frame(
     *,
     key: bytes,
     nonce: str,
+    runtime_key: _CodeOwnedRuntimeKey = _CodeOwnedRuntimeKey.CONFORMANCE,
+    runtime_authority: _CodeOwnedRuntimeEntry | None = None,
 ) -> bytes:
     key = _require_key(key)
     nonce = _validate_nonce(nonce)
@@ -341,13 +386,19 @@ def build_request_frame(
         "nonce": nonce,
         "request": payload,
         "request_hash": _digest(payload),
-        "runtime": fixed_runtime_identity(),
+        "runtime": _runtime_identity(runtime_key, runtime_authority),
     }
     document["mac"] = _mac(document, key)
     return _frame(_canonical(document), maximum=MAX_WORKER_REQUEST_BYTES)
 
 
-def parse_request_frame(frame: bytes, *, key: bytes) -> ParsedWorkerRequest:
+def parse_request_frame(
+    frame: bytes,
+    *,
+    key: bytes,
+    runtime_key: _CodeOwnedRuntimeKey = _CodeOwnedRuntimeKey.CONFORMANCE,
+    runtime_authority: _CodeOwnedRuntimeEntry | None = None,
+) -> ParsedWorkerRequest:
     key = _require_key(key)
     document = _decode_canonical(_extract_frame(frame, maximum=MAX_WORKER_REQUEST_BYTES))
     if set(document) != {
@@ -371,7 +422,7 @@ def parse_request_frame(frame: bytes, *, key: bytes) -> ParsedWorkerRequest:
     ):
         raise WorkerProtocolError("worker_protocol_authentication_failed")
     nonce = _validate_nonce(document["nonce"])
-    runtime = _validate_runtime(document["runtime"])
+    runtime = _validate_runtime(document["runtime"], runtime_key, runtime_authority)
     payload = document["request"]
     if type(payload) is not dict or set(payload) != {
         "execution_id",
@@ -590,6 +641,8 @@ def build_result_frame(
     key: bytes,
     nonce: str,
     request_hash: str,
+    runtime_key: _CodeOwnedRuntimeKey = _CodeOwnedRuntimeKey.CONFORMANCE,
+    runtime_authority: _CodeOwnedRuntimeEntry | None = None,
 ) -> bytes:
     key = _require_key(key)
     nonce = _validate_nonce(nonce)
@@ -611,7 +664,7 @@ def build_result_frame(
         "request_hash": request_hash,
         "result": payload,
         "result_hash": _digest(payload),
-        "runtime": fixed_runtime_identity(),
+        "runtime": _runtime_identity(runtime_key, runtime_authority),
     }
     document["mac"] = _mac(document, key)
     return _frame(_canonical(document), maximum=MAX_WORKER_RESPONSE_BYTES)
@@ -623,6 +676,8 @@ def parse_result_frame(
     key: bytes,
     nonce: str,
     request_hash: str,
+    runtime_key: _CodeOwnedRuntimeKey = _CodeOwnedRuntimeKey.CONFORMANCE,
+    runtime_authority: _CodeOwnedRuntimeEntry | None = None,
 ) -> ProviderTurnResult:
     key = _require_key(key)
     expected_nonce = _validate_nonce(nonce)
@@ -656,7 +711,7 @@ def parse_result_frame(
     )
     if document["nonce"] != expected_nonce or response_request_hash != expected_request_hash:
         raise WorkerProtocolError("worker_protocol_correlation_failed")
-    _validate_runtime(document["runtime"])
+    _validate_runtime(document["runtime"], runtime_key, runtime_authority)
     payload = document["result"]
     result_hash = document["result_hash"]
     if (

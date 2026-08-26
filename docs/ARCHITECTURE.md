@@ -629,7 +629,7 @@ artifact promotion, Studio jobs/UI/Team Mode, deterministic provider replay,
 and hosted/native/release evidence remain unimplemented and unproven.
 
 A private Linux-only one-shot supervisor now replaces the in-process boundary
-only for one fixed non-production conformance runtime. The child has no tools, proposal
+for a closed code-owned non-production runtime. The child has no tools, proposal
 ports, event log, Studio handles, authoring roots, or runtime authority. A
 length-prefixed canonical JSON protocol uses per-spawn HMAC correlation and
 an identity hash pinned to the actual bootstrap template. The worker validates
@@ -729,9 +729,19 @@ Studio authorities. See
 Provider execution governance is independent of runtime attestation, tool
 approval, and memory approval. A code-owned immutable runtime catalog resolves
 an exact runtime triple and specification; requests cannot inject executable or
-endpoint machinery. Only the fixed Linux conformance descriptor is executable,
-and it is network-free and non-production. Valid networked descriptors are
-still catalog-unavailable because this layer has no enforced egress runtime.
+endpoint machinery. Exactly two Linux descriptors are executable: the pinned
+conformance runtime and a distinct deterministic offline probe. Both are
+network-free and non-production. Valid networked descriptors are still
+catalog-unavailable because this layer has no enforced egress runtime.
+Each code-owned artifact factory runs once during registry construction and is
+discarded; entries retain only validated immutable artifacts. Supervisor
+construction freezes the selected entry/spec/protocol binding, complete command
+and environment, process supervisor, and dispatch closure as one authority, so
+ordinary public/private reassignment, selector mutation, or later
+registry/factory rebinding cannot create an approved-A/executed-B split. The
+remaining deliberate boundary is explicit `object.__setattr__`, malicious
+private/module reflection before construction, or hostile-process memory
+corruption.
 
 An immutable execution selection binds catalog/spec/configuration, disclosure
 and exact payload, tool catalog, limits, pricing, and opaque credential-revision
@@ -748,7 +758,8 @@ reuse public `provider_failed`; detailed approval state, reviewer labels, and
 credential metadata never enter workers, public records, or SQLite. No real
 adapter, SDK, network call, secret service, authenticated Studio approval,
 billing proof, or Windows worker is implemented. See
-[ADR-0037](decisions/0037-provider-execution-governance.md).
+[ADR-0037](decisions/0037-provider-execution-governance.md) and
+[ADR-0038](decisions/0038-code-owned-provider-runtime-dispatch.md).
 
 Slice 2B retains the closed, identity/evidence-only plan, observation, and report
 boundary for an optional codebase-memory comparison and adds a pure evaluator

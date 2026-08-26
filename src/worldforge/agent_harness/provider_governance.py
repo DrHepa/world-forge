@@ -129,6 +129,7 @@ class ProviderGovernanceReview:
         )
         pricing_hash = _hash(
             {
+                "usage_policy_hash": selection.usage_policy_hash,
                 "pricing_policy_hash": selection.pricing_policy_hash,
                 "currency": selection.currency,
                 "max_total_tokens": selection.max_total_tokens,

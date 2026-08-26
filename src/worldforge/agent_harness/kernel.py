@@ -68,6 +68,12 @@ from .provider_governance import (
     ProviderGovernanceSnapshot,
 )
 from .records import build_event, build_receipt
+from .usage import (
+    UsageAccounting,
+    UsageEvidenceError,
+    build_no_provider_usage_accounting,
+    validate_usage_accounting,
+)
 from .worker_registry import code_owned_provider_catalog
 
 _PORTABLE_ID_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
@@ -268,6 +274,20 @@ def _journal_record_bytes(value: object, *, expected_format: str) -> bytes:
     return encoded
 
 
+def _journal_usage_accounting_bytes(value: object) -> bytes:
+    try:
+        document = validate_usage_accounting(value)
+        return json.dumps(
+            document,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except Exception:
+        raise KernelError("journal_corrupt") from None
+
+
 def _prepared_execution_request(
     request: object,
 ) -> tuple[ExecutionRequest, dict[str, object], dict[str, object]]:
@@ -358,6 +378,8 @@ def _execution_request_fingerprint(
     provider_spec_hash: str | None,
     provider_config_hash: str | None,
     provider_selection_hash: str | None,
+    provider_usage_policy_hash: str | None,
+    provider_pricing_policy_hash: str | None,
     provider_review_hash: str | None,
     provider_decision_hash: str | None,
     approval_authority_present: bool,
@@ -378,7 +400,7 @@ def _execution_request_fingerprint(
     limits = request.limits
     controls = {
         "format": "world-forge.private.agent_execution_request_fingerprint",
-        "format_version": 2,
+        "format_version": 3,
         "execution_id": activation["execution_id"],
         "activation_hash": activation["content_hash"],
         "grant_hash": grant["content_hash"],
@@ -414,6 +436,8 @@ def _execution_request_fingerprint(
         "provider_spec_hash": provider_spec_hash,
         "provider_config_hash": provider_config_hash,
         "provider_selection_hash": provider_selection_hash,
+        "provider_usage_policy_hash": provider_usage_policy_hash,
+        "provider_pricing_policy_hash": provider_pricing_policy_hash,
         "provider_review_hash": provider_review_hash,
         "provider_decision_hash": provider_decision_hash,
     }
@@ -663,6 +687,7 @@ class _PreparedProviderTurn:
 @dataclass(slots=True)
 class BudgetLedger:
     limits: ExecutionLimits
+    accounting: UsageAccounting | None = None
     input_tokens: int = 0
     output_tokens: int = 0
     cached_input_tokens: int = 0
@@ -674,76 +699,117 @@ class BudgetLedger:
     memory_proposals: int = 0
 
     def __post_init__(self) -> None:
-        if self.limits.max_cost_minor_units is not None:
-            self.cost_minor_units = 0
-            self.currency = self.limits.currency
+        return None
 
     def add_usage(self, usage: ProviderUsage) -> None:
-        if type(usage) is not ProviderUsage:
+        if type(usage) is not ProviderUsage or self.accounting is None:
             raise KernelError("provider_usage_invalid")
-        values = (usage.input_tokens, usage.output_tokens, usage.cached_input_tokens)
-        if any(type(value) is not int or not 0 <= value <= MAX_SAFE_INTEGER for value in values):
-            raise KernelError("provider_usage_invalid")
-        if usage.cached_input_tokens > usage.input_tokens:
-            raise KernelError("provider_usage_invalid")
-        if (usage.cost_minor_units is None) != (usage.currency is None):
-            raise KernelError("provider_usage_invalid")
-        if self.limits.max_cost_minor_units is None and usage.cost_minor_units is not None:
-            raise KernelError("provider_usage_invalid")
-        if self.limits.max_cost_minor_units is not None and usage.cost_minor_units is None:
-            raise KernelError("provider_usage_invalid")
-        if usage.cost_minor_units is not None and (
-            type(usage.cost_minor_units) is not int
-            or not 0 <= usage.cost_minor_units <= MAX_SAFE_INTEGER
-        ):
-            raise KernelError("provider_usage_invalid")
-        if usage.currency is not None and type(usage.currency) is not str:
-            raise KernelError("provider_usage_invalid")
-        if usage.currency is not None and usage.currency != self.limits.currency:
-            raise KernelError("provider_currency_mismatch")
-        additions = (
-            (self.input_tokens, usage.input_tokens),
-            (self.output_tokens, usage.output_tokens),
-            (self.cached_input_tokens, usage.cached_input_tokens),
-        )
-        if any(current > MAX_SAFE_INTEGER - added for current, added in additions):
-            raise KernelError("provider_usage_invalid")
-        if (
-            self.input_tokens + self.output_tokens
-            > MAX_SAFE_INTEGER - usage.input_tokens - usage.output_tokens
-        ):
-            raise KernelError("provider_usage_invalid")
-        new_input = self.input_tokens + usage.input_tokens
-        new_output = self.output_tokens + usage.output_tokens
-        new_cached = self.cached_input_tokens + usage.cached_input_tokens
-        if usage.cost_minor_units is None:
-            if self.turns > 0 and self.cost_minor_units is not None:
-                raise KernelError("provider_usage_invalid")
-            new_cost = None
-            new_currency = None
-        else:
-            if self.cost_minor_units is None:
-                raise KernelError("provider_usage_invalid")
-            if self.cost_minor_units > MAX_SAFE_INTEGER - usage.cost_minor_units:
-                raise KernelError("provider_usage_invalid")
-            new_cost = self.cost_minor_units + usage.cost_minor_units
-            new_currency = usage.currency
-
-        # Valid reported usage is incurred evidence even when it crosses a budget.
-        self.input_tokens = new_input
-        self.output_tokens = new_output
-        self.cached_input_tokens = new_cached
-        self.cost_minor_units = new_cost
-        self.currency = new_currency
+        try:
+            unavailable_reason = self.accounting.add_turn(
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                cached_input_tokens=usage.cached_input_tokens,
+                cost=usage.cost,
+            )
+        except UsageEvidenceError as exc:
+            raise KernelError(exc.reason_code) from None
+        totals = self.accounting.recognized_totals
+        self.input_tokens = int(totals["input_tokens"])
+        self.output_tokens = int(totals["output_tokens"])
+        self.cached_input_tokens = int(totals["cached_input_tokens"])
+        self.cost_minor_units = totals["cost_minor_units"]  # type: ignore[assignment]
+        self.currency = totals["currency"]  # type: ignore[assignment]
         self.turns += 1
-        if new_input + new_output > self.limits.max_total_tokens:
+        if self.input_tokens + self.output_tokens > self.limits.max_total_tokens:
             raise KernelError("token_budget_exceeded")
         if (
             self.limits.max_cost_minor_units is not None
-            and new_cost is not None
-            and new_cost > self.limits.max_cost_minor_units
+            and self.cost_minor_units is not None
+            and self.cost_minor_units > self.limits.max_cost_minor_units
         ):
             raise KernelError("cost_budget_exceeded")
+        if unavailable_reason is not None or (
+            self.limits.max_cost_minor_units is not None and self.cost_minor_units is None
+        ):
+            raise KernelError("provider_usage_unavailable")
+
+    @staticmethod
+    def _projection_is_valid(totals: object) -> bool:
+        if type(totals) is not dict or set(totals) != {
+            "input_tokens",
+            "output_tokens",
+            "cached_input_tokens",
+            "cost_minor_units",
+            "currency",
+        }:
+            return False
+        token_values = (
+            totals["input_tokens"],
+            totals["output_tokens"],
+            totals["cached_input_tokens"],
+        )
+        if any(
+            type(value) is not int or not 0 <= value <= MAX_SAFE_INTEGER for value in token_values
+        ):
+            return False
+        if (
+            totals["input_tokens"] > MAX_SAFE_INTEGER - totals["output_tokens"]
+            or totals["cached_input_tokens"] > totals["input_tokens"]
+        ):
+            return False
+        cost = totals["cost_minor_units"]
+        currency = totals["currency"]
+        return (
+            (cost is None and currency is None)
+            or type(cost) is int
+            and 0 <= cost <= MAX_SAFE_INTEGER
+            and type(currency) is str
+            and re.fullmatch(r"[A-Z]{3}", currency) is not None
+        )
+
+    def normalize_projection_for_finalization(self) -> bool:
+        current = {
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "cached_input_tokens": self.cached_input_tokens,
+            "cost_minor_units": self.cost_minor_units,
+            "currency": self.currency,
+        }
+        expected = current
+        expected_turns = self.turns
+        if self.accounting is not None:
+            try:
+                expected = self.accounting.recognized_totals
+                expected_turns = self.accounting.turn_count
+            except Exception:
+                expected = {}
+        if self._projection_is_valid(expected):
+            unchanged = current == expected and self.turns == expected_turns
+            self.input_tokens = expected["input_tokens"]  # type: ignore[assignment]
+            self.output_tokens = expected["output_tokens"]  # type: ignore[assignment]
+            self.cached_input_tokens = expected["cached_input_tokens"]  # type: ignore[assignment]
+            self.cost_minor_units = expected["cost_minor_units"]  # type: ignore[assignment]
+            self.currency = expected["currency"]  # type: ignore[assignment]
+            self.turns = expected_turns
+            return unchanged
+        if self.accounting is not None:
+            try:
+                self.accounting = UsageAccounting.create(
+                    execution_id=self.accounting.execution_id,
+                    runtime_spec_hash=self.accounting.runtime_spec_hash,
+                    selection_hash=self.accounting.selection_hash,
+                    usage_policy_hash=self.accounting.usage_policy_hash,
+                    pricing_policy_hash=self.accounting.pricing_policy_hash,
+                )
+            except Exception:
+                self.accounting = None
+        self.input_tokens = 0
+        self.output_tokens = 0
+        self.cached_input_tokens = 0
+        self.cost_minor_units = None
+        self.currency = None
+        self.turns = 0
+        return False
 
 
 class AgentExecutionKernel:
@@ -1037,6 +1103,7 @@ class AgentExecutionKernel:
         execution_id = activation["execution_id"]
         self._active_execution_id = execution_id
         lease: object | None = None
+        provider_resolved: ResolvedProviderExecution | None = None
         try:
             start_ms = self._safe_now()
             initial_reason = self._cancellation_reason(request.limits, start_ms)
@@ -1086,6 +1153,8 @@ class AgentExecutionKernel:
                     if request.provider_selection is None
                     else request.provider_selection.content_hash
                 )
+                provider_usage_policy_hash = None
+                provider_pricing_policy_hash = None
                 provider_review_hash = None
                 provider_decision_hash = None
                 provider_review = None
@@ -1111,6 +1180,8 @@ class AgentExecutionKernel:
                     ):
                         raise KernelError("provider_execution_selection_invalid")
                     provider_spec_hash = provider_resolved.spec.content_hash
+                    provider_usage_policy_hash = provider_resolved.spec.usage_policy_hash
+                    provider_pricing_policy_hash = provider_resolved.spec.pricing_policy_hash
                     provider_config_hash = provider_resolved.selection.non_secret_config_hash
                     provider_selection_hash = provider_resolved.selection.content_hash
                     try:
@@ -1148,6 +1219,8 @@ class AgentExecutionKernel:
                     provider_spec_hash=provider_spec_hash,
                     provider_config_hash=provider_config_hash,
                     provider_selection_hash=provider_selection_hash,
+                    provider_usage_policy_hash=provider_usage_policy_hash,
+                    provider_pricing_policy_hash=provider_pricing_policy_hash,
                     provider_review_hash=provider_review_hash,
                     provider_decision_hash=provider_decision_hash,
                     approval_authority_present=self._approval_authority is not None,
@@ -1246,6 +1319,7 @@ class AgentExecutionKernel:
                 provider_review=provider_review,
                 provider_snapshot=provider_snapshot,
                 provider_reason=provider_reason,
+                provider_resolved=provider_resolved,
             )
         finally:
             try:
@@ -1272,8 +1346,21 @@ class AgentExecutionKernel:
         provider_review: ProviderGovernanceReview | None,
         provider_snapshot: ProviderGovernanceSnapshot | None,
         provider_reason: str | None,
+        provider_resolved: ResolvedProviderExecution | None,
     ) -> ExecutionResult:
-        ledger = BudgetLedger(request.limits)
+        accounting = None
+        if provider_resolved is not None:
+            try:
+                accounting = UsageAccounting.create(
+                    execution_id=activation["execution_id"],
+                    runtime_spec_hash=provider_resolved.spec.content_hash,
+                    selection_hash=provider_resolved.selection.content_hash,
+                    usage_policy_hash=provider_resolved.spec.usage_policy_hash,
+                    pricing_policy_hash=provider_resolved.spec.pricing_policy_hash,
+                )
+            except UsageEvidenceError:
+                raise KernelError("provider_usage_policy_invalid") from None
+        ledger = BudgetLedger(request.limits, accounting=accounting)
         events: list[dict[str, object]] = []
         invocations: list[dict[str, object]] = []
         artifacts: list[dict[str, str]] = []
@@ -1928,6 +2015,10 @@ class AgentExecutionKernel:
         try:
             if type(turn) is not ProviderTurnResult or type(turn.completed) is not bool:
                 raise KernelError("provider_result_invalid")
+            if turn.nested_failure_code is not None:
+                if turn.nested_failure_code != "worker_protocol_result_invalid":
+                    raise KernelError("provider_result_invalid")
+                raise KernelError("provider_result_invalid")
             if (
                 type(turn.tool_calls) is not tuple
                 or type(turn.artifact_proposals) is not tuple
@@ -2102,6 +2193,12 @@ class AgentExecutionKernel:
                 None,
                 [],
             )
+        if not ledger.normalize_projection_for_finalization():
+            outcome, failure_codes, private_output = (
+                "failed",
+                ["provider_usage_invalid"],
+                None,
+            )
 
         while True:
             if outcome == "cancelled" and not cancel_event_recorded:
@@ -2135,16 +2232,19 @@ class AgentExecutionKernel:
                 "cost_minor_units": ledger.cost_minor_units,
                 "currency": ledger.currency,
             }
-            receipt = build_receipt(
-                receipt_id=request.receipt_id,
-                activation=activation,
-                grant=grant,
-                tool_invocations=invocations,
-                result_artifacts=artifacts,
-                usage=usage,
-                outcome=outcome,
-                failure_codes=failure_codes,
-            )
+            try:
+                receipt = build_receipt(
+                    receipt_id=request.receipt_id,
+                    activation=activation,
+                    grant=grant,
+                    tool_invocations=invocations,
+                    result_artifacts=artifacts,
+                    usage=usage,
+                    outcome=outcome,
+                    failure_codes=failure_codes,
+                )
+            except AgentHarnessContractError:
+                raise KernelError("kernel_record_invalid") from None
             sequence = len(events)
             previous = None if not events else str(events[-1]["content_hash"])
             receipt_event = build_event(
@@ -2166,11 +2266,19 @@ class AgentExecutionKernel:
                 raise KernelError("kernel_record_invalid") from None
             journal_receipt = copy.deepcopy(receipt)
             journal_event = copy.deepcopy(receipt_event)
+            if ledger.accounting is None:
+                usage_accounting = build_no_provider_usage_accounting(receipt)
+            else:
+                usage_accounting = ledger.accounting.seal(receipt_hash=receipt["content_hash"])
+            journal_usage_accounting = copy.deepcopy(usage_accounting)
             expected_journal_receipt = _journal_record_bytes(
                 journal_receipt, expected_format=AGENT_EXECUTION_RECEIPT_FORMAT
             )
             expected_journal_event = _journal_record_bytes(
                 journal_event, expected_format=AGENT_EVENT_FORMAT
+            )
+            expected_journal_usage_accounting = _journal_usage_accounting_bytes(
+                journal_usage_accounting
             )
 
             # This is the last cooperative check before the single atomic side effect.
@@ -2210,6 +2318,7 @@ class AgentExecutionKernel:
                 str(activation["execution_id"]),
                 journal_receipt,
                 journal_event,
+                journal_usage_accounting,
                 expected_sequence=sequence,
                 expected_previous_hash=previous,
                 expected_generation=sequence,
@@ -2221,9 +2330,13 @@ class AgentExecutionKernel:
             actual_journal_event = _journal_record_bytes(
                 journal_event, expected_format=AGENT_EVENT_FORMAT
             )
+            actual_journal_usage_accounting = _journal_usage_accounting_bytes(
+                journal_usage_accounting
+            )
             if (
                 actual_journal_receipt != expected_journal_receipt
                 or actual_journal_event != expected_journal_event
+                or actual_journal_usage_accounting != expected_journal_usage_accounting
             ):
                 raise KernelError("journal_corrupt") from None
             raise KernelError("journal_finalization_ambiguous") from None
@@ -2234,9 +2347,11 @@ class AgentExecutionKernel:
         actual_journal_event = _journal_record_bytes(
             journal_event, expected_format=AGENT_EVENT_FORMAT
         )
+        actual_journal_usage_accounting = _journal_usage_accounting_bytes(journal_usage_accounting)
         if (
             actual_journal_receipt != expected_journal_receipt
             or actual_journal_event != expected_journal_event
+            or actual_journal_usage_accounting != expected_journal_usage_accounting
         ):
             raise KernelError("journal_corrupt") from None
         post_reason = self._cancellation_reason(request.limits, start_ms)

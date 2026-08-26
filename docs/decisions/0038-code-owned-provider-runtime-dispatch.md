@@ -10,6 +10,10 @@
 > ADR-0041 advances conformance to revision 3, the deterministic probe to
 > revision 4, and the private provider-turn protocol to version 2 while
 > retaining both runtime IDs and exactly two registry entries.
+>
+> ADR-0042 advances conformance to revision 4, the deterministic probe to
+> revision 5, and the private provider-turn protocol to version 3 with explicit
+> code-owned usage-policy identities; the closed two-runtime catalog remains.
 
 ## Context
 

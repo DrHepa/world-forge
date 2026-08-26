@@ -23,7 +23,7 @@ from tests.agent_harness_fakes import (
     FakeProvider,
     FakeTool,
 )
-from tests.test_agent_execution_kernel import _ProviderAutoApprovingKernel
+from tests.test_agent_execution_kernel import _ProviderAutoApprovingKernel, _usage
 from worldforge.agent_harness import (
     CapabilityBroker,
     ExecutionLimits,
@@ -47,11 +47,11 @@ from worldforge.agent_harness.event_log import (
 )
 from worldforge.agent_harness.ports import (
     ProviderTurnResult,
-    ProviderUsage,
     ToolCall,
     ToolResult,
 )
 from worldforge.agent_harness.records import build_event, build_receipt
+from worldforge.agent_harness.usage import build_legacy_usage_accounting
 from worldforge.agent_harness.worker_registry import fixed_runtime_identity
 from worldforge.agent_harness_contracts import (
     AGENT_CAPABILITY_GRANT_FORMAT,
@@ -492,6 +492,7 @@ class AgentEventLogTests(unittest.TestCase):
                     str(activation["execution_id"]),
                     receipt,
                     receipt_event,
+                    build_legacy_usage_accounting(receipt),
                     expected_sequence=len(events),
                     expected_previous_hash=str(events[-1]["content_hash"]),
                     expected_generation=len(events),
@@ -537,6 +538,7 @@ class AgentEventLogTests(unittest.TestCase):
                 str(activation["execution_id"]),
                 receipt,
                 receipt_event,
+                build_legacy_usage_accounting(receipt),
                 expected_sequence=3,
                 expected_previous_hash=str(events[-1]["content_hash"]),
                 expected_generation=3,
@@ -545,6 +547,7 @@ class AgentEventLogTests(unittest.TestCase):
                 str(activation["execution_id"]),
                 receipt,
                 receipt_event,
+                build_legacy_usage_accounting(receipt),
                 expected_sequence=3,
                 expected_previous_hash=str(events[-1]["content_hash"]),
                 expected_generation=3,
@@ -557,6 +560,7 @@ class AgentEventLogTests(unittest.TestCase):
                     str(activation["execution_id"]),
                     different_receipt,
                     receipt_event,
+                    build_legacy_usage_accounting(different_receipt),
                     expected_sequence=3,
                     expected_previous_hash=str(events[-1]["content_hash"]),
                     expected_generation=3,
@@ -596,10 +600,63 @@ class AgentEventLogTests(unittest.TestCase):
                     str(activation["execution_id"]),
                     receipt,
                     receipt_event,
+                    build_legacy_usage_accounting(receipt),
                     expected_sequence=3,
                     expected_previous_hash=str(events[-1]["content_hash"]),
                     expected_generation=3,
                 )
+
+    def test_v3_terminal_usage_accounting_is_exact_hash_bound_and_mandatory(self) -> None:
+        mutations = ("delete", "hash", "receipt_hash", "json")
+        for mutation in mutations:
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
+                activation, grant, events, receipt_event, receipt = _terminal_records()
+                accounting = build_legacy_usage_accounting(receipt)
+                with AgentEventLog(temporary) as log:
+                    log.begin_execution(
+                        str(activation["execution_id"]),
+                        "log_durable_01",
+                        activation,
+                        grant,
+                        request_fingerprint="a" * 64,
+                    )
+                    self._append_prefix(log, activation, events)
+                    log.finalize(
+                        str(activation["execution_id"]),
+                        receipt,
+                        receipt_event,
+                        accounting,
+                        expected_sequence=3,
+                        expected_previous_hash=str(events[-1]["content_hash"]),
+                        expected_generation=3,
+                    )
+                    replay = log.replay_records(str(activation["execution_id"]))
+                    self.assertEqual(
+                        json.dumps(
+                            accounting,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode("utf-8"),
+                        replay.usage_accounting_bytes,
+                    )
+                    if mutation == "delete":
+                        log.connection.execute("DELETE FROM usage_accounting")
+                    elif mutation == "hash":
+                        log.connection.execute(
+                            "UPDATE usage_accounting SET accounting_hash = ?", ("f" * 64,)
+                        )
+                    elif mutation == "receipt_hash":
+                        log.connection.execute(
+                            "UPDATE usage_accounting SET receipt_hash = ?", ("e" * 64,)
+                        )
+                    else:
+                        log.connection.execute(
+                            "UPDATE usage_accounting SET accounting_json = ?", (b"{}",)
+                        )
+                    log.connection.commit()
+                    with self.assertRaises(AgentEventLogCorrupt):
+                        log.replay_records(str(activation["execution_id"]))
 
     def test_append_and_finalize_use_sequence_head_and_generation_cas(self) -> None:
         activation, grant, events, receipt_event, receipt = _terminal_records()
@@ -653,6 +710,7 @@ class AgentEventLogTests(unittest.TestCase):
                     str(activation["execution_id"]),
                     receipt,
                     receipt_event,
+                    build_legacy_usage_accounting(receipt),
                     expected_sequence=3,
                     expected_previous_hash=str(events[-1]["content_hash"]),
                     expected_generation=2,
@@ -661,6 +719,7 @@ class AgentEventLogTests(unittest.TestCase):
                 str(activation["execution_id"]),
                 receipt,
                 receipt_event,
+                build_legacy_usage_accounting(receipt),
                 expected_sequence=3,
                 expected_previous_hash=str(events[-1]["content_hash"]),
                 expected_generation=3,
@@ -991,6 +1050,7 @@ class AgentEventLogTests(unittest.TestCase):
                             str(activation["execution_id"]),
                             receipt,
                             receipt_event,
+                            build_legacy_usage_accounting(receipt),
                             expected_sequence=3,
                             expected_previous_hash=str(events[2]["content_hash"]),
                             expected_generation=3,
@@ -1021,6 +1081,7 @@ class AgentEventLogTests(unittest.TestCase):
 
     def test_finalize_is_atomic_across_faults_and_reconciles_after_commit(self) -> None:
         rollback_stages = (
+            "after_finalize_usage_accounting_insert",
             "after_finalize_receipt_insert",
             "after_finalize_event_insert",
             "before_finalize_state_update",
@@ -1048,6 +1109,7 @@ class AgentEventLogTests(unittest.TestCase):
                             str(activation["execution_id"]),
                             receipt,
                             receipt_event,
+                            build_legacy_usage_accounting(receipt),
                             expected_sequence=3,
                             expected_previous_hash=str(events[-1]["content_hash"]),
                             expected_generation=3,
@@ -1063,6 +1125,7 @@ class AgentEventLogTests(unittest.TestCase):
                             str(activation["execution_id"]),
                             receipt,
                             receipt_event,
+                            build_legacy_usage_accounting(receipt),
                             expected_sequence=3,
                             expected_previous_hash=str(events[-1]["content_hash"]),
                             expected_generation=3,
@@ -1100,6 +1163,7 @@ class AgentEventLogTests(unittest.TestCase):
                 str(activation["execution_id"]),
                 receipt,
                 receipt_event,
+                build_legacy_usage_accounting(receipt),
                 expected_sequence=3,
                 expected_previous_hash=str(events[-1]["content_hash"]),
                 expected_generation=3,
@@ -1123,8 +1187,8 @@ class AgentEventLogTests(unittest.TestCase):
                 max_turns=3,
                 max_tool_calls=1,
                 max_total_tokens=20,
-                max_cost_minor_units=10,
-                currency="USD",
+                max_cost_minor_units=None,
+                currency=None,
                 max_duration_ms=100,
                 deadline_ms=2_000,
             ),
@@ -1144,13 +1208,13 @@ class AgentEventLogTests(unittest.TestCase):
             [
                 ProviderTurnResult(
                     private_output="request schema",
-                    usage=ProviderUsage(0, 0, 0, 0, "USD"),
+                    usage=_usage(input_tokens=0, output_tokens=0, cached_input_tokens=0),
                     tool_exposure_requests=("source.read",),
                     completed=False,
                 ),
                 ProviderTurnResult(
                     private_output={"payload": "PRIVATE_COORDINATOR_OUTPUT"},
-                    usage=ProviderUsage(3, 2, 1, 0, "USD"),
+                    usage=_usage(input_tokens=3, output_tokens=2, cached_input_tokens=1),
                     tool_calls=(
                         ToolCall(
                             "source.read",
@@ -1165,12 +1229,12 @@ class AgentEventLogTests(unittest.TestCase):
                 ),
                 ProviderTurnResult(
                     private_output={"payload": "PRIVATE_COORDINATOR_OUTPUT"},
-                    usage=ProviderUsage(0, 0, 0, 0, "USD"),
+                    usage=_usage(input_tokens=0, output_tokens=0, cached_input_tokens=0),
                     completed=True,
                 ),
                 ProviderTurnResult(
                     private_output="MUST_NOT_EXECUTE",
-                    usage=ProviderUsage(3, 2, 1, 0, "USD"),
+                    usage=_usage(input_tokens=3, output_tokens=2, cached_input_tokens=1),
                     completed=True,
                 ),
             ]
@@ -1393,6 +1457,7 @@ class AgentEventLogTests(unittest.TestCase):
                             str(activation["execution_id"]),
                             receipt,
                             receipt_event,
+                            build_legacy_usage_accounting(receipt),
                             expected_sequence=3,
                             expected_previous_hash=str(events[-1]["content_hash"]),
                             expected_generation=3,
@@ -1552,6 +1617,7 @@ class AgentEventLogTests(unittest.TestCase):
                     str(activation["execution_id"]),
                     receipt,
                     receipt_event,
+                    build_legacy_usage_accounting(receipt),
                     expected_sequence=3,
                     expected_previous_hash=str(events[-1]["content_hash"]),
                     expected_generation=3,
@@ -1743,6 +1809,7 @@ class AgentEventLogTests(unittest.TestCase):
                     "memory_projections",
                     "receipts",
                     "schema_meta",
+                    "usage_accounting",
                 ),
                 tables,
             )
@@ -2289,7 +2356,7 @@ class AgentEventLogTests(unittest.TestCase):
                 ),
                 AgentEventLog.recovery(root) as recovery,
             ):
-                self.assertEqual(2, recovery.schema_version)
+                self.assertEqual(3, recovery.schema_version)
                 self.assertEqual("open", recovery.replay_records(activation["execution_id"]).state)
                 self.assertEqual(
                     (activation["execution_id"],),
@@ -2438,6 +2505,7 @@ class AgentEventLogTests(unittest.TestCase):
                     str(activation["execution_id"]),
                     failed_receipt,
                     partial_terminal,
+                    build_legacy_usage_accounting(failed_receipt),
                     expected_sequence=1,
                     expected_previous_hash=str(events[0]["content_hash"]),
                     expected_generation=1,
@@ -2456,6 +2524,7 @@ class AgentEventLogTests(unittest.TestCase):
                 str(activation["execution_id"]),
                 receipt,
                 receipt_event,
+                build_legacy_usage_accounting(receipt),
                 expected_sequence=3,
                 expected_previous_hash=str(events[-1]["content_hash"]),
                 expected_generation=3,
@@ -2500,6 +2569,7 @@ class AgentEventLogTests(unittest.TestCase):
                     str(activation["execution_id"]),
                     contradictory_receipt,
                     contradictory_event,
+                    build_legacy_usage_accounting(contradictory_receipt),
                     expected_sequence=4,
                     expected_previous_hash=str(events[-1]["content_hash"]),
                     expected_generation=4,
@@ -2508,6 +2578,7 @@ class AgentEventLogTests(unittest.TestCase):
                 str(activation["execution_id"]),
                 receipt,
                 receipt_event,
+                build_legacy_usage_accounting(receipt),
                 expected_sequence=4,
                 expected_previous_hash=str(events[-1]["content_hash"]),
                 expected_generation=4,
@@ -2992,6 +3063,7 @@ os._exit(0)
                         str(activation["execution_id"]),
                         receipt,
                         receipt_event,
+                        build_legacy_usage_accounting(receipt),
                         expected_sequence=0,
                         expected_previous_hash=None,
                         expected_generation=0,

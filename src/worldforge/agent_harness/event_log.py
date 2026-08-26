@@ -43,7 +43,13 @@ if TYPE_CHECKING:
     from .kernel import AgentExecutionKernel
     from .ports import ExecutionRequest, ExecutionResult
 
-AGENT_EVENT_LOG_SCHEMA_VERSION = 2
+from .usage import (
+    UsageEvidenceError,
+    build_legacy_usage_accounting,
+    validate_usage_accounting,
+)
+
+AGENT_EVENT_LOG_SCHEMA_VERSION = 3
 AGENT_EVENT_LOG_DATABASE_NAME = "agent-events.sqlite3"
 AGENT_EVENT_LOG_LOCK_NAME = "agent-events.lock"
 MAX_AGENT_EVENT_LOG_EVENTS = 5
@@ -122,10 +128,23 @@ _SCHEMA_TABLE_SQL = {
                     request_fingerprint TEXT NOT NULL,
                     projection_json BLOB NOT NULL
                 )""",
+    "usage_accounting": """CREATE TABLE usage_accounting (
+                    execution_id TEXT PRIMARY KEY NOT NULL REFERENCES executions(execution_id),
+                    accounting_hash TEXT NOT NULL UNIQUE,
+                    receipt_hash TEXT NOT NULL UNIQUE,
+                    accounting_json BLOB NOT NULL
+                )""",
 }
 _EXPECTED_SCHEMA_MANIFESTS = {
     1: tuple(sorted(("table", name, name, sql) for name, sql in _SCHEMA_TABLE_SQL_V1.items())),
-    2: tuple(sorted(("table", name, name, sql) for name, sql in _SCHEMA_TABLE_SQL.items())),
+    2: tuple(
+        sorted(
+            ("table", name, name, sql)
+            for name, sql in _SCHEMA_TABLE_SQL.items()
+            if name != "usage_accounting"
+        )
+    ),
+    3: tuple(sorted(("table", name, name, sql) for name, sql in _SCHEMA_TABLE_SQL.items())),
 }
 _EXPECTED_INTERNAL_SCHEMA_OBJECTS = {
     1: tuple(
@@ -151,6 +170,16 @@ _EXPECTED_INTERNAL_SCHEMA_OBJECTS[2] = tuple(
             ("index", "sqlite_autoindex_memory_projections_1", "memory_projections"),
             ("index", "sqlite_autoindex_memory_projections_2", "memory_projections"),
             ("index", "sqlite_autoindex_memory_projections_3", "memory_projections"),
+        )
+    )
+)
+_EXPECTED_INTERNAL_SCHEMA_OBJECTS[3] = tuple(
+    sorted(
+        (
+            *_EXPECTED_INTERNAL_SCHEMA_OBJECTS[2],
+            ("index", "sqlite_autoindex_usage_accounting_1", "usage_accounting"),
+            ("index", "sqlite_autoindex_usage_accounting_2", "usage_accounting"),
+            ("index", "sqlite_autoindex_usage_accounting_3", "usage_accounting"),
         )
     )
 )
@@ -180,6 +209,12 @@ _SCHEMA_COLUMNS = {
         "projection_hash",
         "request_fingerprint",
         "projection_json",
+    ),
+    "usage_accounting": (
+        "execution_id",
+        "accounting_hash",
+        "receipt_hash",
+        "accounting_json",
     ),
 }
 _SCHEMA_COLUMN_SHAPES = {
@@ -219,6 +254,12 @@ _SCHEMA_COLUMN_SHAPES = {
         ("projection_hash", "TEXT", 1, 0),
         ("request_fingerprint", "TEXT", 1, 0),
         ("projection_json", "BLOB", 1, 0),
+    ),
+    "usage_accounting": (
+        ("execution_id", "TEXT", 1, 1),
+        ("accounting_hash", "TEXT", 1, 0),
+        ("receipt_hash", "TEXT", 1, 0),
+        ("accounting_json", "BLOB", 1, 0),
     ),
 }
 
@@ -398,6 +439,11 @@ _SCHEMA_UNIQUE_INDEXES = {
         ("u", ("projection_hash",)),
         ("u", ("projection_id",)),
     ),
+    "usage_accounting": (
+        ("pk", ("execution_id",)),
+        ("u", ("accounting_hash",)),
+        ("u", ("receipt_hash",)),
+    ),
 }
 
 
@@ -452,6 +498,7 @@ class ReplayedExecution:
     event_bytes: tuple[bytes, ...]
     receipt_bytes: bytes | None
     projection_bytes: bytes | None
+    usage_accounting_bytes: bytes | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -665,6 +712,55 @@ def _decode_document(payload: object, *, expected_format: str) -> tuple[dict, by
     if canonical != payload:
         raise AgentEventLogCorrupt("event_log_storage_noncanonical")
     return document, canonical
+
+
+def _validated_usage_accounting_bytes(value: object) -> tuple[dict[str, object], bytes]:
+    try:
+        document = validate_usage_accounting(value)
+        encoded = _canonical_json(document)
+    except AgentEventLogError:
+        raise
+    except UsageEvidenceError as exc:
+        raise AgentEventLogCorrupt("event_log_usage_accounting_corrupt") from exc
+    if len(encoded) > MAX_AGENT_HARNESS_DOCUMENT_BYTES:
+        raise AgentEventLogCorrupt("event_log_document_too_large")
+    return document, encoded
+
+
+def _decode_usage_accounting(payload: object) -> tuple[dict[str, object], bytes]:
+    if type(payload) is not bytes or len(payload) > MAX_AGENT_HARNESS_DOCUMENT_BYTES:
+        raise AgentEventLogCorrupt("event_log_usage_accounting_corrupt")
+    try:
+        decoded = json.loads(
+            payload.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_float=_reject_float,
+            parse_constant=_reject_constant,
+        )
+    except (UnicodeError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise AgentEventLogCorrupt("event_log_usage_accounting_corrupt") from exc
+    document, canonical = _validated_usage_accounting_bytes(decoded)
+    if canonical != payload:
+        raise AgentEventLogCorrupt("event_log_storage_noncanonical")
+    return document, canonical
+
+
+def _usage_accounting_matches_receipt(
+    accounting: dict[str, object], receipt: dict[str, object]
+) -> bool:
+    usage = receipt["usage"]
+    return (
+        accounting["execution_id"] == receipt["execution_id"]
+        and accounting["receipt_hash"] == receipt["content_hash"]
+        and accounting["recognized_totals"]
+        == {
+            "input_tokens": usage["input_tokens"],
+            "output_tokens": usage["output_tokens"],
+            "cached_input_tokens": usage["cached_input_tokens"],
+            "cost_minor_units": usage["cost_minor_units"],
+            "currency": usage["currency"],
+        }
+    )
 
 
 def _plain_id(value: object, *, reason: str = "event_log_request_invalid") -> str:
@@ -1538,19 +1634,23 @@ class AgentEventLog:
                 )
             else:
                 version = self._read_schema_version_locked()
-                if version == 1:
-                    self._verify_schema_locked(schema_version=1)
+                if version in {1, 2}:
+                    self._verify_schema_locked(schema_version=version)
                     self._verify_lock_binding_locked()
                     self._verify_foreign_keys_locked()
-                    self._verify_all_executions_locked(schema_version=1)
-                    self.connection.execute(_SCHEMA_TABLE_SQL["memory_projections"])
+                    self._verify_all_executions_locked(schema_version=version)
+                    if version == 1:
+                        self.connection.execute(_SCHEMA_TABLE_SQL["memory_projections"])
+                    self.connection.execute(_SCHEMA_TABLE_SQL["usage_accounting"])
+                    self._migrate_legacy_usage_accounting_locked()
                     changed = self.connection.execute(
-                        "UPDATE schema_meta SET value = '2' WHERE key = 'schema_version' "
-                        "AND value = '1'"
+                        "UPDATE schema_meta SET value = '3' WHERE key = 'schema_version' "
+                        "AND value = ?",
+                        (str(version),),
                     ).rowcount
                     if changed != 1:
                         raise AgentEventLogCorrupt("event_log_version_unsupported")
-                    self._fault("before_schema_v2_migration_commit")
+                    self._fault("before_schema_v3_migration_commit")
                 elif version != AGENT_EVENT_LOG_SCHEMA_VERSION:
                     raise AgentEventLogCorrupt("event_log_version_unsupported")
             self._verify_version_locked()
@@ -1571,13 +1671,13 @@ class AgentEventLog:
             ).fetchone()
         except sqlite3.Error as exc:
             raise AgentEventLogCorrupt("event_log_schema_corrupt") from exc
-        if row is None or type(row["value"]) is not str or row["value"] not in {"1", "2"}:
+        if row is None or type(row["value"]) is not str or row["value"] not in {"1", "2", "3"}:
             raise AgentEventLogCorrupt("event_log_version_unsupported")
         return int(row["value"])
 
     def _verify_version_locked(self, *, allow_legacy: bool = False) -> int:
         version = self._read_schema_version_locked()
-        if version != AGENT_EVENT_LOG_SCHEMA_VERSION and not (allow_legacy and version == 1):
+        if version != AGENT_EVENT_LOG_SCHEMA_VERSION and not (allow_legacy and version in {1, 2}):
             raise AgentEventLogCorrupt("event_log_version_unsupported")
         self._verify_schema_locked(schema_version=version)
         self._verify_lock_binding_locked()
@@ -1627,6 +1727,30 @@ class AgentEventLog:
         self._verify_foreign_keys_locked()
         self._verify_all_executions_locked(schema_version=version)
 
+    def _migrate_legacy_usage_accounting_locked(self) -> None:
+        rows = self.connection.execute(
+            "SELECT execution_id, receipt_hash, receipt_json FROM receipts ORDER BY execution_id"
+        ).fetchall()
+        for row in rows:
+            receipt, _ = _decode_document(
+                row["receipt_json"], expected_format=AGENT_EXECUTION_RECEIPT_FORMAT
+            )
+            accounting = build_legacy_usage_accounting(receipt)
+            accounting_document, accounting_bytes = _validated_usage_accounting_bytes(accounting)
+            self.connection.execute(
+                """
+                INSERT INTO usage_accounting(
+                    execution_id, accounting_hash, receipt_hash, accounting_json
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (
+                    row["execution_id"],
+                    accounting_document["content_hash"],
+                    row["receipt_hash"],
+                    sqlite3.Binary(accounting_bytes),
+                ),
+            )
+
     def _verify_all_executions_locked(self, *, schema_version: int) -> None:
         try:
             rows = self.connection.execute(
@@ -1672,7 +1796,16 @@ class AgentEventLog:
                 raise AgentEventLogCorrupt("event_log_schema_corrupt")
             if tuple(internal_rows) != _EXPECTED_INTERNAL_SCHEMA_OBJECTS[schema_version]:
                 raise AgentEventLogCorrupt("event_log_schema_corrupt")
-            expected_tables = _SCHEMA_TABLE_SQL_V1 if schema_version == 1 else _SCHEMA_TABLE_SQL
+            if schema_version == 1:
+                expected_tables = _SCHEMA_TABLE_SQL_V1
+            elif schema_version == 2:
+                expected_tables = {
+                    name: sql
+                    for name, sql in _SCHEMA_TABLE_SQL.items()
+                    if name != "usage_accounting"
+                }
+            else:
+                expected_tables = _SCHEMA_TABLE_SQL
             for table in expected_tables:
                 expected = _SCHEMA_COLUMNS[table]
                 table_info = self.connection.execute(f"PRAGMA table_info({table})").fetchall()
@@ -1708,6 +1841,9 @@ class AgentEventLog:
                     ("executions", "execution_id", "execution_id", "NO ACTION", "NO ACTION"),
                 ),
                 "memory_projections": (
+                    ("executions", "execution_id", "execution_id", "NO ACTION", "NO ACTION"),
+                ),
+                "usage_accounting": (
                     ("executions", "execution_id", "execution_id", "NO ACTION", "NO ACTION"),
                 ),
             }
@@ -2040,12 +2176,18 @@ class AgentEventLog:
             "WHERE execution_id = ?",
             (row["execution_id"],),
         ).fetchone()[0]
+        accounting_total = self.connection.execute(
+            "SELECT COALESCE(SUM(length(accounting_json)), 0) FROM usage_accounting "
+            "WHERE execution_id = ?",
+            (row["execution_id"],),
+        ).fetchone()[0]
         return (
             len(row["activation_json"])
             + len(row["grant_json"])
             + event_total
             + receipt_total
             + projection_total
+            + accounting_total
         )
 
     def append_event(
@@ -2228,6 +2370,7 @@ class AgentEventLog:
         execution_id: str,
         receipt: dict[str, object],
         event: dict[str, object],
+        usage_accounting: dict[str, object],
         *,
         expected_sequence: int,
         expected_previous_hash: str | None,
@@ -2243,11 +2386,13 @@ class AgentEventLog:
             receipt, expected_format=AGENT_EXECUTION_RECEIPT_FORMAT
         )
         _, event_bytes = _validated_document_bytes(event, expected_format=AGENT_EVENT_FORMAT)
+        _, accounting_bytes = _validated_usage_accounting_bytes(usage_accounting)
         try:
             committed_now = self._finalize_once(
                 execution_id,
                 receipt,
                 event,
+                usage_accounting,
                 expected_sequence=expected_sequence,
                 expected_previous_hash=expected_previous_hash,
                 expected_generation=expected_generation,
@@ -2262,6 +2407,7 @@ class AgentEventLog:
                 execution_id=execution_id,
                 receipt_bytes=receipt_bytes,
                 event_bytes=event_bytes,
+                accounting_bytes=accounting_bytes,
                 expected_sequence=expected_sequence,
                 expected_previous_hash=expected_previous_hash,
                 expected_generation=expected_generation,
@@ -2274,6 +2420,7 @@ class AgentEventLog:
         execution_id: str,
         receipt_bytes: bytes,
         event_bytes: bytes,
+        accounting_bytes: bytes,
         expected_sequence: int,
         expected_previous_hash: str | None,
         expected_generation: int,
@@ -2286,6 +2433,7 @@ class AgentEventLog:
                 and replay.receipt_bytes == receipt_bytes
                 and len(replay.event_bytes) == expected_sequence + 1
                 and replay.event_bytes[expected_sequence] == event_bytes
+                and replay.usage_accounting_bytes == accounting_bytes
                 and replay.generation == expected_generation + 1
                 and (expected_sequence > 0 or expected_previous_hash is None)
             )
@@ -2302,6 +2450,7 @@ class AgentEventLog:
         execution_id: str,
         receipt: dict[str, object],
         event: dict[str, object],
+        usage_accounting: dict[str, object],
         *,
         expected_sequence: int,
         expected_previous_hash: str | None,
@@ -2317,6 +2466,9 @@ class AgentEventLog:
         event_document, event_bytes = _validated_document_bytes(
             event, expected_format=AGENT_EVENT_FORMAT
         )
+        accounting_document, accounting_bytes = _validated_usage_accounting_bytes(usage_accounting)
+        if not _usage_accounting_matches_receipt(accounting_document, receipt_document):
+            raise AgentEventLogConflict("event_log_usage_accounting_conflict")
         if event_document["event_type"] != "execution.receipt_recorded":
             raise AgentEventLogConflict("event_log_lifecycle_conflict")
         with self._transaction():
@@ -2341,6 +2493,7 @@ class AgentEventLog:
                     and event_document["previous_event_hash"] == expected_previous_hash
                     and existing.receipt_bytes == receipt_bytes
                     and existing.event_bytes[expected_sequence] == event_bytes
+                    and existing.usage_accounting_bytes == accounting_bytes
                 ):
                     return False
                 raise AgentEventLogConflict("event_log_finalize_conflict")
@@ -2383,7 +2536,10 @@ class AgentEventLog:
             if len(events) > MAX_AGENT_EVENT_LOG_EVENTS:
                 raise AgentEventLogConflict("event_log_event_bound_exceeded")
             if (
-                self._current_total_bytes_locked(row) + len(event_bytes) + len(receipt_bytes)
+                self._current_total_bytes_locked(row)
+                + len(event_bytes)
+                + len(receipt_bytes)
+                + len(accounting_bytes)
                 > MAX_AGENT_EVENT_LOG_EXECUTION_BYTES
             ):
                 raise AgentEventLogConflict("event_log_execution_too_large")
@@ -2402,6 +2558,20 @@ class AgentEventLog:
                 receipt_hash=receipt_hash,
             )
             try:
+                self.connection.execute(
+                    """
+                    INSERT INTO usage_accounting(
+                        execution_id, accounting_hash, receipt_hash, accounting_json
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        execution_id,
+                        accounting_document["content_hash"],
+                        receipt_hash,
+                        sqlite3.Binary(accounting_bytes),
+                    ),
+                )
+                self._fault("after_finalize_usage_accounting_insert")
                 self.connection.execute(
                     """
                     INSERT INTO receipts(execution_id, receipt_id, receipt_hash, receipt_json)
@@ -2874,6 +3044,27 @@ class AgentEventLog:
                 or receipt_row["receipt_hash"] != receipt["content_hash"]
             ):
                 raise AgentEventLogCorrupt("event_log_projection_corrupt")
+        accounting: dict[str, object] | None = None
+        accounting_bytes: bytes | None = None
+        accounting_row = None
+        if schema_version >= 3:
+            accounting_row = self.connection.execute(
+                "SELECT * FROM usage_accounting WHERE execution_id = ?",
+                (row["execution_id"],),
+            ).fetchone()
+            if accounting_row is not None:
+                accounting, accounting_bytes = _decode_usage_accounting(
+                    accounting_row["accounting_json"]
+                )
+                if (
+                    accounting_row["execution_id"] != row["execution_id"]
+                    or accounting_row["accounting_hash"] != accounting["content_hash"]
+                    or accounting_row["receipt_hash"] != accounting["receipt_hash"]
+                ):
+                    raise AgentEventLogCorrupt("event_log_usage_accounting_corrupt")
+        elif receipt is not None:
+            accounting = build_legacy_usage_accounting(receipt)
+            accounting, accounting_bytes = _validated_usage_accounting_bytes(accounting)
         projection: dict[str, object] | None = None
         projection_bytes: bytes | None = None
         projection_row = None
@@ -2923,6 +3114,9 @@ class AgentEventLog:
         if row["state"] == "terminal":
             if (
                 receipt is None
+                or accounting is None
+                or accounting_bytes is None
+                or not _usage_accounting_matches_receipt(accounting, receipt)
                 or receipt["receipt_id"] != row["receipt_id"]
                 or receipt["content_hash"] != row["receipt_hash"]
                 or not events
@@ -2952,6 +3146,7 @@ class AgentEventLog:
                 raise AgentEventLogCorrupt("event_log_projection_corrupt")
         elif (
             receipt is not None
+            or accounting is not None
             or projection is not None
             or row["receipt_id"] is not None
             or row["receipt_hash"] is not None
@@ -2970,6 +3165,8 @@ class AgentEventLog:
             total += len(receipt_bytes)
         if projection_bytes is not None:
             total += len(projection_bytes)
+        if accounting_bytes is not None:
+            total += len(accounting_bytes)
         if total > MAX_AGENT_EVENT_LOG_EXECUTION_BYTES:
             raise AgentEventLogCorrupt("event_log_execution_too_large")
         return ReplayedExecution(
@@ -2988,6 +3185,7 @@ class AgentEventLog:
             event_bytes=tuple(bytes(item) for item in event_bytes),
             receipt_bytes=None if receipt_bytes is None else bytes(receipt_bytes),
             projection_bytes=(None if projection_bytes is None else bytes(projection_bytes)),
+            usage_accounting_bytes=(None if accounting_bytes is None else bytes(accounting_bytes)),
         )
 
 

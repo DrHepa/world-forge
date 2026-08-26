@@ -848,12 +848,12 @@ audit the canonical bytes after reopen. Ordinary sessions retain a shared
 one-byte OS lock; only an exclusive offline recovery session can mark an
 interrupted prefix `recovery_required`, and it is never resumed or given a
 synthetic receipt. Unsealable private input receives no replay identity, so its
-failure receipt cannot be deduplicated on retry. The private SQLite v2 schema,
+failure receipt cannot be deduplicated on retry. The private SQLite v3 schema,
 internal indexes, bounded physical integrity, and startup foreign-key projection
-are checked exactly. Exact v1 ordinary stores migrate transactionally; offline
+are checked exactly. Exact v1/v2 ordinary stores migrate transactionally; offline
 recovery retains exact main/WAL/SHM evidence, validates and applies committed
-WAL frames without opening any database pathname, and serves the resulting v1
-or v2 logical image from digest-bound query-only memory. Any rollback-journal
+WAL frames without opening any database pathname, and serves the resulting v1,
+v2, or v3 logical image from digest-bound query-only memory. Any rollback-journal
 sidecar, including an empty or stale one, fails closed until a reviewed parser
 exists. Original crash bytes remain unchanged until an explicit recovery
 transition revalidates them and opens the original store. Local evidence proves
@@ -1010,7 +1010,7 @@ bytes may have been sent leaves the durable prefix open for offline recovery.
 See
 [ADR-0040](docs/decisions/0040-parent-owned-exact-origin-loopback-gateway.md).
 
-Private provider turns now use a version-2 authenticated correlated transcript
+Private provider turns use the version-2 authenticated correlated transcript
 instead of arbitrary history. Every accepted turn records one transient
 assistant item first, including ordered calls with mandatory provider-neutral
 IDs, then one exact correlated tool-result item per successful call. IDs are
@@ -1020,12 +1020,28 @@ request tools. Identical tool and argument requests remain valid when their
 neutral IDs differ. Each assistant item is bounded to 128 calls in host and
 self-contained worker validation. The transcript is sealed, cumulatively
 bounded to 64 KiB, and absent from public receipts, events, EventLog/SQLite,
-and stderr. The
-conformance runtime is revision 3 and the deterministic probe is revision 4,
+and stderr. Provider protocol v3 adds separately authenticated usage evidence.
+The conformance runtime is revision 4 and the deterministic probe is revision 5,
 with both existing runtime IDs and exactly two catalog entries retained. The
-loopback side-band remains version 1. Usage-source provenance is deliberately
-deferred. See
-[ADR-0041](docs/decisions/0041-private-correlated-provider-turn-transcript.md).
+loopback side-band remains version 1.
+
+Input, output, cached-input, and cost evidence use closed
+observed/derived/unavailable states and source kinds; derived tokens bind an
+explicit code-owned measurement-policy identity. Valid authenticated usage is
+durably accounted even when a sibling result field is malformed, while invalid
+outer authentication/runtime/hash evidence is never salvaged. Private EventLog
+v3 atomically stores one canonical sanitized usage-accounting document with
+every terminal receipt and synthesizes conservative legacy accounting during
+v1/v2 migration or detached reads.
+
+Public receipt token and cost fields are recognized/accounted ledger totals,
+not measurement truth. Cached zero can mean no recognized cache claim, not
+observed absence of caching. Null cost/currency means no recognized cost claim,
+not zero cost. No cache-rate, vendor-honesty, billing-correctness, or provider
+telemetry claim is made. Worker-originated money remains rejected; parent-owned
+pricing is a later slice. See
+[ADR-0041](docs/decisions/0041-private-correlated-provider-turn-transcript.md)
+and [ADR-0042](docs/decisions/0042-truthful-private-provider-usage-provenance.md).
 
 Slice 2B adds a pure deterministic evaluator and explicit-input, atomic
 no-replace CLI for the closed recorded-result plan, observation, and report

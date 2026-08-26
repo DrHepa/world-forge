@@ -47,6 +47,7 @@ from worldforge.agent_harness.provider_governance import (
     ProviderGovernanceDecision,
     ProviderGovernanceError,
 )
+from worldforge.agent_harness.usage import CostEvidence, TokenEvidence
 from worldforge.agent_harness.worker_registry import (
     fixed_provider_catalog,
     fixed_runtime_identity,
@@ -107,10 +108,38 @@ def _documents_with_requested_but_ineffective_source_read():
 
 def _usage(**changes: object) -> ProviderUsage:
     values = dict(
-        input_tokens=3, output_tokens=2, cached_input_tokens=1, cost_minor_units=0, currency="USD"
+        input_tokens=3,
+        output_tokens=2,
+        cached_input_tokens=1,
+        cost_minor_units=None,
+        currency=None,
     )
     values.update(changes)
-    return ProviderUsage(**values)
+
+    def token(name: str):
+        value = values[name]
+        if type(value) is int and 0 <= value <= MAX_SAFE_INTEGER:
+            return TokenEvidence.create(
+                state="observed", source_kind="provider_result", value=value
+            )
+        return value
+
+    cost_value = values["cost_minor_units"]
+    currency = values["currency"]
+    if cost_value is None and currency is None:
+        cost = CostEvidence.create(
+            state="unavailable",
+            source_kind="none",
+            unavailable_reason="parent_pricing_unavailable",
+        )
+    else:
+        cost = {"cost_minor_units": cost_value, "currency": currency}
+    return ProviderUsage(
+        token("input_tokens"),
+        token("output_tokens"),
+        token("cached_input_tokens"),
+        cost,  # type: ignore[arg-type]
+    )
 
 
 def _request(activation, grant, **limit_changes: object) -> ExecutionRequest:
@@ -118,12 +147,14 @@ def _request(activation, grant, **limit_changes: object) -> ExecutionRequest:
         max_turns=4,
         max_tool_calls=4,
         max_total_tokens=100,
-        max_cost_minor_units=10,
-        currency="USD",
+        max_cost_minor_units=None,
+        currency=None,
         max_duration_ms=100,
         deadline_ms=2_000,
     )
     limits.update(limit_changes)
+    if "max_cost_minor_units" in limit_changes and "currency" not in limit_changes:
+        limits["currency"] = "USD" if limits["max_cost_minor_units"] is not None else None
     return ExecutionRequest(
         activation=activation,
         grant=grant,
@@ -187,6 +218,7 @@ class _ProviderAutoApprovingKernel(AgentExecutionKernel):
                 currency=limits.currency,
                 max_duration_ms=limits.max_duration_ms,
                 deadline_ms=limits.deadline_ms,
+                usage_policy_hash=spec.usage_policy_hash,
                 pricing_policy_hash=spec.pricing_policy_hash,
                 credential_revision_id=None,
             )
@@ -225,6 +257,7 @@ def _kernel(
     clock=None,
     cancellation=None,
     journal=None,
+    projection_corruptor=None,
 ):
     clock = clock or FakeClock()
     cancellation = cancellation or FakeCancellation()
@@ -237,6 +270,12 @@ def _kernel(
             return super().preflight(execution_id, **kwargs)
 
     class AutoApprovingTestKernel(_ProviderAutoApprovingKernel):
+        def _run_turns(self, *args, **kwargs):
+            result = super()._run_turns(*args, **kwargs)
+            if projection_corruptor is not None:
+                projection_corruptor(args[3])
+            return result
+
         def execute(self, request):
             prepared = replace(request, approval_id="approval_legacy_test_01")
             try:
@@ -1383,16 +1422,12 @@ class AgentExecutionKernelTests(unittest.TestCase):
             [
                 ProviderTurnResult(
                     "ok",
-                    _usage(
-                        input_tokens=4, output_tokens=6, cached_input_tokens=0, cost_minor_units=10
-                    ),
+                    _usage(input_tokens=4, output_tokens=6, cached_input_tokens=0),
                     completed=True,
                 )
             ]
         )
-        result = _kernel(exact)[0].execute(
-            _request(activation, grant, max_total_tokens=10, max_cost_minor_units=10)
-        )
+        result = _kernel(exact)[0].execute(_request(activation, grant, max_total_tokens=10))
         self.assertEqual("succeeded", result.outcome)
         over = FakeProvider(
             [
@@ -1417,8 +1452,10 @@ class AgentExecutionKernelTests(unittest.TestCase):
             ]
         )
         self.assertEqual(
-            ["provider_usage_invalid"],
-            _kernel(unreported)[0].execute(_request(activation, grant)).receipt["failure_codes"],
+            ["provider_usage_unavailable"],
+            _kernel(unreported)[0]
+            .execute(_request(activation, grant, max_cost_minor_units=10))
+            .receipt["failure_codes"],
         )
         at_deadline = FakeClock(2_000)
         provider = FakeProvider([ProviderTurnResult("never", _usage(), completed=True)])
@@ -1707,8 +1744,8 @@ class AgentExecutionKernelTests(unittest.TestCase):
         cost_result = _kernel(FakeProvider([cancel_with_cost]), cancellation=token)[0].execute(
             _request(activation, grant, max_cost_minor_units=10)
         )
-        self.assertEqual(["cost_budget_exceeded"], cost_result.receipt["failure_codes"])
-        self.assertEqual(11, cost_result.receipt["usage"]["cost_minor_units"])
+        self.assertEqual(["provider_usage_invalid"], cost_result.receipt["failure_codes"])
+        self.assertIsNone(cost_result.receipt["usage"]["cost_minor_units"])
 
     def test_usage_precedes_nested_provider_result_validation(self) -> None:
         activation, grant = _documents()
@@ -1755,6 +1792,133 @@ class AgentExecutionKernelTests(unittest.TestCase):
                 self.assertEqual([code], result.receipt["failure_codes"])
                 self.assertEqual(accounted[0], result.receipt["usage"]["input_tokens"])
                 self.assertEqual(accounted[1], result.receipt["usage"]["output_tokens"])
+
+    def test_unavailable_input_rejects_every_numeric_cached_claim_atomically(self) -> None:
+        activation, grant = _documents()
+        policy_hash = fixed_runtime_spec().usage_policy_hash
+        unavailable_input = TokenEvidence.create(
+            state="unavailable",
+            source_kind="none",
+            unavailable_reason="provider_omitted",
+        )
+        output = TokenEvidence.create(
+            state="observed",
+            source_kind="provider_result",
+            value=0,
+        )
+        cost = CostEvidence.create(
+            state="unavailable",
+            source_kind="none",
+            unavailable_reason="parent_pricing_unavailable",
+        )
+        for state in ("observed", "derived"):
+            for value in (0, 1):
+                with self.subTest(state=state, value=value):
+                    cached = TokenEvidence.create(
+                        state=state,
+                        source_kind=(
+                            "provider_result" if state == "observed" else "code_owned_runtime"
+                        ),
+                        value=value,
+                        policy_hash=None if state == "observed" else policy_hash,
+                    )
+                    usage = ProviderUsage(unavailable_input, output, cached, cost)
+                    journal = FakeJournal()
+                    result = _kernel(
+                        FakeProvider([ProviderTurnResult("discard", usage, completed=True)]),
+                        journal=journal,
+                    )[0].execute(_request(activation, grant))
+                    self.assertEqual("failed", result.outcome)
+                    self.assertEqual(["provider_usage_invalid"], result.receipt["failure_codes"])
+                    self.assertEqual(
+                        (0, 0, 0),
+                        (
+                            result.receipt["usage"]["input_tokens"],
+                            result.receipt["usage"]["output_tokens"],
+                            result.receipt["usage"]["cached_input_tokens"],
+                        ),
+                    )
+                    self.assertEqual(
+                        ["begin", "append", "append", "append", "finalize"],
+                        journal.operations,
+                    )
+                    self.assertEqual(0, journal.usage_accounting["turn_count"])
+
+        invalid_cached = TokenEvidence.create(
+            state="observed",
+            source_kind="provider_result",
+            value=0,
+        )
+        journal = FakeJournal()
+        result = _kernel(
+            FakeProvider(
+                [
+                    ProviderTurnResult("continue", _usage(), completed=False),
+                    ProviderTurnResult(
+                        "discard",
+                        ProviderUsage(unavailable_input, output, invalid_cached, cost),
+                        completed=True,
+                    ),
+                ]
+            ),
+            journal=journal,
+        )[0].execute(_request(activation, grant))
+        self.assertEqual(["provider_usage_invalid"], result.receipt["failure_codes"])
+        self.assertEqual(
+            (3, 2, 1),
+            (
+                result.receipt["usage"]["input_tokens"],
+                result.receipt["usage"]["output_tokens"],
+                result.receipt["usage"]["cached_input_tokens"],
+            ),
+        )
+        self.assertEqual(1, journal.usage_accounting["turn_count"])
+
+        unavailable_cached = TokenEvidence.create(
+            state="unavailable",
+            source_kind="none",
+            unavailable_reason="provider_omitted",
+        )
+        journal = FakeJournal()
+        unavailable = _kernel(
+            FakeProvider(
+                [
+                    ProviderTurnResult(
+                        "discard",
+                        ProviderUsage(unavailable_input, output, unavailable_cached, cost),
+                        completed=True,
+                    )
+                ]
+            ),
+            journal=journal,
+        )[0].execute(_request(activation, grant))
+        self.assertEqual(["provider_usage_unavailable"], unavailable.receipt["failure_codes"])
+        self.assertEqual(1, journal.usage_accounting["turn_count"])
+
+    def test_impossible_internal_projection_terminalizes_as_bounded_provider_failure(self) -> None:
+        activation, grant = _documents()
+        journal = FakeJournal()
+
+        def corrupt(ledger):
+            ledger.input_tokens = 0
+            ledger.cached_input_tokens = 1
+
+        kernel, _journal = _kernel(
+            FakeProvider([ProviderTurnResult("discard", _usage(), completed=True)]),
+            journal=journal,
+            projection_corruptor=corrupt,
+        )
+        result = kernel.execute(_request(activation, grant))
+        self.assertEqual("failed", result.outcome)
+        self.assertEqual(["provider_usage_invalid"], result.receipt["failure_codes"])
+        self.assertEqual(
+            (3, 1),
+            (
+                result.receipt["usage"]["input_tokens"],
+                result.receipt["usage"]["cached_input_tokens"],
+            ),
+        )
+        self.assertEqual("finalize", journal.operations[-1])
 
     def test_valid_usage_is_accounted_before_cancel_precedes_malformed_nested_result(
         self,
@@ -1850,11 +2014,21 @@ class AgentExecutionKernelTests(unittest.TestCase):
 
         missing_fields = object.__new__(ProviderTurnResult)
 
+        valid_usage = _usage()
         cases = (
             (object(), "provider_result_invalid"),
             (missing_fields, "provider_result_invalid"),
             (
-                ProviderTurnResult("x", ForgedUsage(1, 1, 0, 0, "USD"), completed=True),
+                ProviderTurnResult(
+                    "x",
+                    ForgedUsage(
+                        valid_usage.input_tokens,
+                        valid_usage.output_tokens,
+                        valid_usage.cached_input_tokens,
+                        valid_usage.cost,
+                    ),
+                    completed=True,
+                ),
                 "provider_usage_invalid",
             ),
             (
@@ -2661,7 +2835,7 @@ class AgentExecutionKernelTests(unittest.TestCase):
         finalize_clock = SecondaryFailClock()
 
         class FailingFinalizeJournal(FakeJournal):
-            def finalize(self, execution_id, receipt, event, **kwargs):
+            def finalize(self, execution_id, receipt, event, usage_accounting, **kwargs):
                 self.operations.append("finalize")
                 finalize_clock.fail = True
                 raise ValueError("PRIVATE_FINALIZATION_FAILURE")
@@ -2723,8 +2897,8 @@ class AgentExecutionKernelTests(unittest.TestCase):
         finalize_clock = SecondaryFailClock()
 
         class MutatingFinalizeJournal(FakeJournal):
-            def finalize(self, execution_id, receipt, event, **kwargs):
-                super().finalize(execution_id, receipt, event, **kwargs)
+            def finalize(self, execution_id, receipt, event, usage_accounting, **kwargs):
+                super().finalize(execution_id, receipt, event, usage_accounting, **kwargs)
                 receipt["outcome"] = "failed"
                 event["subject"]["content_hash"] = "f" * 64
                 finalize_clock.fail = True
@@ -2838,7 +3012,7 @@ class AgentExecutionKernelTests(unittest.TestCase):
                         super().__init__()
                         self.active_replacement = active_replacement
 
-                    def finalize(self, execution_id, receipt, event, **kwargs):
+                    def finalize(self, execution_id, receipt, event, usage_accounting, **kwargs):
                         if self.receipt is not None:
                             raise ValueError("private duplicate receipt")
                         self.receipt = receipt
@@ -2877,8 +3051,8 @@ class AgentExecutionKernelTests(unittest.TestCase):
         self.assertEqual("journal_corrupt", raised.exception.reason_code)
 
         class MutatingFinalizeJournal(FakeJournal):
-            def finalize(self, execution_id, receipt, event, **kwargs):
-                super().finalize(execution_id, receipt, event, **kwargs)
+            def finalize(self, execution_id, receipt, event, usage_accounting, **kwargs):
+                super().finalize(execution_id, receipt, event, usage_accounting, **kwargs)
                 receipt["outcome"] = "failed"
                 receipt["failure_codes"] = ["private_secret"]
                 event["subject"]["content_hash"] = "f" * 64
@@ -2893,7 +3067,7 @@ class AgentExecutionKernelTests(unittest.TestCase):
         self.assertIsNotNone(journal.receipt)
 
         class FailingFinalizeJournal(FakeJournal):
-            def finalize(self, execution_id, receipt, event, **kwargs):
+            def finalize(self, execution_id, receipt, event, usage_accounting, **kwargs):
                 raise ValueError("PRIVATE_ATOMIC_FAILURE")
 
         kernel, journal = _kernel(
@@ -2912,7 +3086,7 @@ class AgentExecutionKernelTests(unittest.TestCase):
         token = FakeCancellation()
 
         class CancellingFinalizeJournal(FakeJournal):
-            def finalize(self, execution_id, receipt, event, **kwargs):
+            def finalize(self, execution_id, receipt, event, usage_accounting, **kwargs):
                 token.cancelled = True
                 raise ValueError("PRIVATE_CANCEL_DURING_FINALIZE")
 
@@ -2941,7 +3115,7 @@ class AgentExecutionKernelTests(unittest.TestCase):
                     raise ValueError("private sequence mismatch")
                 self.events.append(event)
 
-            def finalize(self, execution_id, receipt, event, **kwargs):
+            def finalize(self, execution_id, receipt, event, usage_accounting, **kwargs):
                 self.receipt = receipt
                 self.events.append(event)
 

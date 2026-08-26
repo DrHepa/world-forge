@@ -604,12 +604,12 @@ atomically records the receipt and terminal event, and revalidates immutable
 audit records after reopen. Ordinary stores hold a shared retained one-byte OS
 lock before SQLite opens; only a dedicated exclusive offline recovery store can
 mark an orphaned or indeterminate open prefix `recovery_required`. Lock identity
-is bound into the exact private v2 schema, whose canonical DDL, relational
+is bound into the exact private v3 schema, whose canonical DDL, relational
 shape, internal indexes, bounded physical integrity, and startup foreign-key
-projection are fail-closed. Exact v1 ordinary stores migrate transactionally;
+projection are fail-closed. Exact v1/v2 ordinary stores migrate transactionally;
 recovery retains exact main/WAL/SHM bytes and identities, validates the main
 header and the complete WAL checksum chain, applies only frames through the last
-commit entirely offline, and serves the resulting v1 or v2 image from
+commit entirely offline, and serves the resulting v1, v2, or v3 image from
 digest-bound query-only memory. It never SQLite-opens a copied or original
 pathname for construction or reads, creates no temporary database, and rejects
 every rollback-journal sidecar until a reviewed parser exists. Each read boundary
@@ -805,15 +805,34 @@ transcript. A completed provider turn contributes one assistant record first,
 followed immediately by ordered tool-result records matching mandatory
 provider-neutral call IDs and tool IDs. Whole-batch preflight rejects reused,
 missing, orphaned, reordered, mismatched, malformed, or completed-plus-call
-input before tool effects. The version-2 request/result protocol HMACs the exact
-discriminated serialization; the full transient transcript is sealed and
-bounded to 64 KiB, separately from the 256-record and outer-frame bounds, and
-each assistant item is bounded to 128 calls in both host and worker validation.
-Conformance revision 3 and deterministic-probe revision 4
+input before tool effects. The version-2 transcript serialization remains, and
+the v3 request/result protocol HMACs it together with separate usage evidence.
+The full transient transcript is sealed and bounded to 64 KiB, separately from
+the 256-record and outer-frame bounds, and each assistant item is bounded to 128
+calls in both host and worker validation.
+Conformance revision 4 and deterministic-probe revision 5
 retain the two existing runtime IDs; loopback side-band v1 is unchanged. Raw
 transcript values and call IDs remain absent from durable/public evidence.
-Usage-source provenance remains the next separate blocker. See
-[ADR-0041](decisions/0041-private-correlated-provider-turn-transcript.md).
+
+ADR-0042 gives each token and cost metric a closed observed, code-owned derived,
+or unavailable provenance state. Derived tokens bind a frozen measurement-policy
+hash through runtime specification, catalog selection, governance, and request
+fingerprint. Provider-originated money remains rejected until a separate
+parent-owned pricing authority exists. Authenticated outer-frame identity is
+validated before usage parsing. Valid usage is sealed and projected before
+budget, availability, cancellation, revocation, and nested-result checks, so a
+malformed sibling cannot erase recognized incurred evidence.
+
+Private EventLog v3 atomically binds one canonical sanitized accounting
+document to every terminal receipt; exact duplicates require its byte identity.
+Ordinary v1/v2 migration and detached legacy reads use conservative
+`legacy_receipt_totals` records rather than claiming historical values were
+observed. Public receipt usage remains recognized/accounted ledger totals, not
+measurement truth: cached zero need not mean observed no caching, and null
+cost/currency need not mean zero cost. This makes no cache-rate,
+vendor-honesty, billing, telemetry, real-provider, or parent-pricing claim. See
+[ADR-0041](decisions/0041-private-correlated-provider-turn-transcript.md)
+and [ADR-0042](decisions/0042-truthful-private-provider-usage-provenance.md).
 
 Slice 2B retains the closed, identity/evidence-only plan, observation, and report
 boundary for an optional codebase-memory comparison and adds a pure evaluator

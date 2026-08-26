@@ -23,6 +23,7 @@ from tests.test_agent_execution_kernel import (
     _kernel,
     _ProviderAutoApprovingKernel,
     _request,
+    _usage,
 )
 from worldforge.agent_harness import OneShotProviderSupervisor
 from worldforge.agent_harness import process_supervisor as process_supervisor_module
@@ -33,7 +34,6 @@ from worldforge.agent_harness.ports import (
     ProviderBoundaryControl,
     ProviderTurnRequest,
     ProviderTurnResult,
-    ProviderUsage,
 )
 from worldforge.agent_harness.process_supervisor import (
     ProviderBoundaryFailure,
@@ -68,6 +68,35 @@ def _control(reason: str | None = None) -> ProviderBoundaryControl:
 
 def _case(action: str = "echo", **values: object) -> dict[str, object]:
     return {"__worldforge_conformance__": {"action": action, **values}}
+
+
+def _worker_usage(
+    input_tokens: object,
+    output_tokens: object,
+    cached_input_tokens: object,
+) -> dict[str, object]:
+    def observed(value: object) -> dict[str, object]:
+        return {
+            "state": "observed",
+            "source_kind": "provider_result",
+            "value": value,
+            "policy_hash": None,
+            "unavailable_reason": None,
+        }
+
+    return {
+        "input_tokens": observed(input_tokens),
+        "output_tokens": observed(output_tokens),
+        "cached_input_tokens": observed(cached_input_tokens),
+        "cost": {
+            "state": "unavailable",
+            "source_kind": "none",
+            "value": None,
+            "currency": None,
+            "policy_hash": None,
+            "unavailable_reason": "parent_pricing_unavailable",
+        },
+    }
 
 
 def _fake_retained_identity(
@@ -262,7 +291,7 @@ class LinuxOneShotProviderSupervisorTests(unittest.TestCase):
         assert type(request_hash) is str
         result = ProviderTurnResult(
             private_output={"answer": 42},
-            usage=ProviderUsage(1, 1, 0, 0, "USD"),
+            usage=_usage(input_tokens=1, output_tokens=1, cached_input_tokens=0),
             completed=True,
         )
         result_frame = build_result_frame(
@@ -359,13 +388,7 @@ class LinuxOneShotProviderSupervisorTests(unittest.TestCase):
             private_input=_case(
                 "echo",
                 payload="private",
-                usage={
-                    "input_tokens": 3,
-                    "output_tokens": 2,
-                    "cached_input_tokens": 1,
-                    "cost_minor_units": 0,
-                    "currency": "USD",
-                },
+                usage=_worker_usage(3, 2, 1),
             ),
         )
         result = _kernel(supervisor)[0].execute(request)
@@ -384,17 +407,21 @@ class LinuxOneShotProviderSupervisorTests(unittest.TestCase):
                 private_input=_case(
                     "echo",
                     usage={
-                        "input_tokens": 1,
-                        "output_tokens": 1,
-                        "cached_input_tokens": 0,
-                        "cost_minor_units": 11,
-                        "currency": "USD",
+                        **_worker_usage(1, 1, 0),
+                        "cost": {
+                            "state": "observed",
+                            "source_kind": "provider_result",
+                            "value": 11,
+                            "currency": "USD",
+                            "policy_hash": None,
+                            "unavailable_reason": None,
+                        },
                     },
                 ),
             )
         )
-        self.assertEqual(["cost_budget_exceeded"], cost_result.receipt["failure_codes"])
-        self.assertEqual(11, cost_result.receipt["usage"]["cost_minor_units"])
+        self.assertEqual(["provider_usage_invalid"], cost_result.receipt["failure_codes"])
+        self.assertIsNone(cost_result.receipt["usage"]["cost_minor_units"])
 
     def test_kernel_maps_proven_empty_stop_reasons_and_private_timeout(self) -> None:
         activation, grant = _documents()
@@ -1151,29 +1178,28 @@ class LinuxOneShotProviderSupervisorTests(unittest.TestCase):
                 self.assertIsNone(supervisor.active_broker_pid)
 
     def test_result_protocol_rejects_nested_type_bound_and_collection_violations(self) -> None:
-        cases = (
+        invalid_usage = _case(
+            "echo",
+            usage=_worker_usage(-1, 1, 0),
+        )
+        supervisor = OneShotProviderSupervisor(turn_timeout_ms=2_000)
+        with self.assertRaisesRegex(ProviderBoundaryFailure, "provider_failed"):
+            supervisor.turn(_turn_request(invalid_usage), boundary=_control())
+
+        malformed_siblings = (
             _case("echo", completed=1),
-            _case(
-                "echo",
-                usage={
-                    "input_tokens": -1,
-                    "output_tokens": 1,
-                    "cached_input_tokens": 0,
-                    "cost_minor_units": 0,
-                    "currency": "USD",
-                },
-            ),
             _case("echo", tool_calls=[{"tool_id": "source.read"}]),
             _case(
                 "echo",
                 artifact_proposals=[{"private_payload": {}} for _ in range(65)],
             ),
         )
-        for private_input in cases:
+        for private_input in malformed_siblings:
             with self.subTest(case=private_input):
                 supervisor = OneShotProviderSupervisor(turn_timeout_ms=2_000)
-                with self.assertRaisesRegex(ProviderBoundaryFailure, "provider_failed"):
-                    supervisor.turn(_turn_request(private_input), boundary=_control())
+                result = supervisor.turn(_turn_request(private_input), boundary=_control())
+                self.assertEqual("worker_protocol_result_invalid", result.nested_failure_code)
+                self.assertEqual(1, result.usage.input_tokens.value)
 
     def test_double_fork_setsid_ignored_signal_and_inherited_pipe_are_all_reaped(self) -> None:
         supervisor = OneShotProviderSupervisor(turn_timeout_ms=2_000)
@@ -1873,7 +1899,7 @@ if __name__ == "__main__":
     def test_fixed_runtime_identity_and_bootstrap_are_not_caller_injectable(self) -> None:
         expected = {
             "id": "worldforge_conformance_provider",
-            "revision": 3,
+            "revision": 4,
             "content_hash": hashlib.sha256(
                 worker_module.WORKER_BOOTSTRAP_TEMPLATE.encode("utf-8")
             ).hexdigest(),

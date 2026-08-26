@@ -21,6 +21,7 @@ from .provider_egress import (
     _validate_provider_egress_profile,
     provider_egress_enforcement_profile,
 )
+from .usage import code_owned_usage_policy_hash
 from .worker import (
     RUNTIME_CONTENT_HASH_TOKEN,
     _conformance_worker_artifact,
@@ -29,7 +30,7 @@ from .worker import (
 )
 
 _REGISTRY_ERROR = "code_owned_runtime_registry_invalid"
-_PROTOCOL_VERSION = 2
+_PROTOCOL_VERSION = 3
 _ENVIRONMENT_PROFILE = (
     ("ANTHROPIC_DISABLE_TELEMETRY", "1"),
     ("DO_NOT_TRACK", "1"),
@@ -133,6 +134,7 @@ def _expected_spec(
         endpoint_policy_hash=endpoint_policy_hash,
         egress_enforcement_hash=egress_enforcement.content_hash,
         telemetry_attestation_hash=telemetry_attestation_hash,
+        usage_policy_hash=code_owned_usage_policy_hash(artifact.identifier),
         pricing_policy_hash=None,
         pricing_currency=None,
         credential_requirement_hash=None,

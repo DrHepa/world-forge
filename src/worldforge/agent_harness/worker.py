@@ -5,16 +5,18 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 
+from .usage import code_owned_usage_policy_hash
 from .worker_limits import MAX_PROVIDER_TOOL_CALLS_PER_TURN
 
 # This source is deliberately self-contained.  ``-I -S`` prevents the child
 # from importing the checkout, so the supervisor passes no module or path.
 _CONFORMANCE_RUNTIME_ID = "worldforge_conformance_provider"
-_CONFORMANCE_RUNTIME_REVISION = 3
+_CONFORMANCE_RUNTIME_REVISION = 4
 _RUNTIME_ID_TOKEN = "__WORLD_FORGE_RUNTIME_ID__"
 _RUNTIME_REVISION_TOKEN = "__WORLD_FORGE_RUNTIME_REVISION__"
 _TOOL_CALL_LIMIT_TOKEN = "__WORLD_FORGE_MAX_TOOL_CALLS_PER_TURN__"
 RUNTIME_CONTENT_HASH_TOKEN = "__WORLD_FORGE_RUNTIME_CONTENT_HASH__"
+_USAGE_POLICY_HASH_TOKEN = "__WORLD_FORGE_USAGE_POLICY_HASH__"
 
 
 def _embed_tool_call_limit(source: str) -> str:
@@ -49,6 +51,7 @@ RUNTIME = {
     "revision": __WORLD_FORGE_RUNTIME_REVISION__,
     "content_hash": "__WORLD_FORGE_RUNTIME_CONTENT_HASH__",
 }
+USAGE_POLICY_HASH = "__WORLD_FORGE_USAGE_POLICY_HASH__"
 MAX_DEPTH = 64
 MAX_TRANSCRIPT = 256
 MAX_SAFE_INTEGER = (1 << 53) - 1
@@ -309,7 +312,7 @@ def read_request(key):
         raise ValueError()
     if (
         type(document["format_version"]) is not int
-        or document["format_version"] != 2
+        or document["format_version"] != 3
         or not exact_sha256(document["nonce"])
         or not exact_runtime(document["runtime"])
     ):
@@ -329,7 +332,7 @@ def read_request(key):
 def result_document(request_document, result):
     document = {
         "format": "world-forge.private.provider_turn_result",
-        "format_version": 2,
+        "format_version": 3,
         "nonce": request_document["nonce"],
         "request_hash": request_document["request_hash"],
         "result": result,
@@ -369,11 +372,23 @@ def emit(document, key, action):
 
 def usage(config):
     return config.get("usage", {
-        "input_tokens": 1,
-        "output_tokens": 1,
-        "cached_input_tokens": 0,
-        "cost_minor_units": 0,
-        "currency": "USD",
+        "input_tokens": {
+            "state": "derived", "source_kind": "code_owned_runtime", "value": 1,
+            "policy_hash": USAGE_POLICY_HASH, "unavailable_reason": None,
+        },
+        "output_tokens": {
+            "state": "derived", "source_kind": "code_owned_runtime", "value": 1,
+            "policy_hash": USAGE_POLICY_HASH, "unavailable_reason": None,
+        },
+        "cached_input_tokens": {
+            "state": "unavailable", "source_kind": "none", "value": None,
+            "policy_hash": None, "unavailable_reason": "code_owned_policy_absent",
+        },
+        "cost": {
+            "state": "unavailable", "source_kind": "none", "value": None,
+            "currency": None, "policy_hash": None,
+            "unavailable_reason": "parent_pricing_unavailable",
+        },
     })
 
 def spawn_tree():
@@ -504,9 +519,14 @@ WORKER_BOOTSTRAP_TEMPLATE = _embed_tool_call_limit(
     _WORKER_BOOTSTRAP_TEMPLATE.replace(
         _RUNTIME_ID_TOKEN,
         _CONFORMANCE_RUNTIME_ID,
-    ).replace(
+    )
+    .replace(
         _RUNTIME_REVISION_TOKEN,
         str(_CONFORMANCE_RUNTIME_REVISION),
+    )
+    .replace(
+        _USAGE_POLICY_HASH_TOKEN,
+        code_owned_usage_policy_hash(_CONFORMANCE_RUNTIME_ID),
     )
 )
 _CONFORMANCE_RUNTIME_HASH = hashlib.sha256(WORKER_BOOTSTRAP_TEMPLATE.encode("utf-8")).hexdigest()
@@ -517,7 +537,7 @@ WORKER_BOOTSTRAP = WORKER_BOOTSTRAP_TEMPLATE.replace(
 
 
 _DETERMINISTIC_PROBE_RUNTIME_ID = "worldforge_deterministic_probe_provider"
-_DETERMINISTIC_PROBE_RUNTIME_REVISION = 4
+_DETERMINISTIC_PROBE_RUNTIME_REVISION = 5
 _DETERMINISTIC_PROBE_BOOTSTRAP_TEMPLATE_SOURCE = r"""
 import hashlib
 import hmac
@@ -534,9 +554,10 @@ MAX_GATEWAY_REQUEST_BODY = 8 * 1024
 MAX_GATEWAY_RESPONSE_BODY = 64 * 1024
 RUNTIME = {
     "id": "worldforge_deterministic_probe_provider",
-    "revision": 4,
+    "revision": 5,
     "content_hash": "__WORLD_FORGE_RUNTIME_CONTENT_HASH__",
 }
+USAGE_POLICY_HASH = "__WORLD_FORGE_USAGE_POLICY_HASH__"
 MAX_DEPTH = 64
 MAX_TRANSCRIPT = 256
 MAX_SAFE_INTEGER = (1 << 53) - 1
@@ -796,7 +817,7 @@ def read_request(key):
         raise ValueError()
     if (
         type(document["format_version"]) is not int
-        or document["format_version"] != 2
+        or document["format_version"] != 3
         or not exact_sha256(document["nonce"])
         or not exact_runtime(document["runtime"])
         or not exact_sha256(document["mac"])
@@ -963,11 +984,23 @@ def main():
     result = {
         "private_output": private_output,
         "usage": {
-            "input_tokens": 1,
-            "output_tokens": 1,
-            "cached_input_tokens": 0,
-            "cost_minor_units": 0,
-            "currency": "USD",
+            "input_tokens": {
+                "state": "derived", "source_kind": "code_owned_runtime", "value": 1,
+                "policy_hash": USAGE_POLICY_HASH, "unavailable_reason": None,
+            },
+            "output_tokens": {
+                "state": "derived", "source_kind": "code_owned_runtime", "value": 1,
+                "policy_hash": USAGE_POLICY_HASH, "unavailable_reason": None,
+            },
+            "cached_input_tokens": {
+                "state": "unavailable", "source_kind": "none", "value": None,
+                "policy_hash": None, "unavailable_reason": "code_owned_policy_absent",
+            },
+            "cost": {
+                "state": "unavailable", "source_kind": "none", "value": None,
+                "currency": None, "policy_hash": None,
+                "unavailable_reason": "parent_pricing_unavailable",
+            },
         },
         "tool_calls": [],
         "artifact_proposals": [],
@@ -977,7 +1010,7 @@ def main():
     }
     document = {
         "format": "world-forge.private.provider_turn_result",
-        "format_version": 2,
+        "format_version": 3,
         "nonce": request_document["nonce"],
         "request_hash": request_document["request_hash"],
         "result": result,
@@ -998,6 +1031,9 @@ except BaseException:
 
 _DETERMINISTIC_PROBE_BOOTSTRAP_TEMPLATE = _embed_tool_call_limit(
     _DETERMINISTIC_PROBE_BOOTSTRAP_TEMPLATE_SOURCE
+).replace(
+    _USAGE_POLICY_HASH_TOKEN,
+    code_owned_usage_policy_hash(_DETERMINISTIC_PROBE_RUNTIME_ID),
 )
 
 
@@ -1021,7 +1057,7 @@ def _worker_artifact(
     return _WorkerArtifact(
         identifier=identifier,
         revision=revision,
-        protocol_version=2,
+        protocol_version=3,
         bootstrap_template=bootstrap_template,
         bootstrap_source=bootstrap_template.replace(
             RUNTIME_CONTENT_HASH_TOKEN,

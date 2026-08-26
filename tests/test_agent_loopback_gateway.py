@@ -18,7 +18,7 @@ from pathlib import Path
 from unittest import mock
 
 from tests.agent_harness_fakes import FakeCancellation, FakeClock
-from tests.test_agent_execution_kernel import _request
+from tests.test_agent_execution_kernel import _request, _usage
 from tests.test_agent_provider_governance import _execution_selection
 from tests.test_agent_runtime_dispatch import _documents_for_runtime
 from worldforge.agent_harness import AgentEventLog, AgentExecutionCoordinator, CapabilityBroker
@@ -45,7 +45,6 @@ from worldforge.agent_harness.ports import (
     ProviderBoundaryControl,
     ProviderTurnRequest,
     ProviderTurnResult,
-    ProviderUsage,
 )
 from worldforge.agent_harness.process_supervisor import (
     ProviderBoundaryFailure,
@@ -71,7 +70,7 @@ from worldforge.agent_harness.worker_registry import (
 
 _RUNTIME = {
     "id": "worldforge_deterministic_probe_provider",
-    "revision": 4,
+    "revision": 5,
     "content_hash": "1" * 64,
 }
 _NONCE = "2" * 64
@@ -141,16 +140,30 @@ result = {{
     "tool_calls": [],
     "tool_exposure_requests": [],
     "usage": {{
-        "cached_input_tokens": 0,
-        "cost_minor_units": 0,
-        "currency": "USD",
-        "input_tokens": 1,
-        "output_tokens": 1,
+        "input_tokens": {{
+            "state": "derived", "source_kind": "code_owned_runtime", "value": 1,
+            "policy_hash": "2e58a26fe511c1ceee6f5454c9e76b45fc99e9c9d1eff2798bc8bedabaa818e5",
+            "unavailable_reason": None,
+        }},
+        "output_tokens": {{
+            "state": "derived", "source_kind": "code_owned_runtime", "value": 1,
+            "policy_hash": "2e58a26fe511c1ceee6f5454c9e76b45fc99e9c9d1eff2798bc8bedabaa818e5",
+            "unavailable_reason": None,
+        }},
+        "cached_input_tokens": {{
+            "state": "unavailable", "source_kind": "none", "value": None,
+            "policy_hash": None, "unavailable_reason": "code_owned_policy_absent",
+        }},
+        "cost": {{
+            "state": "unavailable", "source_kind": "none", "value": None,
+            "currency": None, "policy_hash": None,
+            "unavailable_reason": "parent_pricing_unavailable",
+        }},
     }},
 }}
 final = authenticated({{
     "format": "world-forge.private.provider_turn_result",
-    "format_version": 2,
+    "format_version": 3,
     "nonce": request["nonce"],
     "request_hash": request["request_hash"],
     "result": result,
@@ -186,6 +199,7 @@ def _loopback_selection(policy: LoopbackGatewayPolicy) -> ProviderExecutionSelec
         currency="USD",
         max_duration_ms=2_000,
         deadline_ms=None,
+        usage_policy_hash=spec.usage_policy_hash,
         pricing_policy_hash=None,
         credential_revision_id=None,
     )
@@ -300,7 +314,7 @@ class LoopbackSideBandProtocolTests(unittest.TestCase):
     def test_gateway_final_requires_exact_response_bound_proof(self) -> None:
         result = ProviderTurnResult(
             private_output={"accepted": True},
-            usage=ProviderUsage(1, 1, 0, 0, "USD"),
+            usage=_usage(input_tokens=1, output_tokens=1, cached_input_tokens=0),
             completed=True,
         )
         ordinary = build_result_frame(
@@ -408,7 +422,7 @@ class LoopbackSideBandProtocolTests(unittest.TestCase):
         cases = (
             {"key": b"x" * 32},
             {"nonce": "0" * 64},
-            {"runtime": {**_RUNTIME, "revision": 5}},
+            {"runtime": {**_RUNTIME, "revision": 4}},
             {"original_request_hash": "0" * 64},
             {"gateway_policy_hash": "0" * 64},
         )

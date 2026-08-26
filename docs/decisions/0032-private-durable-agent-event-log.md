@@ -3,6 +3,10 @@
 - Status: accepted
 - Date: 2026-08-24
 
+> Supersession note: ADR-0042 advances the private EventLog from v2 to v3 by
+> atomically binding one sanitized usage-accounting document to each terminal
+> receipt while preserving v1/v2 detached recovery semantics.
+
 ## Context
 
 ADR-0031 deliberately leaves persistence and recovery outside the provider-free

@@ -20,6 +20,13 @@ from .ports import (
     ProviderUsage,
     ToolCall,
 )
+from .usage import (
+    CostEvidence,
+    TokenEvidence,
+    UsageEvidenceError,
+    validate_cost_evidence,
+    validate_token_evidence,
+)
 from .worker_limits import MAX_PROVIDER_TOOL_CALLS_PER_TURN
 from .worker_registry import (
     _CodeOwnedRuntimeEntry,
@@ -37,7 +44,7 @@ MAX_WORKER_TRANSCRIPT_BYTES = 64 * 1024
 MAX_SAFE_INTEGER = (1 << 53) - 1
 _REQUEST_FORMAT = "world-forge.private.provider_turn_request"
 _RESULT_FORMAT = "world-forge.private.provider_turn_result"
-_PROTOCOL_VERSION = 2
+_PROTOCOL_VERSION = 3
 _HEX_64_RE = re.compile(r"^[0-9a-f]{64}$")
 _ID_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
 _TOOL_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}(?:\.[a-z][a-z0-9_]{1,63})+$")
@@ -666,13 +673,15 @@ def parse_request_frame(
 def _usage_payload(usage: ProviderUsage) -> dict[str, object]:
     if type(usage) is not ProviderUsage:
         raise WorkerProtocolError("worker_protocol_result_invalid")
-    return {
-        "input_tokens": usage.input_tokens,
-        "output_tokens": usage.output_tokens,
-        "cached_input_tokens": usage.cached_input_tokens,
-        "cost_minor_units": usage.cost_minor_units,
-        "currency": usage.currency,
-    }
+    try:
+        return {
+            "input_tokens": validate_token_evidence(usage.input_tokens).as_document(),
+            "output_tokens": validate_token_evidence(usage.output_tokens).as_document(),
+            "cached_input_tokens": validate_token_evidence(usage.cached_input_tokens).as_document(),
+            "cost": validate_cost_evidence(usage.cost).as_document(),
+        }
+    except UsageEvidenceError:
+        raise WorkerProtocolError("worker_protocol_result_invalid") from None
 
 
 def _exact_nonnegative(value: object) -> int:
@@ -686,28 +695,34 @@ def _parse_usage(payload: object) -> ProviderUsage:
         "input_tokens",
         "output_tokens",
         "cached_input_tokens",
-        "cost_minor_units",
-        "currency",
+        "cost",
     }:
         raise WorkerProtocolError("worker_protocol_result_invalid")
-    input_tokens = _exact_nonnegative(payload["input_tokens"])
-    output_tokens = _exact_nonnegative(payload["output_tokens"])
-    cached_input_tokens = _exact_nonnegative(payload["cached_input_tokens"])
-    if cached_input_tokens > input_tokens:
-        raise WorkerProtocolError("worker_protocol_result_invalid")
-    cost = payload["cost_minor_units"]
-    currency = payload["currency"]
-    if (cost is None) != (currency is None):
-        raise WorkerProtocolError("worker_protocol_result_invalid")
-    if cost is not None:
-        cost = _exact_nonnegative(cost)
-        if type(currency) is not str or _CURRENCY_RE.fullmatch(currency) is None:
-            raise WorkerProtocolError("worker_protocol_result_invalid")
-    return ProviderUsage(input_tokens, output_tokens, cached_input_tokens, cost, currency)
+    try:
+        values = []
+        for name in ("input_tokens", "output_tokens", "cached_input_tokens"):
+            item = payload[name]
+            if type(item) is not dict:
+                raise UsageEvidenceError()
+            values.append(TokenEvidence.create(**item))
+        cost_payload = payload["cost"]
+        if type(cost_payload) is not dict:
+            raise UsageEvidenceError()
+        cost = CostEvidence.create(**cost_payload)
+    except (TypeError, UsageEvidenceError):
+        raise WorkerProtocolError("worker_protocol_result_invalid") from None
+    return ProviderUsage(values[0], values[1], values[2], cost)
 
 
-def _parse_result_payload(payload: object) -> ProviderTurnResult:
-    if type(payload) is not dict or set(payload) != {
+def _parse_result_payload(
+    payload: object,
+    *,
+    salvage_authenticated_usage: bool = False,
+) -> ProviderTurnResult:
+    if type(payload) is not dict or "usage" not in payload:
+        raise WorkerProtocolError("worker_protocol_result_invalid")
+    usage = _parse_usage(payload["usage"])
+    if set(payload) != {
         "private_output",
         "usage",
         "tool_calls",
@@ -716,7 +731,26 @@ def _parse_result_payload(payload: object) -> ProviderTurnResult:
         "tool_exposure_requests",
         "completed",
     }:
+        if salvage_authenticated_usage:
+            return ProviderTurnResult(
+                None,
+                usage,
+                nested_failure_code="worker_protocol_result_invalid",
+            )
         raise WorkerProtocolError("worker_protocol_result_invalid")
+    try:
+        return _parse_result_siblings(payload, usage)
+    except WorkerProtocolError:
+        if salvage_authenticated_usage:
+            return ProviderTurnResult(
+                None,
+                usage,
+                nested_failure_code="worker_protocol_result_invalid",
+            )
+        raise
+
+
+def _parse_result_siblings(payload: dict[str, object], usage: ProviderUsage) -> ProviderTurnResult:
     if type(payload["completed"]) is not bool:
         raise WorkerProtocolError("worker_protocol_result_invalid")
     tool_values = payload["tool_calls"]
@@ -786,7 +820,7 @@ def _parse_result_payload(payload: object) -> ProviderTurnResult:
         memory_proposals.append(MemoryProposal(item["private_payload"]))
     return ProviderTurnResult(
         private_output=payload["private_output"],
-        usage=_parse_usage(payload["usage"]),
+        usage=usage,
         tool_calls=tuple(tool_calls),
         artifact_proposals=tuple(artifact_proposals),
         memory_proposals=tuple(memory_proposals),
@@ -804,6 +838,7 @@ def _result_payload(result: ProviderTurnResult) -> dict[str, object]:
         or type(result.memory_proposals) is not tuple
         or type(result.tool_exposure_requests) is not tuple
         or type(result.completed) is not bool
+        or result.nested_failure_code is not None
     ):
         raise WorkerProtocolError("worker_protocol_result_invalid")
     payload = {
@@ -874,6 +909,7 @@ def parse_result_frame(
     request_hash: str,
     runtime_key: _CodeOwnedRuntimeKey = _CodeOwnedRuntimeKey.CONFORMANCE,
     runtime_authority: _CodeOwnedRuntimeEntry | None = None,
+    salvage_authenticated_usage: bool = False,
 ) -> ProviderTurnResult:
     key = _require_key(key)
     expected_nonce = _validate_nonce(nonce)
@@ -917,7 +953,10 @@ def parse_result_frame(
     ):
         raise WorkerProtocolError("worker_protocol_hash_mismatch")
     try:
-        return _parse_result_payload(payload)
+        return _parse_result_payload(
+            payload,
+            salvage_authenticated_usage=salvage_authenticated_usage,
+        )
     except WorkerProtocolError:
         raise
     except Exception:

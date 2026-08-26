@@ -136,6 +136,7 @@ class FakeJournal(ExecutionJournal):
     def __init__(self) -> None:
         self.events: list[dict[str, object]] = []
         self.receipt: dict[str, object] | None = None
+        self.usage_accounting: dict[str, object] | None = None
         self.fail_next = False
         self.operations: list[str] = []
         self.begin_calls: list[
@@ -193,6 +194,7 @@ class FakeJournal(ExecutionJournal):
         execution_id: str,
         receipt: dict[str, object],
         event: dict[str, object],
+        usage_accounting: dict[str, object],
         *,
         expected_sequence: int,
         expected_previous_hash: str | None,
@@ -201,6 +203,7 @@ class FakeJournal(ExecutionJournal):
         self.operations.append("finalize")
         if (
             self.receipt is not None
+            or self.usage_accounting is not None
             or expected_sequence != len(self.events)
             or expected_generation != len(self.events)
         ):
@@ -209,4 +212,5 @@ class FakeJournal(ExecutionJournal):
         if expected_previous_hash != actual or event["execution_id"] != execution_id:
             raise ValueError("private finalization head mismatch")
         self.receipt = copy.deepcopy(receipt)
+        self.usage_accounting = copy.deepcopy(usage_accounting)
         self.events.append(copy.deepcopy(event))

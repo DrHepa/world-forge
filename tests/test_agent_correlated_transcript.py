@@ -414,7 +414,7 @@ class CorrelatedWorkerProtocolTests(unittest.TestCase):
         nonce = "ab" * 32
         frame = build_request_frame(request, key=key, nonce=nonce)
         document = json.loads(frame[4:])
-        self.assertEqual(2, document["format_version"])
+        self.assertEqual(3, document["format_version"])
         self.assertEqual(
             ["assistant", "tool_result"],
             [item["role"] for item in document["request"]["transcript"]],

@@ -6,6 +6,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from .usage import CostEvidence, TokenEvidence
+
 
 @dataclass(frozen=True, slots=True)
 class ExecutionLimits:
@@ -35,11 +37,10 @@ class ExecutionRequest:
 
 @dataclass(frozen=True, slots=True)
 class ProviderUsage:
-    input_tokens: int
-    output_tokens: int
-    cached_input_tokens: int
-    cost_minor_units: int | None
-    currency: str | None
+    input_tokens: TokenEvidence
+    output_tokens: TokenEvidence
+    cached_input_tokens: TokenEvidence
+    cost: CostEvidence
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +113,7 @@ class ProviderTurnResult:
     memory_proposals: tuple[MemoryProposal, ...] = ()
     tool_exposure_requests: tuple[str, ...] = ()
     completed: bool = False
+    nested_failure_code: str | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,6 +186,7 @@ class ExecutionJournal(Protocol):
         execution_id: str,
         receipt: dict[str, object],
         event: dict[str, object],
+        usage_accounting: dict[str, object],
         *,
         expected_sequence: int,
         expected_previous_hash: str | None,

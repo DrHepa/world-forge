@@ -44,6 +44,7 @@ from worldforge.agent_harness.memory_projection import (
     MemoryProjectionError,
 )
 from worldforge.agent_harness.records import build_event
+from worldforge.agent_harness.usage import build_legacy_usage_accounting
 from worldforge.agent_harness_contracts import (
     AGENT_MEMORY_PROJECTION_FORMAT,
     canonical_agent_harness_hash,
@@ -772,6 +773,7 @@ class MemoryProjectionEventLogTests(unittest.TestCase):
             activation["execution_id"],
             receipt,
             receipt_event,
+            build_legacy_usage_accounting(receipt),
             expected_sequence=len(prefix),
             expected_previous_hash=prefix[-1]["content_hash"],
             expected_generation=len(prefix),
@@ -872,8 +874,8 @@ class MemoryProjectionEventLogTests(unittest.TestCase):
                     request_fingerprint="a" * 64,
                 )
             )
-            self.assertEqual(2, AGENT_EVENT_LOG_SCHEMA_VERSION)
-            self.assertEqual(2, log.schema_version)
+            self.assertEqual(3, AGENT_EVENT_LOG_SCHEMA_VERSION)
+            self.assertEqual(3, log.schema_version)
             validate_agent_harness_documents(
                 activation,
                 grant,
@@ -1299,6 +1301,7 @@ class MemoryProjectionEventLogTests(unittest.TestCase):
                 activation["execution_id"],
                 receipt,
                 terminal_event,
+                build_legacy_usage_accounting(receipt),
                 expected_sequence=len(events) - 1,
                 expected_previous_hash=events[-2]["content_hash"],
                 expected_generation=len(events) - 1,
@@ -1334,6 +1337,7 @@ class MemoryProjectionEventLogTests(unittest.TestCase):
                             activation["execution_id"],
                             conflicting_receipt,
                             conflicting_event,
+                            build_legacy_usage_accounting(conflicting_receipt),
                             expected_sequence=len(events) - 1,
                             expected_previous_hash=events[-2]["content_hash"],
                             expected_generation=len(events) - 1,
@@ -1378,6 +1382,7 @@ class MemoryProjectionEventLogTests(unittest.TestCase):
                 activation["execution_id"],
                 receipt,
                 events[-1],
+                build_legacy_usage_accounting(receipt),
                 expected_sequence=len(events) - 1,
                 expected_previous_hash=events[-2]["content_hash"],
                 expected_generation=len(events) - 1,
@@ -1390,8 +1395,20 @@ class MemoryProjectionEventLogTests(unittest.TestCase):
     def _downgrade_exact_v1(root: Path) -> None:
         connection = sqlite3.connect(root / AGENT_EVENT_LOG_DATABASE_NAME)
         try:
+            connection.execute("DROP TABLE usage_accounting")
             connection.execute("DROP TABLE memory_projections")
             connection.execute("UPDATE schema_meta SET value = '1' WHERE key = 'schema_version'")
+            connection.commit()
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        finally:
+            connection.close()
+
+    @staticmethod
+    def _downgrade_exact_v2(root: Path) -> None:
+        connection = sqlite3.connect(root / AGENT_EVENT_LOG_DATABASE_NAME)
+        try:
+            connection.execute("DROP TABLE usage_accounting")
+            connection.execute("UPDATE schema_meta SET value = '2' WHERE key = 'schema_version'")
             connection.commit()
             connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         finally:
@@ -1404,7 +1421,7 @@ class MemoryProjectionEventLogTests(unittest.TestCase):
             for path in sorted(root.iterdir(), key=lambda item: item.name)
         }
 
-    def test_exact_v1_ordinary_open_migrates_transactionally_to_v2(self) -> None:
+    def test_exact_v1_ordinary_open_migrates_transactionally_to_v3(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "store"
             with AgentEventLog(root) as log:
@@ -1428,7 +1445,7 @@ class MemoryProjectionEventLogTests(unittest.TestCase):
                 raw.close()
 
             with AgentEventLog(root) as migrated:
-                self.assertEqual(2, migrated.schema_version)
+                self.assertEqual(3, migrated.schema_version)
                 replay = migrated.replay_records(activation["execution_id"])
                 self.assertEqual(before, replay)
                 self.assertIsNone(replay.projection_bytes)
@@ -1439,6 +1456,7 @@ class MemoryProjectionEventLogTests(unittest.TestCase):
                         "SELECT name FROM sqlite_schema WHERE name = 'memory_projections'"
                     ).fetchone()
                 )
+                self.assertIsNotNone(replay.usage_accounting_bytes)
 
     def test_v1_recovery_open_is_accepted_and_byte_preserving_without_migration(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1470,6 +1488,21 @@ class MemoryProjectionEventLogTests(unittest.TestCase):
                 )
             finally:
                 raw.close()
+
+    def test_exact_v2_terminal_migrates_to_v3_with_conservative_accounting(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "store"
+            with AgentEventLog(root) as log:
+                activation, _grant, _events, receipt = self._terminalize(log)
+            self._downgrade_exact_v2(root)
+
+            with AgentEventLog(root) as migrated:
+                self.assertEqual(3, migrated.schema_version)
+                replay = migrated.replay_records(activation["execution_id"])
+                accounting = json.loads(replay.usage_accounting_bytes)
+                self.assertEqual("legacy_receipt_totals", accounting["record_mode"])
+                self.assertEqual(receipt["content_hash"], accounting["receipt_hash"])
+                self.assertNotIn("observed", replay.usage_accounting_bytes.decode("utf-8"))
 
     def test_recovery_reads_preserve_v1_v2_wal_and_reject_hot_journal(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1510,6 +1543,7 @@ class MemoryProjectionEventLogTests(unittest.TestCase):
                     expected_generation=len(events),
                 )
                 database = log.database_path
+            self._downgrade_exact_v2(root)
             _commit_wal_then_crash(database, "valid")
             before = _store_byte_evidence(root)
             parent_namespace = {path.name for path in root.parent.iterdir()}
@@ -1523,7 +1557,7 @@ class MemoryProjectionEventLogTests(unittest.TestCase):
             self.assertEqual(parent_namespace, {path.name for path in root.parent.iterdir()})
 
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary) / "v2-hot-journal"
+            root = Path(temporary) / "v3-hot-journal"
             with AgentEventLog(root) as log:
                 self._terminalize(log)
                 database = log.database_path
@@ -1546,10 +1580,10 @@ class MemoryProjectionEventLogTests(unittest.TestCase):
             self._downgrade_exact_v1(root)
 
             def fault(stage: str) -> None:
-                if stage == "before_schema_v2_migration_commit":
+                if stage == "before_schema_v3_migration_commit":
                     raise RuntimeError(stage)
 
-            with self.assertRaisesRegex(RuntimeError, "before_schema_v2_migration_commit"):
+            with self.assertRaisesRegex(RuntimeError, "before_schema_v3_migration_commit"):
                 AgentEventLog(root, fault_hook=fault)
 
             raw = sqlite3.connect(root / AGENT_EVENT_LOG_DATABASE_NAME)
@@ -1569,7 +1603,7 @@ class MemoryProjectionEventLogTests(unittest.TestCase):
                 raw.close()
 
             with AgentEventLog(root) as migrated:
-                self.assertEqual(2, migrated.schema_version)
+                self.assertEqual(3, migrated.schema_version)
 
     def test_projection_table_event_and_state_tamper_fail_replay(self) -> None:
         mutations = {

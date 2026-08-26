@@ -6,6 +6,7 @@ import os
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from functools import partial
 
 from .loopback_gateway import LoopbackGatewayPolicy
 from .loopback_protocol import build_loopback_context_frame
@@ -195,7 +196,10 @@ class OneShotProviderSupervisor:
             process_execute=process_supervisor.execute,
             request_builder=build_request_frame,
             request_parser=parse_request_frame,
-            result_parser=parse_result_frame,
+            result_parser=partial(
+                parse_result_frame,
+                salvage_authenticated_usage=True,
+            ),
             gateway_policy=gateway_policy,
         )
         frozen_catalog = None if provider_catalog is None else provider_catalog.snapshot()

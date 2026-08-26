@@ -3,6 +3,11 @@
 - Status: accepted
 - Date: 2026-08-26
 
+> Supersession note: ADR-0042 advances the authenticated provider-turn protocol
+> to v3, conformance to revision 4, deterministic probe to revision 5, and the
+> private EventLog to v3 for sanitized terminal usage accounting. Transcript
+> structure and loopback side-band v1 remain unchanged.
+
 ## Context
 
 The private provider request previously carried an arbitrary tuple of JSON

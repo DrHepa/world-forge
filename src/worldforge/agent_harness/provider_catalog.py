@@ -176,6 +176,7 @@ class ProviderRuntimeSpec:
     endpoint_policy_hash: str | None
     egress_enforcement_hash: str | None
     telemetry_attestation_hash: str | None
+    usage_policy_hash: str
     pricing_policy_hash: str | None
     pricing_currency: str | None
     credential_requirement_hash: str | None
@@ -200,6 +201,7 @@ class ProviderRuntimeSpec:
         endpoint_policy_hash: object,
         egress_enforcement_hash: object,
         telemetry_attestation_hash: object,
+        usage_policy_hash: object,
         pricing_policy_hash: object,
         pricing_currency: object,
         credential_requirement_hash: object,
@@ -222,6 +224,7 @@ class ProviderRuntimeSpec:
         endpoint_hash = _optional_hash(endpoint_policy_hash, reason)
         egress_hash = _optional_hash(egress_enforcement_hash, reason)
         telemetry_hash = _optional_hash(telemetry_attestation_hash, reason)
+        usage_hash = _exact_hash(usage_policy_hash, reason)
         pricing_hash = _optional_hash(pricing_policy_hash, reason)
         currency = _exact_currency(pricing_currency, reason)
         credential_hash = _optional_hash(credential_requirement_hash, reason)
@@ -273,6 +276,7 @@ class ProviderRuntimeSpec:
             "endpoint_policy_hash": endpoint_hash,
             "egress_enforcement_hash": egress_hash,
             "telemetry_attestation_hash": telemetry_hash,
+            "usage_policy_hash": usage_hash,
             "pricing_policy_hash": pricing_hash,
             "pricing_currency": currency,
             "credential_requirement_hash": credential_hash,
@@ -344,6 +348,7 @@ class ProviderExecutionSelection:
     currency: str | None
     max_duration_ms: int
     deadline_ms: int | None
+    usage_policy_hash: str
     pricing_policy_hash: str | None
     credential_revision_id: str | None
     content_hash: str
@@ -369,6 +374,7 @@ class ProviderExecutionSelection:
         currency: object,
         max_duration_ms: object,
         deadline_ms: object,
+        usage_policy_hash: object,
         pricing_policy_hash: object,
         credential_revision_id: object,
     ) -> ProviderExecutionSelection:
@@ -401,6 +407,7 @@ class ProviderExecutionSelection:
             "currency": checked_currency,
             "max_duration_ms": _exact_integer(max_duration_ms, reason),
             "deadline_ms": _optional_integer(deadline_ms, reason),
+            "usage_policy_hash": _exact_hash(usage_policy_hash, reason),
             "pricing_policy_hash": _optional_hash(pricing_policy_hash, reason),
             "credential_revision_id": credential_revision,
         }
@@ -467,6 +474,7 @@ def _validate_resolved(value: object) -> ResolvedProviderExecution:
         or selection.runtime_id != spec.runtime_id
         or selection.runtime_revision != spec.runtime_revision
         or selection.runtime_content_hash != spec.runtime_content_hash
+        or selection.usage_policy_hash != spec.usage_policy_hash
         or selection.pricing_policy_hash != spec.pricing_policy_hash
         or spec.pricing_policy_hash is not None
         and selection.currency != spec.pricing_currency

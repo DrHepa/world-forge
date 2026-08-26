@@ -73,6 +73,7 @@ def _spec(**changes: object) -> ProviderRuntimeSpec:
         "endpoint_policy_hash": None,
         "egress_enforcement_hash": None,
         "telemetry_attestation_hash": None,
+        "usage_policy_hash": H7,
         "pricing_policy_hash": None,
         "pricing_currency": None,
         "credential_requirement_hash": None,
@@ -114,6 +115,7 @@ def _selection(
         "currency": "USD",
         "max_duration_ms": 1_000,
         "deadline_ms": 2_000,
+        "usage_policy_hash": spec.usage_policy_hash,
         "pricing_policy_hash": None,
         "credential_revision_id": None,
     }
@@ -181,6 +183,7 @@ def _execution_selection(
         "currency": limits.currency,
         "max_duration_ms": limits.max_duration_ms,
         "deadline_ms": limits.deadline_ms,
+        "usage_policy_hash": spec.usage_policy_hash,
         "pricing_policy_hash": spec.pricing_policy_hash,
         "credential_revision_id": None,
     }
@@ -1082,10 +1085,16 @@ class ProviderGovernanceKernelTests(unittest.TestCase):
                 result = kernel.execute(request)
                 self.assertEqual("failed", result.outcome)
                 self.assertEqual([expected_failure], result.receipt["failure_codes"])
-                self.assertEqual(usage.input_tokens, result.receipt["usage"]["input_tokens"])
-                self.assertEqual(usage.output_tokens, result.receipt["usage"]["output_tokens"])
                 self.assertEqual(
-                    usage.cost_minor_units,
+                    usage.input_tokens.value,
+                    result.receipt["usage"]["input_tokens"],
+                )
+                self.assertEqual(
+                    usage.output_tokens.value,
+                    result.receipt["usage"]["output_tokens"],
+                )
+                self.assertEqual(
+                    usage.cost.value,
                     result.receipt["usage"]["cost_minor_units"],
                 )
 

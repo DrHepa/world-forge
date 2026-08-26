@@ -93,6 +93,7 @@ def _selection(key: _CodeOwnedRuntimeKey) -> ProviderExecutionSelection:
         currency="USD",
         max_duration_ms=1_000,
         deadline_ms=2_000,
+        usage_policy_hash=spec.usage_policy_hash,
         pricing_policy_hash=None,
         credential_revision_id=None,
     )
@@ -118,13 +119,13 @@ class ConformanceRuntimeApprovalTests(unittest.TestCase):
     def test_existing_conformance_template_bytes_and_hash_are_pinned(self) -> None:
         encoded = worker_module.WORKER_BOOTSTRAP_TEMPLATE.encode("utf-8")
 
-        self.assertEqual(15_623, len(encoded))
+        self.assertEqual(16_367, len(encoded))
         self.assertEqual(
-            "581acc1e370a580f737c1c3b3063b62309808748b2e7b569c39fd62411b20829",
+            "baf4d89794aba6003a5d7544d34933aee929517f1b7b47fbe06c2784c7f650b8",
             hashlib.sha256(encoded).hexdigest(),
         )
         self.assertEqual(
-            "581acc1e370a580f737c1c3b3063b62309808748b2e7b569c39fd62411b20829",
+            "baf4d89794aba6003a5d7544d34933aee929517f1b7b47fbe06c2784c7f650b8",
             fixed_runtime_identity()["content_hash"],
         )
 
@@ -170,8 +171,8 @@ class CodeOwnedRuntimeRegistryTests(unittest.TestCase):
         self.assertEqual(2, len(entries))
         self.assertEqual(
             {
-                _CodeOwnedRuntimeKey.CONFORMANCE: (3, 2),
-                _CodeOwnedRuntimeKey.DETERMINISTIC_PROBE: (4, 2),
+                _CodeOwnedRuntimeKey.CONFORMANCE: (4, 3),
+                _CodeOwnedRuntimeKey.DETERMINISTIC_PROBE: (5, 3),
             },
             {entry.key: (entry.revision, entry.protocol_version) for entry in entries},
         )
@@ -184,13 +185,13 @@ class CodeOwnedRuntimeRegistryTests(unittest.TestCase):
         )
         self.assertEqual(2, len({entry.content_hash for entry in entries}))
         self.assertEqual(2, len({entry.spec.content_hash for entry in entries}))
-        self.assertTrue(all(entry.protocol_version == 2 for entry in entries))
+        self.assertTrue(all(entry.protocol_version == 3 for entry in entries))
         self.assertTrue(all(entry.spec.network_scope == "none" for entry in entries))
         self.assertTrue(all(not entry.spec.production_eligible for entry in entries))
         probe = runtime_entry(_CodeOwnedRuntimeKey.DETERMINISTIC_PROBE)
-        self.assertEqual(16_184, len(probe.bootstrap_template.encode("utf-8")))
+        self.assertEqual(16_976, len(probe.bootstrap_template.encode("utf-8")))
         self.assertEqual(
-            "8d162770d4c2edfba6f483063e308cc7d94bd33c6afc4d541a9fcd306972b0cc",
+            "4ae329e526a7584e0455383817433176ac53397767bb06edcf19f472a08458d1",
             probe.content_hash,
         )
         self.assertEqual(
@@ -311,7 +312,7 @@ class CodeOwnedRuntimeRegistryTests(unittest.TestCase):
 
 
 class RuntimeBoundProtocolTests(unittest.TestCase):
-    def test_authenticated_frames_are_v2_and_reject_cross_runtime_parsing(self) -> None:
+    def test_authenticated_frames_are_v3_and_reject_cross_runtime_parsing(self) -> None:
         request = _turn_request({"probe": "request"})
         key = b"k" * 32
         nonce = "ab" * 32
@@ -320,7 +321,7 @@ class RuntimeBoundProtocolTests(unittest.TestCase):
         frame = build_request_frame(request, key=key, nonce=nonce, runtime_key=conformance)
         size = int.from_bytes(frame[:4], "big")
         document = json.loads(frame[4 : 4 + size])
-        self.assertEqual(2, document["format_version"])
+        self.assertEqual(3, document["format_version"])
         self.assertEqual(runtime_identity(conformance), document["runtime"])
         self.assertEqual(
             request,

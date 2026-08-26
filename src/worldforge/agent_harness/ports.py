@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -78,6 +79,13 @@ class ProviderTurnResult:
 
 
 @dataclass(frozen=True, slots=True)
+class ProviderBoundaryControl:
+    """Code-owned parent polling seam for a potentially blocking provider turn."""
+
+    poll_stop_reason: Callable[[], str | None] = field(repr=False, compare=False)
+
+
+@dataclass(frozen=True, slots=True)
 class ExecutionResult:
     outcome: str
     events: tuple[dict[str, Any], ...]
@@ -86,7 +94,12 @@ class ExecutionResult:
 
 
 class ProviderAdapter(Protocol):
-    def turn(self, request: ProviderTurnRequest) -> ProviderTurnResult: ...
+    def turn(
+        self,
+        request: ProviderTurnRequest,
+        *,
+        boundary: ProviderBoundaryControl,
+    ) -> ProviderTurnResult: ...
 
 
 class ToolAdapter(Protocol):

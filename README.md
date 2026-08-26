@@ -854,11 +854,29 @@ the POSIX process fence; Windows lock behavior is seam-tested but not natively
 proven by this slice.
 
 The five public v1 contracts remain unchanged and receipts still state
-`replay_support: not_claimed`. This adds no provider/model, Studio job/UI,
-isolated worker or hard kill, external MCP safety, memory projection, artifact
-promotion, deterministic provider replay, or hosted/native/release evidence.
+`replay_support: not_claimed`. A private one-shot supervisor now runs only a
+fixed, non-production conformance runtime behind an authenticated process gate.
+The fixed runtime identity hashes the actual bootstrap template, and the child
+is launched with fixed isolated/no-bytecode flags and exact-validates every
+authenticated request before executing an action. Version 1 is Linux-only. Linux
+holds worker creation behind a parent acknowledgement, tracks `/proc` state as
+well as PID/start time, binds STOP/KILL to retained `pidfd` handles without a
+PID-kill fallback, owns scratch cleanup in the parent, and requires clean
+control EOF plus bounded process-tree termination before a result is accepted.
+Windows and every other host reject `worker_containment_unavailable` before
+durable execution begin, broker activation, process creation, or provider
+action; no Windows worker backend is present and Windows remains unsupported and
+`UNTESTED`. A future reviewed slice requires a custom `CreateProcess` launcher
+that acquires containment ownership at creation plus native Windows evidence.
+Broker loss remains containment-indeterminate even though the
+parent best-effort kills descendants still attributable to known worker
+identities. This is not a real provider/model, same-UID filesystem/network
+sandbox, vendor telemetry guarantee, Studio job/UI, external MCP boundary,
+memory projection, artifact promotion, deterministic provider replay, or
+hosted/native/release claim.
 See [ADR-0031](docs/decisions/0031-provider-free-agent-execution-kernel.md) and
-[ADR-0032](docs/decisions/0032-private-durable-agent-event-log.md).
+[ADR-0032](docs/decisions/0032-private-durable-agent-event-log.md), and
+[ADR-0033](docs/decisions/0033-one-shot-isolated-provider-worker.md).
 
 Slice 2B adds a pure deterministic evaluator and explicit-input, atomic
 no-replace CLI for the closed recorded-result plan, observation, and report

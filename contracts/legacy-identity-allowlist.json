@@ -22,7 +22,7 @@
     },
     {
       "category": "migration",
-      "file_sha256": "4100c247df6b9121ba925bbc9c081151ee85bb97b3770c3a2409b9ce57b0a7cb",
+      "file_sha256": "de5d48ced546d37d7719ea3234f4b63b22349368d3abdd3e62dd666f2842befc",
       "justification": "The compatibility bridge retains this old public location until the authorized cutover.",
       "offsets": [
         4147,
@@ -999,7 +999,7 @@
     },
     {
       "category": "legacy_contract",
-      "file_sha256": "418100df4533c0850a033f437e8ae998e2e6fb964ff21c1c2bc7a6ddb4be8772",
+      "file_sha256": "3d9c6dafaaade081dc4bc7340c3281c49489e7d024eaa88d4036b2edb0be96ad",
       "justification": "Published legacy format, schema, protocol, or storage identity remains immutable.",
       "offsets": [
         6882,

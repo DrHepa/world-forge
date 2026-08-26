@@ -147,6 +147,7 @@ class AgentExecutionKernelTests(unittest.TestCase):
                 "ExecutionLimits",
                 "ExecutionRequest",
                 "KernelError",
+                "OneShotProviderSupervisor",
             },
             set(agent_harness.__all__),
         )

@@ -4,6 +4,7 @@ from .capability_broker import CapabilityBroker
 from .event_log import AgentEventLog, AgentExecutionCoordinator
 from .kernel import AgentExecutionKernel, KernelError
 from .ports import ExecutionLimits, ExecutionRequest
+from .supervisor import OneShotProviderSupervisor
 
 __all__ = (
     "AgentExecutionKernel",
@@ -13,4 +14,5 @@ __all__ = (
     "ExecutionLimits",
     "ExecutionRequest",
     "KernelError",
+    "OneShotProviderSupervisor",
 )

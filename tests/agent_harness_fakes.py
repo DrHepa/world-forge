@@ -7,6 +7,7 @@ from worldforge.agent_harness.ports import (
     ArtifactProposal,
     ExecutionJournal,
     MemoryProposal,
+    ProviderBoundaryControl,
     ProviderTurnRequest,
     ToolCall,
     ToolResult,
@@ -42,7 +43,13 @@ class FakeProvider:
         self.script = list(script)
         self.requests: list[ProviderTurnRequest] = []
 
-    def turn(self, request: ProviderTurnRequest) -> object:
+    def turn(
+        self,
+        request: ProviderTurnRequest,
+        *,
+        boundary: ProviderBoundaryControl,
+    ) -> object:
+        del boundary
         self.requests.append(request)
         if not self.script:
             raise RuntimeError("private provider exhaustion")

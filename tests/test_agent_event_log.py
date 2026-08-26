@@ -2100,7 +2100,8 @@ class PausingBroker(CapabilityBroker):
         return lease
 
 class MarkerProvider:
-    def turn(self, _request):
+    def turn(self, _request, *, boundary):
+        del boundary
         provider_marker.write_bytes(b"called")
         return ProviderTurnResult("done", _usage(), completed=True)
 

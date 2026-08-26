@@ -612,12 +612,39 @@ or synthesizes a receipt/private output. Local spawned-process evidence covers
 the POSIX fence; Windows shared/exclusive and remote-drive policy is seam-tested
 but has no native evidence in this slice. Public receipt
 `replay_support` remains `not_claimed` because audit reread is not provider
-replay. Durable Studio job recovery, process isolation and hard kill, real
+replay. Durable Studio job recovery, production-grade provider sandboxing, real
 providers/models/billing, external MCP safety, memory approval/projection,
 artifact promotion, Studio jobs/UI/Team Mode, deterministic provider replay,
-and hosted/native/release evidence remain unimplemented and unproven. See
+and hosted/native/release evidence remain unimplemented and unproven.
+
+A private Linux-only one-shot supervisor now replaces the in-process boundary
+only for one fixed non-production conformance runtime. The child has no tools, proposal
+ports, event log, Studio handles, authoring roots, or runtime authority. A
+length-prefixed canonical JSON protocol uses per-spawn HMAC correlation and
+an identity hash pinned to the actual bootstrap template. The worker validates
+the complete authenticated request before action dispatch, and broker control
+requires exact per-kind documents plus clean EOF after its sole terminal frame.
+Linux delegates the worker to a fresh code-owned subreaper broker, holds worker
+creation behind an authenticated parent acknowledgement, and accepts a result
+only after a PID/start-time/state tracked
+freeze/rescan/kill/reap fixed point proves the descendant domain empty. Linux
+STOP/KILL operations are bound to retained, identity-validated `pidfd` handles;
+pidfd unavailability or signaling failure is containment uncertainty rather
+than permission to fall back to PID signaling. A lost
+broker instead leaves the durable execution open for offline recovery; cleanup
+of descendants still attributable to known worker identities is best-effort and
+does not upgrade that uncertainty. Scratch ownership and final cleanup remain in
+the parent. On Windows and every other unsupported host, supervisor construction
+fails closed with `worker_containment_unavailable` before durable execution
+begin or any broker, process, or provider authority is created. There is no
+Windows worker backend in version 1, and Windows support and native evidence are
+`UNTESTED`. A future reviewed Windows slice requires a custom `CreateProcess`
+launcher that acquires containment ownership at creation before provider code
+can run, followed by native Windows evidence. Same-UID filesystem/network
+isolation, real providers, and telemetry enforcement remain outside this slice. See
 [ADR-0031](decisions/0031-provider-free-agent-execution-kernel.md) and
-[ADR-0032](decisions/0032-private-durable-agent-event-log.md).
+[ADR-0032](decisions/0032-private-durable-agent-event-log.md), and
+[ADR-0033](decisions/0033-one-shot-isolated-provider-worker.md).
 
 Slice 2B retains the closed, identity/evidence-only plan, observation, and report
 boundary for an optional codebase-memory comparison and adds a pure evaluator

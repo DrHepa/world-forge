@@ -32,11 +32,13 @@ from .ports import (
     ExecutionResult,
     MemoryProposal,
     ProviderAdapter,
+    ProviderBoundaryControl,
     ProviderTurnRequest,
     ProviderTurnResult,
     ProviderUsage,
     ToolCall,
 )
+from .process_supervisor import ProviderBoundaryIndeterminate, ProviderBoundaryStopped
 from .records import build_event, build_receipt
 
 _PORTABLE_ID_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
@@ -613,7 +615,18 @@ class AgentExecutionKernel:
             if reason is not None:
                 return "cancelled", [reason], None
             try:
-                turn = self.provider.turn(turn_request)
+                turn = self.provider.turn(
+                    turn_request,
+                    boundary=ProviderBoundaryControl(
+                        lambda: self._cancellation_reason(request.limits, start_ms)
+                    ),
+                )
+            except ProviderBoundaryIndeterminate:
+                # Containment uncertainty is not a provider failure.  The
+                # durable prefix must remain open for exclusive recovery.
+                raise
+            except ProviderBoundaryStopped as exc:
+                return "cancelled", [exc.reason_code], None
             except Exception:
                 reason = self._cancellation_reason(request.limits, start_ms)
                 if reason is not None:

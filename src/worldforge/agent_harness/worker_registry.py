@@ -11,10 +11,17 @@ from .loopback_gateway import (
     LoopbackGatewayPolicy,
     code_owned_no_telemetry_branch_hash,
 )
+from .pricing import (
+    _build_code_owned_pricing_policy,
+    _build_code_owned_unpriced_runtime_binding,
+    _install_code_owned_pricing_policy,
+    _install_code_owned_unpriced_runtime_binding,
+)
 from .provider_catalog import (
     ProviderCatalogError,
     ProviderRuntimeCatalog,
     ProviderRuntimeSpec,
+    _create_code_owned_provider_catalog,
 )
 from .provider_egress import (
     ProviderEgressEnforcementProfile,
@@ -121,6 +128,17 @@ def _expected_spec(
         endpoint_origin = None
         endpoint_policy_hash = None
         telemetry_attestation_hash = None
+    usage_policy_hash = code_owned_usage_policy_hash(artifact.identifier)
+    pricing_policy = (
+        _build_code_owned_pricing_policy(
+            runtime_id=artifact.identifier,
+            runtime_revision=artifact.revision,
+            runtime_content_hash=artifact.content_hash,
+            usage_policy_hash=usage_policy_hash,
+        )
+        if key is _CodeOwnedRuntimeKey.DETERMINISTIC_PROBE
+        else None
+    )
     return ProviderRuntimeSpec.create(
         runtime_id=artifact.identifier,
         runtime_revision=artifact.revision,
@@ -134,9 +152,9 @@ def _expected_spec(
         endpoint_policy_hash=endpoint_policy_hash,
         egress_enforcement_hash=egress_enforcement.content_hash,
         telemetry_attestation_hash=telemetry_attestation_hash,
-        usage_policy_hash=code_owned_usage_policy_hash(artifact.identifier),
-        pricing_policy_hash=None,
-        pricing_currency=None,
+        usage_policy_hash=usage_policy_hash,
+        pricing_policy_hash=(None if pricing_policy is None else pricing_policy.content_hash),
+        pricing_currency=(None if pricing_policy is None else pricing_policy.currency),
         credential_requirement_hash=None,
         redirects_disabled=True,
         supported_platforms=("linux",),
@@ -196,6 +214,30 @@ _RUNTIME_ENTRIES = (
         _deterministic_probe_worker_artifact,
     ),
 )
+_conformance_entry = next(
+    entry for entry in _RUNTIME_ENTRIES if entry.key is _CodeOwnedRuntimeKey.CONFORMANCE
+)
+_install_code_owned_unpriced_runtime_binding(
+    _build_code_owned_unpriced_runtime_binding(
+        runtime_id=_conformance_entry.identifier,
+        runtime_revision=_conformance_entry.revision,
+        runtime_content_hash=_conformance_entry.content_hash,
+        usage_policy_hash=_conformance_entry.spec.usage_policy_hash,
+    )
+)
+_pricing_entry = next(
+    entry for entry in _RUNTIME_ENTRIES if entry.key is _CodeOwnedRuntimeKey.DETERMINISTIC_PROBE
+)
+_install_code_owned_pricing_policy(
+    _build_code_owned_pricing_policy(
+        runtime_id=_pricing_entry.identifier,
+        runtime_revision=_pricing_entry.revision,
+        runtime_content_hash=_pricing_entry.content_hash,
+        usage_policy_hash=_pricing_entry.spec.usage_policy_hash,
+    )
+)
+del _conformance_entry
+del _pricing_entry
 # Factories are construction-only. Runtime command, protocol, and dispatch paths
 # retain only the validated immutable artifacts above.
 del _conformance_worker_artifact
@@ -359,10 +401,10 @@ def _matches_runtime(key: _CodeOwnedRuntimeKey, value: object) -> bool:
     )
 
 
-def code_owned_provider_catalog(
+def _code_owned_provider_specs(
     *,
     gateway_policy: LoopbackGatewayPolicy | None = None,
-) -> ProviderRuntimeCatalog:
+) -> tuple[ProviderRuntimeSpec, ...]:
     entries = tuple(
         runtime_entry(
             entry.key,
@@ -372,7 +414,14 @@ def code_owned_provider_catalog(
         )
         for entry in _validated_entries()
     )
-    return ProviderRuntimeCatalog.create(tuple(entry.spec for entry in entries)).snapshot()
+    return tuple(entry.spec for entry in entries)
+
+
+def code_owned_provider_catalog(
+    *,
+    gateway_policy: LoopbackGatewayPolicy | None = None,
+) -> ProviderRuntimeCatalog:
+    return _create_code_owned_provider_catalog(gateway_policy=gateway_policy)
 
 
 def runtime_entry_for_selection(

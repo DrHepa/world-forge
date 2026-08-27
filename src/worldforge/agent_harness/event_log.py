@@ -44,8 +44,11 @@ if TYPE_CHECKING:
     from .ports import ExecutionRequest, ExecutionResult
 
 from .usage import (
+    ProviderAccountingLineage,
     UsageEvidenceError,
+    _validate_durable_provider_accounting_lineage,
     build_legacy_usage_accounting,
+    validate_provider_accounting_lineage,
     validate_usage_accounting,
 )
 
@@ -67,6 +70,8 @@ _SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 _STATES = frozenset({"open", "terminal", "recovery_required"})
 _STATE_FORMAT = "world-forge.private.agent_event_log_state"
 _STATE_FORMAT_VERSION = 1
+_PROVIDER_LINEAGE_SEQUENCE = -1
+_PROVIDER_LINEAGE_EVENT_PREFIX = "lineage_"
 _LOCAL_LOCK_FILE_SYSTEMS = frozenset(
     {
         "apfs",
@@ -499,6 +504,7 @@ class ReplayedExecution:
     receipt_bytes: bytes | None
     projection_bytes: bytes | None
     usage_accounting_bytes: bytes | None
+    provider_lineage_bytes: bytes | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -714,9 +720,13 @@ def _decode_document(payload: object, *, expected_format: str) -> tuple[dict, by
     return document, canonical
 
 
-def _validated_usage_accounting_bytes(value: object) -> tuple[dict[str, object], bytes]:
+def _validated_usage_accounting_bytes(
+    value: object,
+    *,
+    trusted_lineage: object = None,
+) -> tuple[dict[str, object], bytes]:
     try:
-        document = validate_usage_accounting(value)
+        document = validate_usage_accounting(value, trusted_lineage=trusted_lineage)
         encoded = _canonical_json(document)
     except AgentEventLogError:
         raise
@@ -727,7 +737,11 @@ def _validated_usage_accounting_bytes(value: object) -> tuple[dict[str, object],
     return document, encoded
 
 
-def _decode_usage_accounting(payload: object) -> tuple[dict[str, object], bytes]:
+def _decode_usage_accounting(
+    payload: object,
+    *,
+    trusted_lineage: object = None,
+) -> tuple[dict[str, object], bytes]:
     if type(payload) is not bytes or len(payload) > MAX_AGENT_HARNESS_DOCUMENT_BYTES:
         raise AgentEventLogCorrupt("event_log_usage_accounting_corrupt")
     try:
@@ -739,10 +753,79 @@ def _decode_usage_accounting(payload: object) -> tuple[dict[str, object], bytes]
         )
     except (UnicodeError, ValueError, TypeError, json.JSONDecodeError) as exc:
         raise AgentEventLogCorrupt("event_log_usage_accounting_corrupt") from exc
-    document, canonical = _validated_usage_accounting_bytes(decoded)
+    document, canonical = _validated_usage_accounting_bytes(
+        decoded,
+        trusted_lineage=trusted_lineage,
+    )
     if canonical != payload:
         raise AgentEventLogCorrupt("event_log_storage_noncanonical")
     return document, canonical
+
+
+def _validated_provider_lineage_bytes(
+    value: object,
+    *,
+    durable: bool = False,
+) -> tuple[ProviderAccountingLineage, bytes]:
+    try:
+        lineage = (
+            _validate_durable_provider_accounting_lineage(value)
+            if durable
+            else validate_provider_accounting_lineage(value)
+        )
+        if lineage.pricing_policy_hash is not None:
+            from .pricing import validate_code_owned_pricing_binding
+
+            checked_policy = validate_code_owned_pricing_binding(
+                runtime_id=lineage.runtime_id,
+                runtime_revision=lineage.runtime_revision,
+                runtime_content_hash=lineage.runtime_content_hash,
+                usage_policy_hash=lineage.usage_policy_hash,
+                pricing_policy_hash=lineage.pricing_policy_hash,
+                pricing_currency=lineage.pricing_currency,
+            )
+            if checked_policy is None:
+                raise UsageEvidenceError("provider_usage_policy_invalid")
+        encoded = _canonical_json(lineage.as_document())
+    except Exception as exc:
+        raise AgentEventLogCorrupt("event_log_usage_accounting_corrupt") from exc
+    if len(encoded) > MAX_AGENT_HARNESS_DOCUMENT_BYTES:
+        raise AgentEventLogCorrupt("event_log_document_too_large")
+    return lineage, encoded
+
+
+def _decode_provider_lineage(payload: object) -> tuple[ProviderAccountingLineage, bytes]:
+    if type(payload) is not bytes or len(payload) > MAX_AGENT_HARNESS_DOCUMENT_BYTES:
+        raise AgentEventLogCorrupt("event_log_usage_accounting_corrupt")
+    try:
+        decoded = json.loads(
+            payload.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_float=_reject_float,
+            parse_constant=_reject_constant,
+        )
+    except (UnicodeError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise AgentEventLogCorrupt("event_log_usage_accounting_corrupt") from exc
+    lineage, canonical = _validated_provider_lineage_bytes(decoded, durable=True)
+    if canonical != payload:
+        raise AgentEventLogCorrupt("event_log_storage_noncanonical")
+    return lineage, canonical
+
+
+def _provider_lineage_event_id(content_hash: str) -> str:
+    return f"{_PROVIDER_LINEAGE_EVENT_PREFIX}{content_hash[:56]}"
+
+
+def _provider_lineage_request_commitment(lineage: ProviderAccountingLineage) -> str:
+    """Build an unkeyed semantic consistency link, not an authenticity anchor."""
+
+    payload = {
+        "format": "world-forge.private.provider_lineage_request_commitment",
+        "format_version": 1,
+        "request_fingerprint": lineage.request_fingerprint,
+        "provider_lineage_hash": lineage.content_hash,
+    }
+    return hashlib.sha256(_canonical_json(payload)).hexdigest()
 
 
 def _usage_accounting_matches_receipt(
@@ -2000,6 +2083,50 @@ class AgentEventLog:
         *,
         request_fingerprint: str | None,
     ) -> bool:
+        return self._begin_execution(
+            execution_id,
+            log_id,
+            activation,
+            grant,
+            request_fingerprint=request_fingerprint,
+            provider_lineage=None,
+        )
+
+    def _begin_execution_with_provider_lineage(
+        self,
+        execution_id: str,
+        log_id: str,
+        activation: dict[str, object],
+        grant: dict[str, object],
+        *,
+        request_fingerprint: str | None,
+        provider_lineage: object,
+    ) -> bool:
+        try:
+            lineage, _lineage_bytes = _validated_provider_lineage_bytes(provider_lineage)
+        except AgentEventLogError as exc:
+            raise AgentEventLogError("event_log_request_invalid") from exc
+        if lineage.pricing_policy_hash is None:
+            raise AgentEventLogError("event_log_request_invalid")
+        return self._begin_execution(
+            execution_id,
+            log_id,
+            activation,
+            grant,
+            request_fingerprint=request_fingerprint,
+            provider_lineage=provider_lineage,
+        )
+
+    def _begin_execution(
+        self,
+        execution_id: str,
+        log_id: str,
+        activation: dict[str, object],
+        grant: dict[str, object],
+        *,
+        request_fingerprint: str | None,
+        provider_lineage: object | None,
+    ) -> bool:
         self._assert_owner_process()
         self._require_ordinary_session()
         execution_id = _plain_id(execution_id)
@@ -2017,7 +2144,36 @@ class AgentEventLog:
         _, grant_bytes = _validated_document_bytes(
             aggregate.grant, expected_format=AGENT_CAPABILITY_GRANT_FORMAT
         )
-        if len(activation_bytes) + len(grant_bytes) > MAX_AGENT_EVENT_LOG_EXECUTION_BYTES:
+        lineage: ProviderAccountingLineage | None = None
+        lineage_bytes: bytes | None = None
+        if provider_lineage is not None:
+            try:
+                lineage, lineage_bytes = _validated_provider_lineage_bytes(provider_lineage)
+            except AgentEventLogError as exc:
+                raise AgentEventLogError("event_log_request_invalid") from exc
+            runtime = aggregate.activation["runtime"]
+            if (
+                lineage.execution_id != execution_id
+                or lineage.request_fingerprint != request_fingerprint
+                or runtime
+                != {
+                    "id": lineage.runtime_id,
+                    "revision": lineage.runtime_revision,
+                    "content_hash": lineage.runtime_content_hash,
+                }
+            ):
+                raise AgentEventLogError("event_log_request_invalid")
+        stored_request_fingerprint = (
+            request_fingerprint
+            if lineage is None
+            else _provider_lineage_request_commitment(lineage)
+        )
+        if (
+            len(activation_bytes)
+            + len(grant_bytes)
+            + (0 if lineage_bytes is None else len(lineage_bytes))
+            > MAX_AGENT_EVENT_LOG_EXECUTION_BYTES
+        ):
             raise AgentEventLogError("event_log_execution_too_large")
         activation_hash = str(aggregate.activation["content_hash"])
         grant_hash = str(aggregate.grant["content_hash"])
@@ -2030,13 +2186,17 @@ class AgentEventLog:
                 ).fetchone()
                 if existing is not None:
                     self._verify_state_hash(existing)
+                    _stored_lineage, stored_lineage_bytes = self._provider_lineage_locked(
+                        execution_id
+                    )
                     exact = (
                         existing["log_id"] == log_id
-                        and existing["request_fingerprint"] == request_fingerprint
+                        and existing["request_fingerprint"] == stored_request_fingerprint
                         and existing["activation_hash"] == activation_hash
                         and existing["grant_hash"] == grant_hash
                         and existing["activation_json"] == activation_bytes
                         and existing["grant_json"] == grant_bytes
+                        and stored_lineage_bytes == lineage_bytes
                     )
                     if (
                         request_fingerprint is not None
@@ -2049,7 +2209,7 @@ class AgentEventLog:
                 values = {
                     "execution_id": execution_id,
                     "log_id": log_id,
-                    "request_fingerprint": request_fingerprint,
+                    "request_fingerprint": stored_request_fingerprint,
                     "activation_hash": activation_hash,
                     "grant_hash": grant_hash,
                     "state": "open",
@@ -2072,7 +2232,7 @@ class AgentEventLog:
                         (
                             execution_id,
                             log_id,
-                            request_fingerprint,
+                            stored_request_fingerprint,
                             activation_hash,
                             grant_hash,
                             sqlite3.Binary(activation_bytes),
@@ -2086,6 +2246,22 @@ class AgentEventLog:
                             _state_hash(**values),
                         ),
                     )
+                    if lineage is not None and lineage_bytes is not None:
+                        self.connection.execute(
+                            """
+                            INSERT INTO events(
+                                execution_id, sequence, event_id, event_hash, event_json
+                            ) VALUES (?, ?, ?, ?, ?)
+                            """,
+                            (
+                                execution_id,
+                                _PROVIDER_LINEAGE_SEQUENCE,
+                                _provider_lineage_event_id(lineage.content_hash),
+                                lineage.content_hash,
+                                sqlite3.Binary(lineage_bytes),
+                            ),
+                        )
+                        self._fault("after_begin_provider_lineage_insert")
                 except sqlite3.IntegrityError as exc:
                     raise AgentEventLogConflict("event_log_execution_conflict") from exc
                 self._fault("before_begin_commit")
@@ -2101,6 +2277,7 @@ class AgentEventLog:
                 request_fingerprint=request_fingerprint,
                 activation_bytes=activation_bytes,
                 grant_bytes=grant_bytes,
+                provider_lineage_bytes=lineage_bytes,
                 cause=exc,
             )
 
@@ -2112,6 +2289,7 @@ class AgentEventLog:
         request_fingerprint: str | None,
         activation_bytes: bytes,
         grant_bytes: bytes,
+        provider_lineage_bytes: bytes | None,
         cause: Exception,
     ) -> bool:
         try:
@@ -2124,6 +2302,7 @@ class AgentEventLog:
             or replay.request_fingerprint != request_fingerprint
             or replay.activation_bytes != activation_bytes
             or replay.grant_bytes != grant_bytes
+            or replay.provider_lineage_bytes != provider_lineage_bytes
         ):
             self._indeterminate_executions.add(execution_id)
             raise AgentEventLogIndeterminate("event_log_begin_indeterminate") from cause
@@ -2141,7 +2320,7 @@ class AgentEventLog:
         rows = self.connection.execute(
             """
             SELECT sequence, event_id, event_hash, event_json
-            FROM events WHERE execution_id = ? ORDER BY sequence
+            FROM events WHERE execution_id = ? AND sequence >= 0 ORDER BY sequence
             """,
             (execution_id,),
         ).fetchall()
@@ -2161,6 +2340,31 @@ class AgentEventLog:
             documents.append(document)
             encoded.append(payload)
         return documents, encoded
+
+    def _provider_lineage_locked(
+        self,
+        execution_id: str,
+    ) -> tuple[ProviderAccountingLineage | None, bytes | None]:
+        rows = self.connection.execute(
+            """
+            SELECT sequence, event_id, event_hash, event_json
+            FROM events WHERE execution_id = ? AND sequence < 0 ORDER BY sequence
+            """,
+            (execution_id,),
+        ).fetchall()
+        if not rows:
+            return None, None
+        if len(rows) != 1 or rows[0]["sequence"] != _PROVIDER_LINEAGE_SEQUENCE:
+            raise AgentEventLogCorrupt("event_log_usage_accounting_corrupt")
+        row = rows[0]
+        lineage, payload = _decode_provider_lineage(row["event_json"])
+        if (
+            lineage.execution_id != execution_id
+            or row["event_id"] != _provider_lineage_event_id(lineage.content_hash)
+            or row["event_hash"] != lineage.content_hash
+        ):
+            raise AgentEventLogCorrupt("event_log_usage_accounting_corrupt")
+        return lineage, payload
 
     def _current_total_bytes_locked(self, row: sqlite3.Row) -> int:
         event_total = self.connection.execute(
@@ -2386,7 +2590,11 @@ class AgentEventLog:
             receipt, expected_format=AGENT_EXECUTION_RECEIPT_FORMAT
         )
         _, event_bytes = _validated_document_bytes(event, expected_format=AGENT_EVENT_FORMAT)
-        _, accounting_bytes = _validated_usage_accounting_bytes(usage_accounting)
+        trusted_lineage, _ = self._provider_lineage_locked(execution_id)
+        _, accounting_bytes = _validated_usage_accounting_bytes(
+            usage_accounting,
+            trusted_lineage=trusted_lineage,
+        )
         try:
             committed_now = self._finalize_once(
                 execution_id,
@@ -2466,7 +2674,11 @@ class AgentEventLog:
         event_document, event_bytes = _validated_document_bytes(
             event, expected_format=AGENT_EVENT_FORMAT
         )
-        accounting_document, accounting_bytes = _validated_usage_accounting_bytes(usage_accounting)
+        trusted_lineage, _ = self._provider_lineage_locked(execution_id)
+        accounting_document, accounting_bytes = _validated_usage_accounting_bytes(
+            usage_accounting,
+            trusted_lineage=trusted_lineage,
+        )
         if not _usage_accounting_matches_receipt(accounting_document, receipt_document):
             raise AgentEventLogConflict("event_log_usage_accounting_conflict")
         if event_document["event_type"] != "execution.receipt_recorded":
@@ -2941,16 +3153,25 @@ class AgentEventLog:
             result: list[OpenExecution] = []
             for row in rows:
                 self._verify_state_hash(row)
+                lineage, _ = self._provider_lineage_locked(row["execution_id"])
                 if row["generation"] != row["next_sequence"]:
                     raise AgentEventLogCorrupt("event_log_projection_corrupt")
+                if lineage is not None and row[
+                    "request_fingerprint"
+                ] != _provider_lineage_request_commitment(lineage):
+                    raise AgentEventLogCorrupt("event_log_usage_accounting_corrupt")
                 result.append(
                     OpenExecution(
                         execution_id=str(row["execution_id"]),
                         log_id=str(row["log_id"]),
                         request_fingerprint=(
-                            None
-                            if row["request_fingerprint"] is None
-                            else str(row["request_fingerprint"])
+                            lineage.request_fingerprint
+                            if lineage is not None
+                            else (
+                                None
+                                if row["request_fingerprint"] is None
+                                else str(row["request_fingerprint"])
+                            )
                         ),
                         generation=int(row["generation"]),
                         next_sequence=int(row["next_sequence"]),
@@ -3029,6 +3250,19 @@ class AgentEventLog:
             row["grant_json"], expected_format=AGENT_CAPABILITY_GRANT_FORMAT
         )
         events, event_bytes = self._event_documents_locked(row["execution_id"])
+        provider_lineage, provider_lineage_bytes = self._provider_lineage_locked(
+            row["execution_id"]
+        )
+        if provider_lineage is not None and activation["runtime"] != {
+            "id": provider_lineage.runtime_id,
+            "revision": provider_lineage.runtime_revision,
+            "content_hash": provider_lineage.runtime_content_hash,
+        }:
+            raise AgentEventLogCorrupt("event_log_usage_accounting_corrupt")
+        if provider_lineage is not None and row[
+            "request_fingerprint"
+        ] != _provider_lineage_request_commitment(provider_lineage):
+            raise AgentEventLogCorrupt("event_log_usage_accounting_corrupt")
         receipt_row = self.connection.execute(
             "SELECT * FROM receipts WHERE execution_id = ?", (row["execution_id"],)
         ).fetchone()
@@ -3054,7 +3288,8 @@ class AgentEventLog:
             ).fetchone()
             if accounting_row is not None:
                 accounting, accounting_bytes = _decode_usage_accounting(
-                    accounting_row["accounting_json"]
+                    accounting_row["accounting_json"],
+                    trusted_lineage=provider_lineage,
                 )
                 if (
                     accounting_row["execution_id"] != row["execution_id"]
@@ -3161,6 +3396,8 @@ class AgentEventLog:
         if row["state"] == "recovery_required" and row["generation"] != row["next_sequence"] + 1:
             raise AgentEventLogCorrupt("event_log_projection_corrupt")
         total = len(activation_bytes) + len(grant_bytes) + sum(map(len, event_bytes))
+        if provider_lineage_bytes is not None:
+            total += len(provider_lineage_bytes)
         if receipt_bytes is not None:
             total += len(receipt_bytes)
         if projection_bytes is not None:
@@ -3173,7 +3410,11 @@ class AgentEventLog:
             execution_id=str(row["execution_id"]),
             log_id=str(row["log_id"]),
             request_fingerprint=(
-                None if row["request_fingerprint"] is None else str(row["request_fingerprint"])
+                provider_lineage.request_fingerprint
+                if provider_lineage is not None
+                else (
+                    None if row["request_fingerprint"] is None else str(row["request_fingerprint"])
+                )
             ),
             state=str(row["state"]),
             generation=int(row["generation"]),
@@ -3186,6 +3427,9 @@ class AgentEventLog:
             receipt_bytes=None if receipt_bytes is None else bytes(receipt_bytes),
             projection_bytes=(None if projection_bytes is None else bytes(projection_bytes)),
             usage_accounting_bytes=(None if accounting_bytes is None else bytes(accounting_bytes)),
+            provider_lineage_bytes=(
+                None if provider_lineage_bytes is None else bytes(provider_lineage_bytes)
+            ),
         )
 
 

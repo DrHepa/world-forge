@@ -272,12 +272,12 @@ def _loopback_selection(policy: LoopbackGatewayPolicy) -> ProviderExecutionSelec
         max_turns=1,
         max_tool_calls=0,
         max_total_tokens=2,
-        max_cost_minor_units=0,
-        currency="USD",
+        max_cost_minor_units=None,
+        currency=spec.pricing_currency,
         max_duration_ms=2_000,
         deadline_ms=None,
         usage_policy_hash=spec.usage_policy_hash,
-        pricing_policy_hash=None,
+        pricing_policy_hash=spec.pricing_policy_hash,
         credential_revision_id=None,
     )
 

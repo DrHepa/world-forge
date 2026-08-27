@@ -143,6 +143,7 @@ class FakeJournal(ExecutionJournal):
             tuple[str, str, dict[str, object], dict[str, object], str | None]
         ] = []
         self.begin_result: bool | BaseException = True
+        self.begin_lineages: list[object | None] = []
 
     def begin_execution(
         self,
@@ -152,6 +153,44 @@ class FakeJournal(ExecutionJournal):
         grant: dict[str, object],
         *,
         request_fingerprint: str | None,
+    ) -> bool:
+        return self._begin_execution(
+            execution_id,
+            log_id,
+            activation,
+            grant,
+            request_fingerprint=request_fingerprint,
+            provider_lineage=None,
+        )
+
+    def _begin_execution_with_provider_lineage(
+        self,
+        execution_id: str,
+        log_id: str,
+        activation: dict[str, object],
+        grant: dict[str, object],
+        *,
+        request_fingerprint: str | None,
+        provider_lineage: object,
+    ) -> bool:
+        return self._begin_execution(
+            execution_id,
+            log_id,
+            activation,
+            grant,
+            request_fingerprint=request_fingerprint,
+            provider_lineage=provider_lineage,
+        )
+
+    def _begin_execution(
+        self,
+        execution_id: str,
+        log_id: str,
+        activation: dict[str, object],
+        grant: dict[str, object],
+        *,
+        request_fingerprint: str | None,
+        provider_lineage: object | None,
     ) -> bool:
         self.operations.append("begin")
         self.begin_calls.append(
@@ -163,6 +202,7 @@ class FakeJournal(ExecutionJournal):
                 request_fingerprint,
             )
         )
+        self.begin_lineages.append(copy.deepcopy(provider_lineage))
         if isinstance(self.begin_result, BaseException):
             raise self.begin_result
         return self.begin_result

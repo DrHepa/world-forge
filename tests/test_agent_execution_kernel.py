@@ -1655,7 +1655,7 @@ class AgentExecutionKernelTests(unittest.TestCase):
                 self.assertEqual("failed", result.outcome)
                 self.assertEqual(["provider_usage_invalid"], result.receipt["failure_codes"])
                 self.assertEqual(
-                    (0, 0, 0, None, None),
+                    (3, 2, 1, None, None),
                     (
                         result.receipt["usage"]["input_tokens"],
                         result.receipt["usage"]["output_tokens"],

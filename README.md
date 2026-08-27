@@ -1046,11 +1046,47 @@ v1/v2 migration or detached reads.
 Public receipt token and cost fields are recognized/accounted ledger totals,
 not measurement truth. Cached zero can mean no recognized cache claim, not
 observed absence of caching. Null cost/currency means no recognized cost claim,
-not zero cost. No cache-rate, vendor-honesty, billing-correctness, or provider
-telemetry claim is made. Worker-originated money remains rejected; parent-owned
-pricing is a later slice. See
-[ADR-0041](docs/decisions/0041-private-correlated-provider-turn-transcript.md)
-and [ADR-0042](docs/decisions/0042-truthful-private-provider-usage-provenance.md).
+not zero cost. Worker-originated money remains rejected. The parent now owns one
+closed non-production `XTS` pricing policy for the deterministic probe only:
+integer execution-total ceiling rounding derives `2 XTS` minor units for its
+default one-input/one-output turn, even though cache evidence is unavailable,
+because its cached and uncached rates are exactly equal. Both reserved runtime
+identities are exact: conformance must match its canonical revision, bootstrap
+content hash, and usage-policy hash and remains unpriced; the probe must match
+its own canonical triple, usage policy, policy, and currency. A priced selection
+may omit a cost ceiling; when present, the ceiling currency must be exact `XTS`.
+Live catalog, resolution, and accounting-lineage authority is held only in
+construction-owned, identity-checked weak-reference registries that also retain
+the exact registered hashes; no transferable proof is embedded in
+caller-visible values. Exact weak-reference callbacks retire only their own
+registration, so collected executions release authority without allowing a
+stale callback to remove a newer same-ID registration.
+The sole root factory builds the closed catalog itself and accepts no caller
+catalog or specification. Copies, subclasses, `object.__new__` clones,
+owner-retargeted internals, coherent mutations, and arbitrary lineage hashes
+cannot mint live authority. This is a trusted-same-process/private-module
+boundary, not resistance to monkeypatching those private registries. A private
+begin-time lineage record retains the validated runtime-specification and full
+selection hashes. Priced execution uses a private journal extension to store it;
+unpriced conformance retains the baseline public `ExecutionJournal` call, while
+a legacy journal without that private extension rejects pricing before any
+provider turn or action. The unkeyed request commitment is a semantic
+consistency linkage, not an independent or authenticated anchor: it detects
+individual and partial lineage drift against the accepted request row. Durable
+replay reconstructs that stored semantic linkage without granting live
+authority, and every priced finalize/replay resolves the exact code-owned probe
+runtime, usage policy, pricing policy, and `XTS` currency before checking
+accounting. As specified by
+[ADR-0032](docs/decisions/0032-private-durable-agent-event-log.md), a coherent
+same-UID rewrite of all affected projections and hashes remains outside this
+slice. Exact
+terminal duplicates perform no new provider turn or live pricing transition,
+and legacy rows are never repriced.
+This is synthetic ledger evidence, not a vendor price, invoice, billing or
+freshness claim. See
+[ADR-0041](docs/decisions/0041-private-correlated-provider-turn-transcript.md),
+[ADR-0042](docs/decisions/0042-truthful-private-provider-usage-provenance.md),
+and [ADR-0044](docs/decisions/0044-parent-owned-exact-synthetic-pricing.md).
 
 Slice 2B adds a pure deterministic evaluator and explicit-input, atomic
 no-replace CLI for the closed recorded-result plan, observation, and report

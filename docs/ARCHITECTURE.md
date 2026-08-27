@@ -831,11 +831,54 @@ transcript values and call IDs remain absent from durable/public evidence.
 ADR-0042 gives each token and cost metric a closed observed, code-owned derived,
 or unavailable provenance state. Derived tokens bind a frozen measurement-policy
 hash through runtime specification, catalog selection, governance, and request
-fingerprint. Provider-originated money remains rejected until a separate
-parent-owned pricing authority exists. Authenticated outer-frame identity is
-validated before usage parsing. Valid usage is sealed and projected before
-budget, availability, cancellation, revocation, and nested-result checks, so a
-malformed sibling cannot erase recognized incurred evidence.
+fingerprint. Authenticated outer-frame identity is validated before usage
+parsing. Valid usage is sealed and projected before budget, availability,
+cancellation, revocation, and nested-result checks, so a malformed sibling
+cannot erase recognized incurred evidence.
+
+ADR-0044 adds one parent-owned exact synthetic policy for the existing
+deterministic probe and leaves conformance unpriced. The policy binds the exact
+runtime triple and usage policy and uses `XTS` with denominator `4`, input/cache
+rates `2`, output rate `3`, and cumulative execution-total ceiling rounding.
+Live pricing starts only after a new durable begin. Worker money is never
+accepted: valid tokens and parent cost are sealed before the bounded
+`provider_usage_invalid` failure. All arithmetic uses checked built-in safe
+integers; unavailable cache is priceable only because the registered cache and
+uncached rates are equal. A priced selection may have no ceiling, while any
+present ceiling must use the exact policy currency. The policy hash and currency
+remain bound through specification, catalog/selection, governance, fingerprint,
+accounting, receipt, and EventLog. Both reserved runtime identities are exact:
+conformance must match its canonical revision, bootstrap content hash, and usage
+policy while carrying no pricing, and the probe must match its canonical triple,
+usage policy, policy, and `XTS`. Live catalog, resolution, and accounting-lineage
+authority is registered by exact object identity plus its frozen hashes in
+private construction-owned weak-reference registries; no proof object is
+embedded in a caller-visible dataclass. Collection retires only the exact weak
+registration that issued its callback, bounding registry lifetime without
+letting a stale callback delete a newer same-ID registration. The only
+root-authority factory builds the closed catalog/specifications itself. Caller
+catalogs, value copies, subclasses,
+`object.__new__` clones, borrowed internals, owner retargeting, coherent
+mutation, and arbitrary hashes fail closed. This assumes trusted module-private
+state and does not claim resistance to monkeypatching those registries.
+EventLog's durable begin transaction also retains a private non-public-sequence
+lineage control record whose runtime specification and full selection hashes
+are required again at finalize and replay. The kernel reaches that record only
+through a private priced-journal extension. Unpriced conformance continues to
+call the byte-identical public `ExecutionJournal.begin_execution`; a priced run
+using a legacy journal without the private extension fails before any provider
+turn or action. The unkeyed one-way
+commitment over the original request fingerprint and that lineage is a semantic
+consistency linkage, not an independent authority, MAC, or authenticity proof.
+It detects individual and partial drift against the accepted request row, while
+every priced replay independently resolves the exact code-owned probe runtime,
+usage policy, pricing policy, and `XTS` currency. The complete selection cannot
+be reconstructed from its durable hash alone; durable reconstruction validates
+the stored semantic linkage without minting live catalog authority. Consistent
+same-UID replacement of all affected projections and hashes remains outside this
+slice under ADR-0032. Stored priced turns are recomputed during audit; exact
+terminal duplicates invoke neither the provider nor the live pricing transition,
+and legacy totals are never repriced.
 
 Private EventLog v3 atomically binds one canonical sanitized accounting
 document to every terminal receipt; exact duplicates require its byte identity.
@@ -843,10 +886,12 @@ Ordinary v1/v2 migration and detached legacy reads use conservative
 `legacy_receipt_totals` records rather than claiming historical values were
 observed. Public receipt usage remains recognized/accounted ledger totals, not
 measurement truth: cached zero need not mean observed no caching, and null
-cost/currency need not mean zero cost. This makes no cache-rate,
-vendor-honesty, billing, telemetry, real-provider, or parent-pricing claim. See
-[ADR-0041](decisions/0041-private-correlated-provider-turn-transcript.md)
-and [ADR-0042](decisions/0042-truthful-private-provider-usage-provenance.md).
+cost/currency need not mean zero cost. Synthetic `XTS` cost is not vendor
+billing evidence. This makes no vendor-honesty, billing, telemetry, or
+real-provider claim. See
+[ADR-0041](decisions/0041-private-correlated-provider-turn-transcript.md),
+[ADR-0042](decisions/0042-truthful-private-provider-usage-provenance.md),
+and [ADR-0044](decisions/0044-parent-owned-exact-synthetic-pricing.md).
 
 Slice 2B retains the closed, identity/evidence-only plan, observation, and report
 boundary for an optional codebase-memory comparison and adds a pure evaluator

@@ -8,6 +8,7 @@ import json
 import re
 from dataclasses import dataclass, replace
 from urllib.parse import urlsplit
+from weakref import ReferenceType, ref
 
 from worldforge.agent_harness_contracts import MAX_SAFE_INTEGER
 
@@ -23,6 +24,61 @@ _CATALOG_FORMAT = "world-forge.private.provider_runtime_catalog"
 _SELECTION_FORMAT = "world-forge.private.provider_execution_selection"
 _FORMAT_VERSION = 1
 _MAX_CATALOG_ENTRIES = 64
+_CODE_OWNED_CATALOG_IDENTITIES: dict[
+    int,
+    tuple[ReferenceType[object], str, tuple[str, ...]],
+] = {}
+_CODE_OWNED_RESOLUTION_IDENTITIES: dict[
+    int,
+    tuple[ReferenceType[object], str, str, str],
+] = {}
+
+
+def _retire_registered_identity(
+    registry: dict[int, tuple[object, ...]],
+    identity: int,
+    registered_ref: ReferenceType[object],
+) -> None:
+    """Retire only the exact weak registration that produced the callback."""
+
+    registered = registry.get(identity)
+    if registered is not None and registered[0] is registered_ref:
+        del registry[identity]
+
+
+def _register_catalog_authority(value: ProviderRuntimeCatalog) -> None:
+    identity = id(value)
+
+    def retire(registered_ref: ReferenceType[object]) -> None:
+        _retire_registered_identity(  # type: ignore[arg-type]
+            _CODE_OWNED_CATALOG_IDENTITIES,
+            identity,
+            registered_ref,
+        )
+
+    _CODE_OWNED_CATALOG_IDENTITIES[identity] = (
+        ref(value, retire),
+        value.catalog_hash,
+        tuple(spec.content_hash for spec in value._entries),
+    )
+
+
+def _register_resolution_authority(value: ResolvedProviderExecution) -> None:
+    identity = id(value)
+
+    def retire(registered_ref: ReferenceType[object]) -> None:
+        _retire_registered_identity(  # type: ignore[arg-type]
+            _CODE_OWNED_RESOLUTION_IDENTITIES,
+            identity,
+            registered_ref,
+        )
+
+    _CODE_OWNED_RESOLUTION_IDENTITIES[identity] = (
+        ref(value, retire),
+        value.catalog_hash,
+        value.spec.content_hash,
+        value.selection.content_hash,
+    )
 
 
 class ProviderCatalogError(ValueError):
@@ -234,8 +290,7 @@ class ProviderRuntimeSpec:
                 and endpoint is None
                 and endpoint_hash is None
                 and telemetry_hash is None
-                and pricing_hash is None
-                and currency is None
+                and (pricing_hash is None) == (currency is None)
                 and credential_hash is None
                 and redirects_disabled
             )
@@ -381,7 +436,10 @@ class ProviderExecutionSelection:
         reason = "provider_execution_selection_invalid"
         cost = _optional_integer(max_cost_minor_units, reason)
         checked_currency = _exact_currency(currency, reason)
-        if (cost is None) != (checked_currency is None):
+        pricing_hash = _optional_hash(pricing_policy_hash, reason)
+        if checked_currency is None and (cost is not None or pricing_hash is not None):
+            raise ProviderCatalogError(reason)
+        if checked_currency is not None and cost is None and pricing_hash is None:
             raise ProviderCatalogError(reason)
         credential_revision = credential_revision_id
         if credential_revision is not None and (
@@ -408,7 +466,7 @@ class ProviderExecutionSelection:
             "max_duration_ms": _exact_integer(max_duration_ms, reason),
             "deadline_ms": _optional_integer(deadline_ms, reason),
             "usage_policy_hash": _exact_hash(usage_policy_hash, reason),
-            "pricing_policy_hash": _optional_hash(pricing_policy_hash, reason),
+            "pricing_policy_hash": pricing_hash,
             "credential_revision_id": credential_revision,
         }
         if values["max_turns"] > 64 or values["max_tool_calls"] > 128:
@@ -450,7 +508,7 @@ def _validate_selection(value: object) -> ProviderExecutionSelection:
     return recreated
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class ResolvedProviderExecution:
     catalog_hash: str
     spec: ProviderRuntimeSpec
@@ -459,6 +517,19 @@ class ResolvedProviderExecution:
     @property
     def runtime_binding(self) -> dict[str, object]:
         return self.spec.runtime_binding
+
+
+def _has_resolution_authority(value: ResolvedProviderExecution) -> bool:
+    if type(value) is not ResolvedProviderExecution:
+        return False
+    registered = _CODE_OWNED_RESOLUTION_IDENTITIES.get(id(value))
+    return (
+        registered is not None
+        and registered[0]() is value
+        and registered[1] == value.catalog_hash
+        and registered[2] == value.spec.content_hash
+        and registered[3] == value.selection.content_hash
+    )
 
 
 def _validate_resolved(value: object) -> ResolvedProviderExecution:
@@ -479,11 +550,24 @@ def _validate_resolved(value: object) -> ResolvedProviderExecution:
         or spec.pricing_policy_hash is not None
         and selection.currency != spec.pricing_currency
         or (spec.credential_requirement_hash is None) != (selection.credential_revision_id is None)
-        or spec.network_scope == "internet"
-        and selection.max_cost_minor_units is None
     ):
         raise ProviderCatalogError("provider_execution_selection_invalid")
-    return ResolvedProviderExecution(value.catalog_hash, spec, selection)
+    authoritative = _has_resolution_authority(value)
+    checked = ResolvedProviderExecution(
+        value.catalog_hash,
+        spec,
+        selection,
+    )
+    if authoritative:
+        _register_resolution_authority(checked)
+    return checked
+
+
+def _validate_authoritative_resolved(value: object) -> ResolvedProviderExecution:
+    checked = _validate_resolved(value)
+    if not _has_resolution_authority(checked):
+        raise ProviderCatalogError("provider_execution_selection_invalid")
+    return checked
 
 
 def _reject_production_catalog_specs(
@@ -504,7 +588,7 @@ def _reject_production_catalog_specs(
                 raise ProviderCatalogError("provider_runtime_unavailable")
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class ProviderRuntimeCatalog:
     _entries: tuple[ProviderRuntimeSpec, ...]
     catalog_hash: str
@@ -524,6 +608,22 @@ class ProviderRuntimeCatalog:
             raise ProviderCatalogError(reason) from None
         if any(spec.production_eligible or spec.network_scope == "internet" for spec in checked):
             raise ProviderCatalogError("provider_runtime_unavailable")
+        try:
+            from .pricing import validate_code_owned_pricing_binding
+
+            for spec in checked:
+                validate_code_owned_pricing_binding(
+                    runtime_id=spec.runtime_id,
+                    runtime_revision=spec.runtime_revision,
+                    runtime_content_hash=spec.runtime_content_hash,
+                    usage_policy_hash=spec.usage_policy_hash,
+                    pricing_policy_hash=spec.pricing_policy_hash,
+                    pricing_currency=spec.pricing_currency,
+                )
+        except ProviderCatalogError:
+            raise
+        except Exception:
+            raise ProviderCatalogError("provider_pricing_policy_invalid") from None
         ordered = tuple(
             sorted(
                 checked,
@@ -563,6 +663,7 @@ class ProviderRuntimeCatalog:
             raise ProviderCatalogError("provider_catalog_invalid") from None
 
     def snapshot(self) -> ProviderRuntimeCatalog:
+        authoritative = _has_catalog_authority(self)
         entries = self.specs
         snapshot = ProviderRuntimeCatalog.create(entries)
         if (
@@ -572,6 +673,8 @@ class ProviderRuntimeCatalog:
             != tuple(spec.content_hash for spec in snapshot._entries)
         ):
             raise ProviderCatalogError("provider_catalog_invalid")
+        if authoritative:
+            _register_catalog_authority(snapshot)
         return snapshot
 
     def resolve(self, selection: object) -> ResolvedProviderExecution:
@@ -590,8 +693,60 @@ class ProviderRuntimeCatalog:
         )
         if len(matches) != 1:
             raise ProviderCatalogError("provider_runtime_unavailable")
-        resolved = ResolvedProviderExecution(catalog.catalog_hash, replace(matches[0]), selected)
-        return _validate_resolved(resolved)
+        resolved = _validate_resolved(
+            ResolvedProviderExecution(
+                catalog.catalog_hash,
+                replace(matches[0]),
+                selected,
+            )
+        )
+        if _has_catalog_authority(catalog):
+            _register_resolution_authority(resolved)
+        return resolved
+
+
+def _has_catalog_authority(value: ProviderRuntimeCatalog) -> bool:
+    if type(value) is not ProviderRuntimeCatalog:
+        return False
+    registered = _CODE_OWNED_CATALOG_IDENTITIES.get(id(value))
+    try:
+        entries = object.__getattribute__(value, "_entries")
+    except Exception:
+        return False
+    return (
+        registered is not None
+        and registered[0]() is value
+        and registered[1] == value.catalog_hash
+        and registered[2] == tuple(spec.content_hash for spec in entries)
+    )
+
+
+def _create_code_owned_provider_catalog(
+    *,
+    gateway_policy: object = None,
+) -> ProviderRuntimeCatalog:
+    """Build and register only the closed construction-owned runtime catalog."""
+
+    try:
+        from .worker_registry import _code_owned_provider_specs
+
+        specs = _code_owned_provider_specs(gateway_policy=gateway_policy)
+        catalog = ProviderRuntimeCatalog.create(specs)
+    except ProviderCatalogError:
+        raise
+    except Exception:
+        raise ProviderCatalogError("provider_catalog_invalid") from None
+    _register_catalog_authority(catalog)
+    return catalog
+
+
+def _validate_authoritative_provider_catalog(value: object) -> ProviderRuntimeCatalog:
+    if type(value) is not ProviderRuntimeCatalog or not _has_catalog_authority(value):
+        raise ProviderCatalogError("provider_catalog_invalid")
+    checked = value.snapshot()
+    if not _has_catalog_authority(checked):
+        raise ProviderCatalogError("provider_catalog_invalid")
+    return checked
 
 
 __all__ = (

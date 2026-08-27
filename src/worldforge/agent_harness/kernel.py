@@ -58,6 +58,7 @@ from .provider_catalog import (
     ProviderExecutionSelection,
     ProviderRuntimeCatalog,
     ResolvedProviderExecution,
+    _validate_authoritative_provider_catalog,
     _validate_selection,
 )
 from .provider_governance import (
@@ -69,9 +70,11 @@ from .provider_governance import (
 )
 from .records import build_event, build_receipt
 from .usage import (
+    ProviderAccountingLineage,
     UsageAccounting,
     UsageEvidenceError,
     build_no_provider_usage_accounting,
+    validate_provider_accounting_lineage,
     validate_usage_accounting,
 )
 from .worker_registry import code_owned_provider_catalog
@@ -274,11 +277,31 @@ def _journal_record_bytes(value: object, *, expected_format: str) -> bytes:
     return encoded
 
 
-def _journal_usage_accounting_bytes(value: object) -> bytes:
+def _journal_usage_accounting_bytes(
+    value: object,
+    *,
+    trusted_lineage: object = None,
+) -> bytes:
     try:
-        document = validate_usage_accounting(value)
+        document = validate_usage_accounting(value, trusted_lineage=trusted_lineage)
         return json.dumps(
             document,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except Exception:
+        raise KernelError("journal_corrupt") from None
+
+
+def _journal_provider_lineage_bytes(value: object) -> bytes | None:
+    if value is None:
+        return None
+    try:
+        lineage = validate_provider_accounting_lineage(value)
+        return json.dumps(
+            lineage.as_document(),
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
@@ -503,7 +526,7 @@ def _selection_matches_execution(
         and selection.max_tool_calls == limits.max_tool_calls
         and selection.max_total_tokens == limits.max_total_tokens
         and selection.max_cost_minor_units == limits.max_cost_minor_units
-        and selection.currency == limits.currency
+        and (limits.max_cost_minor_units is None or selection.currency == limits.currency)
         and selection.max_duration_ms == limits.max_duration_ms
         and selection.deadline_ms == limits.deadline_ms
     )
@@ -705,11 +728,11 @@ class BudgetLedger:
         if type(usage) is not ProviderUsage or self.accounting is None:
             raise KernelError("provider_usage_invalid")
         try:
-            unavailable_reason = self.accounting.add_turn(
+            unavailable_reason, worker_cost_invalid = self.accounting.add_provider_turn(
                 input_tokens=usage.input_tokens,
                 output_tokens=usage.output_tokens,
                 cached_input_tokens=usage.cached_input_tokens,
-                cost=usage.cost,
+                worker_cost=usage.cost,
             )
         except UsageEvidenceError as exc:
             raise KernelError(exc.reason_code) from None
@@ -728,6 +751,8 @@ class BudgetLedger:
             and self.cost_minor_units > self.limits.max_cost_minor_units
         ):
             raise KernelError("cost_budget_exceeded")
+        if worker_cost_invalid:
+            raise KernelError("provider_usage_invalid")
         if unavailable_reason is not None or (
             self.limits.max_cost_minor_units is not None and self.cost_minor_units is None
         ):
@@ -794,12 +819,17 @@ class BudgetLedger:
             return unchanged
         if self.accounting is not None:
             try:
-                self.accounting = UsageAccounting.create(
-                    execution_id=self.accounting.execution_id,
-                    runtime_spec_hash=self.accounting.runtime_spec_hash,
-                    selection_hash=self.accounting.selection_hash,
-                    usage_policy_hash=self.accounting.usage_policy_hash,
-                    pricing_policy_hash=self.accounting.pricing_policy_hash,
+                lineage = self.accounting.provider_lineage
+                self.accounting = (
+                    UsageAccounting.create(
+                        execution_id=self.accounting.execution_id,
+                        runtime_spec_hash=self.accounting.runtime_spec_hash,
+                        selection_hash=self.accounting.selection_hash,
+                        usage_policy_hash=self.accounting.usage_policy_hash,
+                        pricing_policy_hash=None,
+                    )
+                    if lineage is None
+                    else UsageAccounting._from_lineage(lineage)
                 )
             except Exception:
                 self.accounting = None
@@ -861,7 +891,9 @@ class AgentExecutionKernel:
             raise KernelError("provider_catalog_invalid")
         try:
             frozen_provider_catalog = (
-                None if provider_catalog is None else provider_catalog.snapshot()
+                None
+                if provider_catalog is None
+                else _validate_authoritative_provider_catalog(provider_catalog)
             )
         except ProviderCatalogError:
             raise KernelError("provider_catalog_invalid") from None
@@ -1230,6 +1262,19 @@ class AgentExecutionKernel:
                     ),
                 )
             request = replace(request, private_input=private_input)
+            provider_lineage: ProviderAccountingLineage | None = None
+            journal_provider_lineage = None
+            if provider_resolved is not None:
+                try:
+                    provider_lineage = ProviderAccountingLineage.from_resolved(
+                        execution_id=execution_id,
+                        request_fingerprint=request_fingerprint,
+                        resolved=provider_resolved,
+                    )
+                    if provider_lineage.pricing_policy_hash is not None:
+                        journal_provider_lineage = provider_lineage
+                except UsageEvidenceError:
+                    raise KernelError("provider_usage_policy_invalid") from None
             journal_activation = copy.deepcopy(activation)
             journal_grant = copy.deepcopy(grant)
             expected_journal_activation = _journal_record_bytes(
@@ -1238,13 +1283,35 @@ class AgentExecutionKernel:
             expected_journal_grant = _journal_record_bytes(
                 journal_grant, expected_format=AGENT_CAPABILITY_GRANT_FORMAT
             )
+            expected_journal_provider_lineage = _journal_provider_lineage_bytes(
+                journal_provider_lineage
+            )
+            priced_begin = None
+            if journal_provider_lineage is not None:
+                try:
+                    priced_begin = self.journal._begin_execution_with_provider_lineage  # type: ignore[attr-defined]
+                except Exception:
+                    raise KernelError("provider_usage_policy_invalid") from None
+                if not callable(priced_begin):
+                    raise KernelError("provider_usage_policy_invalid")
             try:
-                begun = self.journal.begin_execution(
-                    execution_id,
-                    request.log_id,
-                    journal_activation,
-                    journal_grant,
-                    request_fingerprint=request_fingerprint,
+                begun = (
+                    self.journal.begin_execution(
+                        execution_id,
+                        request.log_id,
+                        journal_activation,
+                        journal_grant,
+                        request_fingerprint=request_fingerprint,
+                    )
+                    if priced_begin is None
+                    else priced_begin(
+                        execution_id,
+                        request.log_id,
+                        journal_activation,
+                        journal_grant,
+                        request_fingerprint=request_fingerprint,
+                        provider_lineage=journal_provider_lineage,
+                    )
                 )
             except Exception:
                 actual_activation = _journal_record_bytes(
@@ -1253,9 +1320,11 @@ class AgentExecutionKernel:
                 actual_grant = _journal_record_bytes(
                     journal_grant, expected_format=AGENT_CAPABILITY_GRANT_FORMAT
                 )
+                actual_provider_lineage = _journal_provider_lineage_bytes(journal_provider_lineage)
                 if (
                     actual_activation != expected_journal_activation
                     or actual_grant != expected_journal_grant
+                    or actual_provider_lineage != expected_journal_provider_lineage
                 ):
                     raise KernelError("journal_corrupt") from None
                 raise KernelError("journal_begin_ambiguous") from None
@@ -1265,9 +1334,11 @@ class AgentExecutionKernel:
             actual_grant = _journal_record_bytes(
                 journal_grant, expected_format=AGENT_CAPABILITY_GRANT_FORMAT
             )
+            actual_provider_lineage = _journal_provider_lineage_bytes(journal_provider_lineage)
             if (
                 actual_activation != expected_journal_activation
                 or actual_grant != expected_journal_grant
+                or actual_provider_lineage != expected_journal_provider_lineage
             ):
                 raise KernelError("journal_corrupt")
             if type(begun) is not bool:
@@ -1320,6 +1391,7 @@ class AgentExecutionKernel:
                 provider_snapshot=provider_snapshot,
                 provider_reason=provider_reason,
                 provider_resolved=provider_resolved,
+                provider_lineage=provider_lineage,
             )
         finally:
             try:
@@ -1347,17 +1419,14 @@ class AgentExecutionKernel:
         provider_snapshot: ProviderGovernanceSnapshot | None,
         provider_reason: str | None,
         provider_resolved: ResolvedProviderExecution | None,
+        provider_lineage: ProviderAccountingLineage | None,
     ) -> ExecutionResult:
         accounting = None
         if provider_resolved is not None:
             try:
-                accounting = UsageAccounting.create(
-                    execution_id=activation["execution_id"],
-                    runtime_spec_hash=provider_resolved.spec.content_hash,
-                    selection_hash=provider_resolved.selection.content_hash,
-                    usage_policy_hash=provider_resolved.spec.usage_policy_hash,
-                    pricing_policy_hash=provider_resolved.spec.pricing_policy_hash,
-                )
+                if provider_lineage is None:
+                    raise UsageEvidenceError("provider_usage_policy_invalid")
+                accounting = UsageAccounting._from_lineage(provider_lineage)
             except UsageEvidenceError:
                 raise KernelError("provider_usage_policy_invalid") from None
         ledger = BudgetLedger(request.limits, accounting=accounting)
@@ -2271,6 +2340,9 @@ class AgentExecutionKernel:
             else:
                 usage_accounting = ledger.accounting.seal(receipt_hash=receipt["content_hash"])
             journal_usage_accounting = copy.deepcopy(usage_accounting)
+            trusted_lineage = (
+                None if ledger.accounting is None else ledger.accounting.provider_lineage
+            )
             expected_journal_receipt = _journal_record_bytes(
                 journal_receipt, expected_format=AGENT_EXECUTION_RECEIPT_FORMAT
             )
@@ -2278,7 +2350,8 @@ class AgentExecutionKernel:
                 journal_event, expected_format=AGENT_EVENT_FORMAT
             )
             expected_journal_usage_accounting = _journal_usage_accounting_bytes(
-                journal_usage_accounting
+                journal_usage_accounting,
+                trusted_lineage=trusted_lineage,
             )
 
             # This is the last cooperative check before the single atomic side effect.
@@ -2331,7 +2404,8 @@ class AgentExecutionKernel:
                 journal_event, expected_format=AGENT_EVENT_FORMAT
             )
             actual_journal_usage_accounting = _journal_usage_accounting_bytes(
-                journal_usage_accounting
+                journal_usage_accounting,
+                trusted_lineage=trusted_lineage,
             )
             if (
                 actual_journal_receipt != expected_journal_receipt
@@ -2347,7 +2421,10 @@ class AgentExecutionKernel:
         actual_journal_event = _journal_record_bytes(
             journal_event, expected_format=AGENT_EVENT_FORMAT
         )
-        actual_journal_usage_accounting = _journal_usage_accounting_bytes(journal_usage_accounting)
+        actual_journal_usage_accounting = _journal_usage_accounting_bytes(
+            journal_usage_accounting,
+            trusted_lineage=trusted_lineage,
+        )
         if (
             actual_journal_receipt != expected_journal_receipt
             or actual_journal_event != expected_journal_event

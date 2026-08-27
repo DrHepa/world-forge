@@ -61,7 +61,7 @@ H9 = "9" * 64
 
 def _spec(**changes: object) -> ProviderRuntimeSpec:
     values: dict[str, object] = {
-        "runtime_id": "worldforge_conformance_provider",
+        "runtime_id": "test_conformance_provider",
         "runtime_revision": 2,
         "runtime_content_hash": H1,
         "provider_id": "worldforge",
@@ -180,7 +180,7 @@ def _execution_selection(
         "max_tool_calls": limits.max_tool_calls,
         "max_total_tokens": limits.max_total_tokens,
         "max_cost_minor_units": limits.max_cost_minor_units,
-        "currency": limits.currency,
+        "currency": spec.pricing_currency or limits.currency,
         "max_duration_ms": limits.max_duration_ms,
         "deadline_ms": limits.deadline_ms,
         "usage_policy_hash": spec.usage_policy_hash,
@@ -205,7 +205,7 @@ class ProviderRuntimeCatalogTests(unittest.TestCase):
         self.assertEqual(selection, resolved.selection)
         self.assertEqual(
             {
-                "id": "worldforge_conformance_provider",
+                "id": "test_conformance_provider",
                 "revision": 2,
                 "content_hash": H1,
             },
@@ -218,7 +218,7 @@ class ProviderRuntimeCatalogTests(unittest.TestCase):
         returned = resolved.runtime_binding
         returned["id"] = "forged_runtime"
         self.assertEqual(
-            "worldforge_conformance_provider",
+            "test_conformance_provider",
             catalog.resolve(selection).runtime_binding["id"],
         )
 

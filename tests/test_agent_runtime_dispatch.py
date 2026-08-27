@@ -90,11 +90,11 @@ def _selection(key: _CodeOwnedRuntimeKey) -> ProviderExecutionSelection:
         max_tool_calls=2,
         max_total_tokens=100,
         max_cost_minor_units=10,
-        currency="USD",
+        currency=spec.pricing_currency or "USD",
         max_duration_ms=1_000,
         deadline_ms=2_000,
         usage_policy_hash=spec.usage_policy_hash,
-        pricing_policy_hash=None,
+        pricing_policy_hash=spec.pricing_policy_hash,
         credential_revision_id=None,
     )
 

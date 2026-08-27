@@ -785,20 +785,34 @@ boundary, trusted-parent loopback gateway, or real-provider claim. See
 [ADR-0039](decisions/0039-deny-all-provider-worker-egress.md).
 
 ADR-0040 adds that trusted-parent loopback gateway as a separate positive
-authority, not as an exception inside the worker filter. The revision-4
-deterministic probe emits one authenticated semantic side-band request through
-its existing pipes; the broker authenticates and relays it, while the main
-parent alone owns one exact numeric-loopback nonblocking HTTP/1.1 socket. The
-socket closes before a fresh parent response challenge can authorize the
-exchange-bound worker final and before worker-domain cleanup returns. Every
-network wait uses the earlier of the policy and private-turn absolute
-deadlines. The frozen origin/policy, ADR-0039 profile, no-telemetry branch,
-catalog, selection, governance destination facet, and private fingerprint are
-hash-aligned. Post-send ambiguity is non-retriable containment uncertainty and
-leaves the EventLog prefix open. This proves no server identity, exposure
-policy, vendor telemetry, provider, credentials, Internet route, Windows
-backend, or production readiness. See
-[ADR-0040](decisions/0040-parent-owned-exact-origin-loopback-gateway.md).
+authority, not as an exception inside the worker filter. ADR-0043 advances it
+to one code-owned ordered plan and side-band v2. The revision-6 deterministic
+probe emits one authenticated semantic request through its existing pipes; the
+main parent alone runs a bodyless GET followed by a canonical JSON POST to the
+same fixed path, using a fresh exact numeric-loopback nonblocking HTTP/1.1
+socket for each step. Step 0 closes before step 1 is created, and step 1 closes
+before relay. The combined response contains exactly two ordered, challenged
+step records under a cumulative HMAC chain; the worker final binds its terminal
+chain before worker-domain cleanup returns. Every wait uses the earlier of the
+plan and private-turn absolute deadlines. The first send syscall attempt
+latches effect possibility for the complete plan, so every later ambiguity is
+non-retriable containment uncertainty and leaves the EventLog prefix open. The
+frozen origin/plan/policy, ADR-0039 profile, no-telemetry branch, catalog,
+selection, governance destination facet, and private fingerprint are
+hash-aligned. This proves no same-server process identity, rebinding exclusion,
+exposure policy, vendor telemetry, provider, credentials, Internet route,
+Windows backend, or production readiness. See
+[ADR-0040](decisions/0040-parent-owned-exact-origin-loopback-gateway.md) and
+[ADR-0043](decisions/0043-fixed-ordered-loopback-operation-plan.md).
+The plan hash is computed from one closed host/worker-mirrored authority document
+covering the absolute deadline, fresh-socket lifecycle, exact request headers,
+HTTP response/parser rules, ordinary-JSON canonicalization, aggregate bounds,
+and global first-send latch. JSON `null` is a valid step value and is never used
+as the parent's missing-response sentinel.
+The deadline authority names its exact lifecycle anchor: after supervisor
+authority validation and turn-lock acquisition, before scratch creation or
+process setup. That captured value is passed unchanged into the gateway, where
+the private turn deadline composes by minimum rather than resetting either.
 
 ADR-0041 replaces arbitrary private provider history with an exact typed
 transcript. A completed provider turn contributes one assistant record first,
@@ -810,8 +824,8 @@ the v3 request/result protocol HMACs it together with separate usage evidence.
 The full transient transcript is sealed and bounded to 64 KiB, separately from
 the 256-record and outer-frame bounds, and each assistant item is bounded to 128
 calls in both host and worker validation.
-Conformance revision 4 and deterministic-probe revision 5
-retain the two existing runtime IDs; loopback side-band v1 is unchanged. Raw
+Conformance revision 4 and deterministic-probe revision 6 retain the two
+existing runtime IDs; loopback side-band v2 binds the fixed two-step plan. Raw
 transcript values and call IDs remain absent from durable/public evidence.
 
 ADR-0042 gives each token and cost metric a closed observed, code-owned derived,

@@ -3,6 +3,10 @@
 - Status: accepted
 - Date: 2026-08-26
 
+> Supersession note: ADR-0043 advances only the deterministic probe to revision
+> 6 and loopback side-band to version 2. Provider-turn v3, conformance revision
+> 4, usage evidence, and EventLog v3 remain unchanged.
+
 ## Context
 
 The public Agent Harness v1 receipt already contains token and optional cost

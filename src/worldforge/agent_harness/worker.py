@@ -537,7 +537,7 @@ WORKER_BOOTSTRAP = WORKER_BOOTSTRAP_TEMPLATE.replace(
 
 
 _DETERMINISTIC_PROBE_RUNTIME_ID = "worldforge_deterministic_probe_provider"
-_DETERMINISTIC_PROBE_RUNTIME_REVISION = 5
+_DETERMINISTIC_PROBE_RUNTIME_REVISION = 6
 _DETERMINISTIC_PROBE_BOOTSTRAP_TEMPLATE_SOURCE = r"""
 import hashlib
 import hmac
@@ -554,7 +554,7 @@ MAX_GATEWAY_REQUEST_BODY = 8 * 1024
 MAX_GATEWAY_RESPONSE_BODY = 64 * 1024
 RUNTIME = {
     "id": "worldforge_deterministic_probe_provider",
-    "revision": 5,
+    "revision": 6,
     "content_hash": "__WORLD_FORGE_RUNTIME_CONTENT_HASH__",
 }
 USAGE_POLICY_HASH = "__WORLD_FORGE_USAGE_POLICY_HASH__"
@@ -853,20 +853,116 @@ def decode_frame(raw):
         raise ValueError()
     return document
 
+STEP_VALUES = (
+    {
+        "body_present": False, "index": 0, "method": "GET",
+        "path": "/worldforge/v1/ordered-loopback-probe", "request_body_limit": 0,
+        "response_body_limit": MAX_GATEWAY_RESPONSE_BODY,
+        "response_header_limit": 8 * 1024,
+    },
+    {
+        "body_present": True, "index": 1, "method": "POST",
+        "path": "/worldforge/v1/ordered-loopback-probe",
+        "request_body_limit": MAX_GATEWAY_REQUEST_BODY,
+        "response_body_limit": MAX_GATEWAY_RESPONSE_BODY,
+        "response_header_limit": 8 * 1024,
+    },
+)
+STEP_POLICY_HASHES = tuple(digest(value) for value in STEP_VALUES)
+PLAN_COUNT = 2
+PLAN_DOCUMENT = {
+    "aggregate_bounds": {
+        "request_body_bytes": MAX_GATEWAY_REQUEST_BODY,
+        "response_body_bytes": MAX_GATEWAY_RESPONSE_BODY,
+        "response_header_bytes": 16 * 1024,
+    },
+    "deadline_policy": {
+        "anchor_event": (
+            "process_supervisor_execute_after_authority_validation_and_turn_lock_"
+            "before_scratch_or_process_setup"
+        ),
+        "clock": "monotonic", "private_deadline_rule": "minimum",
+        "scope": "plan_global_absolute", "total_deadline_ms": 2000,
+        "reset_between_steps": False,
+    },
+    "effect_policy": {
+        "latch_point": "immediately_before_first_send_syscall",
+        "post_latch_failure": "indeterminate", "reset": False,
+        "scope": "plan_global",
+    },
+    "format": "world-forge.private.ordered_loopback_operation_plan",
+    "format_version": 1,
+    "json_policy": {
+        "canonical_form": "utf8_sorted_compact_json",
+        "canonicalize_after_decode": True,
+        "duplicate_keys": "reject_any_depth", "encoding": "utf-8",
+        "maximum_depth": 64, "nonfinite_numbers": "reject",
+        "ordinary_json_input": True,
+        "unsafe_integer_absolute_max": (1 << 53) - 1,
+    },
+    "ordered_steps": list(STEP_VALUES),
+    "operation_policy": {
+        "caller_selected_fields": [], "origin": "approved_numeric_loopback",
+        "query": "absent", "worker_selected_fields": [],
+    },
+    "plan_count": PLAN_COUNT,
+    "request_policy": {
+        "bodyless_headers": [
+            {"name": "Host", "value_source": "approved_origin_authority"},
+            {"name": "Accept", "value": "application/json"},
+            {"name": "Connection", "value": "close"},
+        ],
+        "body_headers": [
+            {"name": "Host", "value_source": "approved_origin_authority"},
+            {"name": "Content-Type", "value": "application/json"},
+            {"name": "Accept", "value": "application/json"},
+            {"name": "Content-Length", "value_source": "canonical_body_length"},
+            {"name": "Connection", "value": "close"},
+        ],
+        "http_version": "HTTP/1.1",
+        "host_generation": "approved_numeric_origin_host_and_port",
+    },
+    "response_policy": {
+        "clean_eof_required": True, "connection_header": "absent_or_close",
+        "content_length_count": 1, "content_type": "application/json",
+        "header_terminator_rule": "first_crlf_crlf",
+        "forbidden": [
+            "bare_lf_in_header_section", "content_encoding", "interim_1xx", "obs_fold",
+            "redirect_3xx", "surplus_body", "trailers", "transfer_encoding",
+            "truncated_body", "upgrade",
+        ],
+        "http_version": "HTTP/1.1", "status": 200,
+    },
+    "socket_lifecycle": {
+        "bind": False, "close_before_next_step": True,
+        "close_before_relay": True, "connection": "close", "dns": False,
+        "fresh_socket_per_step": True, "listen": False, "nonblocking": True,
+        "owner": "main_parent", "pooling": False, "proxy": False,
+        "reconnect": False, "redirects": False, "retry_count": 0,
+        "sequential": True,
+        "caller_selected_socket_options": False,
+    },
+}
+PLAN_HASH = digest(PLAN_DOCUMENT)
+
 def exact_context(document, request_document, key):
     if type(document) is not dict or set(document) != {
-        "format", "format_version", "gateway_policy_hash", "mac", "nonce",
-        "original_request_hash", "runtime", "sequence"
+        "format", "format_version", "gateway_plan_count", "gateway_plan_hash",
+        "gateway_policy_hash", "mac", "nonce", "original_request_hash", "runtime",
+        "sequence"
     }:
         return False
     supplied = document["mac"]
     return (
         document["format"] == "world-forge.private.loopback_gateway_context"
         and type(document["format_version"]) is int
-        and document["format_version"] == 1
+        and document["format_version"] == 2
         and type(document["sequence"]) is int
         and document["sequence"] == 0
         and exact_sha256(document["gateway_policy_hash"])
+        and type(document["gateway_plan_count"]) is int
+        and document["gateway_plan_count"] == PLAN_COUNT
+        and document["gateway_plan_hash"] == PLAN_HASH
         and document["nonce"] == request_document["nonce"]
         and document["original_request_hash"] == request_document["request_hash"]
         and document["runtime"] == RUNTIME
@@ -874,55 +970,128 @@ def exact_context(document, request_document, key):
         and hmac.compare_digest(supplied, mac(document, key))
     )
 
-def gateway_document(format_name, context, body, key, response_challenge=None):
+def gateway_request_document(context, body, key):
     body_bytes = canonical(body)
-    maximum = (
-        MAX_GATEWAY_REQUEST_BODY
-        if format_name == "world-forge.private.loopback_gateway_request"
-        else MAX_GATEWAY_RESPONSE_BODY
-    )
-    if len(body_bytes) > maximum:
+    if len(body_bytes) > MAX_GATEWAY_REQUEST_BODY:
         raise ValueError()
     document = {
         "body": body,
         "body_hash": hashlib.sha256(body_bytes).hexdigest(),
         "body_length": len(body_bytes),
-        "format": format_name,
-        "format_version": 1,
+        "format": "world-forge.private.loopback_gateway_request",
+        "format_version": 2,
+        "gateway_plan_count": context["gateway_plan_count"],
+        "gateway_plan_hash": context["gateway_plan_hash"],
         "gateway_policy_hash": context["gateway_policy_hash"],
         "nonce": context["nonce"],
         "original_request_hash": context["original_request_hash"],
         "runtime": RUNTIME,
         "sequence": 0,
     }
-    if format_name == "world-forge.private.loopback_gateway_response":
-        if not exact_sha256(response_challenge):
-            raise ValueError()
-        document["response_challenge"] = response_challenge
-        document["exchange_hash"] = digest(document)
-    elif response_challenge is not None:
-        raise ValueError()
     document["mac"] = mac(document, key)
     return document
 
-def exact_gateway_response(document, context, key):
+def chain_seed(context, key):
+    return hmac.new(key, canonical({
+        "format": "world-forge.private.loopback_gateway_chain_seed",
+        "format_version": 2,
+        "gateway_plan_count": context["gateway_plan_count"],
+        "gateway_plan_hash": context["gateway_plan_hash"],
+        "gateway_policy_hash": context["gateway_policy_hash"],
+        "nonce": context["nonce"],
+        "original_request_hash": context["original_request_hash"],
+        "runtime": RUNTIME,
+    }), hashlib.sha256).hexdigest()
+
+def exact_gateway_response(document, context, request_body, key):
     if type(document) is not dict or set(document) != {
-        "body", "body_hash", "body_length", "format", "format_version",
-        "gateway_policy_hash", "mac", "nonce", "original_request_hash",
-        "runtime", "sequence", "response_challenge", "exchange_hash"
+        "completed_count", "format", "format_version", "gateway_plan_count",
+        "gateway_plan_hash", "gateway_policy_hash", "mac", "nonce",
+        "original_request_hash", "runtime", "sequence", "steps",
+        "terminal_chain_hash"
     }:
         return False
-    try:
-        expected = gateway_document(
-            "world-forge.private.loopback_gateway_response",
-            context,
-            document["body"],
-            key,
-            document["response_challenge"],
-        )
-    except BaseException:
+    if not (
+        document["format"] == "world-forge.private.loopback_gateway_response"
+        and type(document["format_version"]) is int
+        and document["format_version"] == 2
+        and document["gateway_plan_count"] == PLAN_COUNT
+        and document["gateway_plan_hash"] == PLAN_HASH
+        and document["gateway_policy_hash"] == context["gateway_policy_hash"]
+        and document["nonce"] == context["nonce"]
+        and document["original_request_hash"] == context["original_request_hash"]
+        and document["runtime"] == RUNTIME
+        and type(document["sequence"]) is int and document["sequence"] == 0
+        and type(document["completed_count"]) is int
+        and document["completed_count"] == PLAN_COUNT
+        and type(document["steps"]) is list and len(document["steps"]) == PLAN_COUNT
+        and exact_sha256(document["terminal_chain_hash"])
+        and exact_sha256(document["mac"])
+        and hmac.compare_digest(document["mac"], mac(document, key))
+    ):
         return False
-    return document == expected
+    prior = chain_seed(context, key)
+    total = 0
+    challenges = set()
+    request_bytes = canonical(request_body)
+    for index, step in enumerate(document["steps"]):
+        if type(step) is not dict or set(step) != {
+            "cumulative_chain_hash", "index", "prior_chain_hash", "request_body_hash",
+            "request_body_length", "request_body_present", "response_body",
+            "response_body_hash", "response_body_length", "response_challenge",
+            "step_mac", "step_policy_hash", "step_transcript_hash"
+        }:
+            return False
+        response_bytes = canonical(step["response_body"])
+        expected_request = request_bytes if index == 1 else b""
+        base = {
+            "index": index,
+            "prior_chain_hash": prior,
+            "request_body_hash": hashlib.sha256(expected_request).hexdigest(),
+            "request_body_length": len(expected_request),
+            "request_body_present": index == 1,
+            "response_body": step["response_body"],
+            "response_body_hash": hashlib.sha256(response_bytes).hexdigest(),
+            "response_body_length": len(response_bytes),
+            "response_challenge": step["response_challenge"],
+            "step_policy_hash": STEP_POLICY_HASHES[index],
+        }
+        transcript_hash = digest(base)
+        with_transcript = dict(base)
+        with_transcript["step_transcript_hash"] = transcript_hash
+        step_mac = hmac.new(key, canonical(with_transcript), hashlib.sha256).hexdigest()
+        link = {
+            "format": "world-forge.private.loopback_gateway_chain_link",
+            "format_version": 2,
+            "gateway_plan_count": PLAN_COUNT,
+            "gateway_plan_hash": PLAN_HASH,
+            "index": index,
+            "prior_chain_hash": prior,
+            "step_mac": step_mac,
+            "step_transcript_hash": transcript_hash,
+        }
+        cumulative = hmac.new(key, canonical(link), hashlib.sha256).hexdigest()
+        expected = dict(with_transcript)
+        expected["step_mac"] = step_mac
+        expected["cumulative_chain_hash"] = cumulative
+        if step != expected or not exact_sha256(step["response_challenge"]):
+            return False
+        if step["response_challenge"] in challenges:
+            return False
+        challenges.add(step["response_challenge"])
+        total += len(response_bytes)
+        if total > MAX_GATEWAY_RESPONSE_BODY:
+            return False
+        prior = cumulative
+    terminal = hmac.new(key, canonical({
+        "completed_count": PLAN_COUNT,
+        "cumulative_chain_hash": prior,
+        "format": "world-forge.private.loopback_gateway_terminal_chain",
+        "format_version": 2,
+        "gateway_plan_count": PLAN_COUNT,
+        "gateway_plan_hash": PLAN_HASH,
+    }), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(document["terminal_chain_hash"], terminal)
 
 def write_frame(document, maximum):
     raw = canonical(document)
@@ -951,12 +1120,7 @@ def main():
             "turn_index": request["turn_index"],
         }
         write_frame(
-            gateway_document(
-                "world-forge.private.loopback_gateway_request",
-                context,
-                gateway_body,
-                key,
-            ),
+            gateway_request_document(context, gateway_body, key),
             MAX_GATEWAY_REQUEST,
         )
         response_raw = read_optional_frame(MAX_GATEWAY_RESPONSE)
@@ -964,11 +1128,11 @@ def main():
             raise EOFError()
         require_eof()
         response_document = decode_frame(response_raw)
-        if not exact_gateway_response(response_document, context, key):
+        if not exact_gateway_response(response_document, context, gateway_body, key):
             raise ValueError()
-        gateway_response = response_document["body"]
-        gateway_response_hash = response_document["body_hash"]
-        gateway_exchange_hash = response_document["exchange_hash"]
+        gateway_response = [step["response_body"] for step in response_document["steps"]]
+        gateway_response_hash = hashlib.sha256(canonical(gateway_response)).hexdigest()
+        gateway_exchange_hash = response_document["terminal_chain_hash"]
     private_output = {
         "execution_id": request["execution_id"],
         "exposed_tool_count": len(request["exposed_tools"]),

@@ -7,6 +7,10 @@
 > to v3, conformance to revision 4, deterministic probe to revision 5, and the
 > private EventLog to v3 for sanitized terminal usage accounting. Transcript
 > structure and loopback side-band v1 remain unchanged.
+>
+> ADR-0043 later advances only the deterministic probe to revision 6 and the
+> independent loopback side-band to version 2; transcript and provider-turn v3
+> semantics remain unchanged.
 
 ## Context
 

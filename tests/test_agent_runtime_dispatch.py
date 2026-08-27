@@ -172,7 +172,7 @@ class CodeOwnedRuntimeRegistryTests(unittest.TestCase):
         self.assertEqual(
             {
                 _CodeOwnedRuntimeKey.CONFORMANCE: (4, 3),
-                _CodeOwnedRuntimeKey.DETERMINISTIC_PROBE: (5, 3),
+                _CodeOwnedRuntimeKey.DETERMINISTIC_PROBE: (6, 3),
             },
             {entry.key: (entry.revision, entry.protocol_version) for entry in entries},
         )
@@ -189,9 +189,9 @@ class CodeOwnedRuntimeRegistryTests(unittest.TestCase):
         self.assertTrue(all(entry.spec.network_scope == "none" for entry in entries))
         self.assertTrue(all(not entry.spec.production_eligible for entry in entries))
         probe = runtime_entry(_CodeOwnedRuntimeKey.DETERMINISTIC_PROBE)
-        self.assertEqual(16_976, len(probe.bootstrap_template.encode("utf-8")))
+        self.assertEqual(24_781, len(probe.bootstrap_template.encode("utf-8")))
         self.assertEqual(
-            "4ae329e526a7584e0455383817433176ac53397767bb06edcf19f472a08458d1",
+            "8ac9baf3afe72b0a9c27277c33193ef7ffd1253aea9b0abbb996e65cb8c75635",
             probe.content_hash,
         )
         self.assertEqual(
@@ -303,7 +303,8 @@ class CodeOwnedRuntimeRegistryTests(unittest.TestCase):
             "pathlib",
             "import requests",
             "scandir",
-            "socket",
+            "import socket",
+            "socket.",
             "subprocess",
             "urllib",
         ):

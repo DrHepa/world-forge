@@ -6,6 +6,11 @@
 > Supersession note: ADR-0041 advances the deterministic probe to revision 4
 > and provider-turn protocol to version 2. This ADR's loopback side-band
 > protocol and gateway policy remain version 1.
+>
+> ADR-0043 replaces the one-POST gateway with one fixed GET-then-POST plan,
+> advances gateway policy and side-band to version 2, and advances the
+> deterministic probe to revision 6. The exact-origin and ownership boundaries
+> here remain authoritative.
 
 ## Context
 

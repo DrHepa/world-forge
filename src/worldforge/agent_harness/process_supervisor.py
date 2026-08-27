@@ -140,6 +140,11 @@ class _LoopbackTurnAuthority:
             "nonce": self.worker_nonce,
             "original_request_hash": self.original_request_hash,
             "gateway_policy_hash": self.policy.content_hash,
+            "gateway_plan_hash": self.policy.plan_hash,
+            "gateway_plan_count": self.policy.plan_count,
+            "gateway_step_policy_hashes": tuple(
+                step.content_hash for step in self.policy.ordered_steps
+            ),
         }
 
 
@@ -507,6 +512,9 @@ def _validate_loopback_turn_authority(
             runtime=runtime_launch.authority.runtime_binding,
             original_request_hash=value.original_request_hash,
             gateway_policy_hash=policy.content_hash,
+            gateway_plan_hash=policy.plan_hash,
+            gateway_plan_count=policy.plan_count,
+            gateway_step_policy_hashes=tuple(step.content_hash for step in policy.ordered_steps),
         )
     except Exception:
         raise ProviderBoundaryFailure() from None
@@ -1267,17 +1275,16 @@ def _linux_broker_main(
                             parsed_gateway_response = parse_loopback_response_frame(
                                 response_frame,
                                 key=worker_key,
-                                nonce=loopback_turn.worker_nonce,
                                 runtime=runtime_launch.authority.runtime_binding,
-                                original_request_hash=loopback_turn.original_request_hash,
-                                gateway_policy_hash=loopback_turn.policy.content_hash,
+                                **loopback_turn.correlation,
                             )
                             if (
-                                parsed_gateway_response.response_challenge is None
-                                or parsed_gateway_response.exchange_hash is None
+                                parsed_gateway_response.completed_count
+                                != loopback_turn.policy.plan_count
+                                or parsed_gateway_response.terminal_chain_hash is None
                             ):
                                 raise ProviderBoundaryIndeterminate()
-                            gateway_exchange_hash = parsed_gateway_response.exchange_hash
+                            gateway_exchange_hash = parsed_gateway_response.terminal_chain_hash
                             pending = memoryview(response_frame)
                             gateway_response_received = True
                         else:
@@ -1336,10 +1343,8 @@ def _linux_broker_main(
                         try:
                             gateway_session = LoopbackProtocolSession(
                                 key=worker_key,
-                                nonce=loopback_turn.worker_nonce,
                                 runtime=runtime_launch.authority.runtime_binding,
-                                original_request_hash=loopback_turn.original_request_hash,
-                                gateway_policy_hash=loopback_turn.policy.content_hash,
+                                **loopback_turn.correlation,
                             )
                             gateway_session.accept_request(gateway_frame)
                             _send_all(
@@ -2013,14 +2018,12 @@ class LinuxProcessSupervisor:
                                 )
                                 session = LoopbackProtocolSession(
                                     key=worker_key,
-                                    nonce=loopback_turn.worker_nonce,
                                     runtime=runtime_launch.authority.runtime_binding,
-                                    original_request_hash=loopback_turn.original_request_hash,
-                                    gateway_policy_hash=loopback_turn.policy.content_hash,
+                                    **loopback_turn.correlation,
                                 )
                                 request = session.accept_request(gateway_frame)
                                 try:
-                                    response_body = execute_loopback_exchange(
+                                    response_steps = execute_loopback_exchange(
                                         loopback_turn.policy,
                                         request.body,
                                         boundary=boundary.poll_stop_reason,
@@ -2037,10 +2040,7 @@ class LinuxProcessSupervisor:
                                 poll_control_once()
                                 if control_latched:
                                     raise ProviderBoundaryIndeterminate()
-                                response_frame = session.build_response(
-                                    response_body,
-                                    response_challenge=os.urandom(32).hex(),
-                                )
+                                response_frame = session.build_response(response_steps)
                                 _send_all(
                                     parent,
                                     _encode_control(

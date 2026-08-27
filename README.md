@@ -993,22 +993,31 @@ host firewall, filesystem sandbox, trusted-parent gateway, real-provider, or
 Windows claim. Public Agent Harness bytes and EventLog records remain unchanged. See
 [ADR-0039](docs/decisions/0039-deny-all-provider-worker-egress.md).
 
-The deterministic probe can now prove one governed local exchange without
-weakening that worker boundary. Its revision-4 bootstrap submits one
-authenticated semantic request over stdin/stdout to the existing broker; the
-main parent alone opens one nonblocking socket to an exact numeric IPv4 or IPv6
-loopback origin, performs strict bounded HTTP/1.1, closes the socket, and only
-then issues a fresh authenticated response challenge. The worker final must
-bind the resulting exchange hash before result acceptance after the worker
-domain is empty. The private turn deadline can shorten the two-second gateway
-policy deadline. The exact
-origin, policy, ADR-0039 enforcement, code-owned no-telemetry branch, catalog,
-selection, and provider approval hashes remain aligned. There is no DNS,
-proxy, redirect, retry, socket inheritance, real provider, credential, vendor
-telemetry claim, or production eligibility. An uncertain outcome after request
-bytes may have been sent leaves the durable prefix open for offline recovery.
-See
-[ADR-0040](docs/decisions/0040-parent-owned-exact-origin-loopback-gateway.md).
+The deterministic probe can now prove one governed fixed ordered local plan
+without weakening that worker boundary. Its revision-6 bootstrap submits one
+authenticated semantic request over stdin/stdout to the existing broker. The
+main parent alone opens two fresh nonblocking sockets sequentially to the exact
+numeric IPv4 or IPv6 loopback origin: a bodyless GET followed by a canonical
+JSON POST to `/worldforge/v1/ordered-loopback-probe`. Each socket is closed
+before the next step or relay. Side-band v2 returns exactly two authenticated
+ordered records under a cumulative HMAC chain; the worker final binds the
+terminal chain before result acceptance after the worker domain is empty. One
+absolute deadline is shared, and the private turn deadline can shorten the
+two-second plan deadline. The exact origin, plan/policy, ADR-0039 enforcement,
+code-owned no-telemetry branch, catalog, selection, and provider approval hashes
+remain aligned. There is no DNS, proxy, redirect, retry, reconnect, socket
+inheritance, real provider, credential, vendor telemetry claim, or production
+eligibility. Once any send syscall is attempted, every later uncertainty leaves
+the durable prefix open for offline recovery. See
+[ADR-0040](docs/decisions/0040-parent-owned-exact-origin-loopback-gateway.md)
+and [ADR-0043](docs/decisions/0043-fixed-ordered-loopback-operation-plan.md).
+The frozen plan document hashes the complete deadline, socket lifecycle,
+request-header generation, HTTP response/parser, ordinary-JSON, aggregate-bound,
+and first-send-latch policy; valid JSON `null` remains distinct from an internal
+missing-response sentinel.
+Its exact monotonic anchor is captured after supervisor authority validation and
+turn-lock acquisition but before scratch or process setup, so setup delay consumes
+the plan budget and loopback entry cannot reset it.
 
 Private provider turns use the version-2 authenticated correlated transcript
 instead of arbitrary history. Every accepted turn records one transient
@@ -1021,9 +1030,9 @@ neutral IDs differ. Each assistant item is bounded to 128 calls in host and
 self-contained worker validation. The transcript is sealed, cumulatively
 bounded to 64 KiB, and absent from public receipts, events, EventLog/SQLite,
 and stderr. Provider protocol v3 adds separately authenticated usage evidence.
-The conformance runtime is revision 4 and the deterministic probe is revision 5,
+The conformance runtime is revision 4 and the deterministic probe is revision 6,
 with both existing runtime IDs and exactly two catalog entries retained. The
-loopback side-band remains version 1.
+loopback side-band is version 2.
 
 Input, output, cached-input, and cost evidence use closed
 observed/derived/unavailable states and source kinds; derived tokens bind an

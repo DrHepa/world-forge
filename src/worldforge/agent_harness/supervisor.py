@@ -433,6 +433,11 @@ def _bind_runtime_dispatch(
                     runtime=runtime.runtime_binding,
                     original_request_hash=request_hash,
                     gateway_policy_hash=gateway_policy.content_hash,
+                    gateway_plan_hash=gateway_policy.plan_hash,
+                    gateway_plan_count=gateway_policy.plan_count,
+                    gateway_step_policy_hashes=tuple(
+                        step.content_hash for step in gateway_policy.ordered_steps
+                    ),
                 )
             except Exception:
                 raise ProviderBoundaryFailure() from None

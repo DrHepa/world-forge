@@ -22,6 +22,7 @@ from tests.test_agent_execution_kernel import _request, _usage
 from tests.test_agent_provider_governance import _execution_selection
 from tests.test_agent_runtime_dispatch import _documents_for_runtime
 from worldforge.agent_harness import AgentEventLog, AgentExecutionCoordinator, CapabilityBroker
+from worldforge.agent_harness import loopback_gateway as loopback_gateway_module
 from worldforge.agent_harness import process_supervisor as process_supervisor_module
 from worldforge.agent_harness import worker_protocol as worker_protocol_module
 from worldforge.agent_harness.kernel import AgentExecutionKernel, KernelError
@@ -30,14 +31,17 @@ from worldforge.agent_harness.loopback_gateway import (
     LoopbackGatewayIndeterminate,
     LoopbackGatewayPolicy,
     LoopbackGatewayStopped,
+    LoopbackStepResult,
     execute_loopback_exchange,
     parse_loopback_http_response,
 )
 from worldforge.agent_harness.loopback_protocol import (
     LoopbackProtocolError,
     LoopbackProtocolSession,
+    build_loopback_context_frame,
     build_loopback_request_frame,
     build_loopback_response_frame,
+    parse_loopback_context_frame,
     parse_loopback_request_frame,
     parse_loopback_response_frame,
 )
@@ -65,17 +69,88 @@ from worldforge.agent_harness.worker_protocol import (
 from worldforge.agent_harness.worker_registry import (
     _CodeOwnedRuntimeKey,
     code_owned_provider_catalog,
+    runtime_entry,
     runtime_spec,
 )
 
 _RUNTIME = {
     "id": "worldforge_deterministic_probe_provider",
-    "revision": 5,
+    "revision": 6,
     "content_hash": "1" * 64,
 }
 _NONCE = "2" * 64
 _REQUEST_HASH = "3" * 64
 _KEY = b"k" * 32
+
+
+def _loopback_correlation(policy: LoopbackGatewayPolicy) -> dict[str, object]:
+    return {
+        "key": _KEY,
+        "nonce": _NONCE,
+        "runtime": _RUNTIME,
+        "original_request_hash": _REQUEST_HASH,
+        "gateway_policy_hash": policy.content_hash,
+        "gateway_plan_hash": policy.plan_hash,
+        "gateway_plan_count": policy.plan_count,
+        "gateway_step_policy_hashes": tuple(step.content_hash for step in policy.ordered_steps),
+    }
+
+
+def _loopback_results(
+    policy: LoopbackGatewayPolicy,
+    request_body: object,
+    response_bodies: tuple[object, object],
+    *,
+    challenges: tuple[str, str] = ("8" * 64, "9" * 64),
+) -> tuple[LoopbackStepResult, LoopbackStepResult]:
+    request_bytes = json.dumps(request_body, sort_keys=True, separators=(",", ":")).encode()
+    results = []
+    for index, response_body in enumerate(response_bodies):
+        response_bytes = json.dumps(response_body, sort_keys=True, separators=(",", ":")).encode()
+        body_bytes = request_bytes if index == 1 else b""
+        results.append(
+            LoopbackStepResult(
+                index=index,
+                step_policy_hash=policy.ordered_steps[index].content_hash,
+                request_body_present=index == 1,
+                request_body_hash=hashlib.sha256(body_bytes).hexdigest(),
+                request_body_length=len(body_bytes),
+                response_body=response_body,
+                response_body_hash=hashlib.sha256(response_bytes).hexdigest(),
+                response_body_length=len(response_bytes),
+                response_challenge=challenges[index],
+            )
+        )
+    return (results[0], results[1])
+
+
+def _read_http_request(connection: socket.socket) -> bytes:
+    raw = bytearray()
+    while b"\r\n\r\n" not in raw:
+        chunk = connection.recv(4096)
+        if not chunk:
+            raise EOFError
+        raw.extend(chunk)
+    headers, initial_body = bytes(raw).split(b"\r\n\r\n", 1)
+    lengths = [
+        int(line.split(b":", 1)[1])
+        for line in headers.split(b"\r\n")
+        if line.startswith(b"Content-Length:")
+    ]
+    length = lengths[0] if lengths else 0
+    body = bytearray(initial_body)
+    while len(body) < length:
+        body.extend(connection.recv(length - len(body)))
+    return headers + b"\r\n\r\n" + bytes(body)
+
+
+def _send_json_response(connection: socket.socket, body: bytes) -> None:
+    connection.sendall(
+        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+        + f"Content-Length: {len(body)}\r\n".encode("ascii")
+        + b"Connection: close\r\n\r\n"
+        + body
+    )
 
 
 def _early_final_worker_source(delay_seconds: float) -> str:
@@ -123,7 +198,9 @@ gateway = authenticated({{
     "body_hash": digest(body),
     "body_length": len(canonical(body)),
     "format": "world-forge.private.loopback_gateway_request",
-    "format_version": 1,
+    "format_version": 2,
+    "gateway_plan_count": context["gateway_plan_count"],
+    "gateway_plan_hash": context["gateway_plan_hash"],
     "gateway_policy_hash": context["gateway_policy_hash"],
     "nonce": context["nonce"],
     "original_request_hash": context["original_request_hash"],
@@ -212,7 +289,7 @@ class LoopbackGatewayPolicyTests(unittest.TestCase):
 
         self.assertEqual((2, "127.0.0.1", 43123), (ipv4.family, ipv4.host, ipv4.port))
         self.assertEqual((10, "::1", 43124), (ipv6.family, ipv6.host, ipv6.port))
-        self.assertEqual("/worldforge/v1/loopback-probe", ipv4.path)
+        self.assertEqual("/worldforge/v1/ordered-loopback-probe", ipv4.path)
         self.assertEqual(2_000, ipv4.total_deadline_ms)
         self.assertEqual(
             hashlib.sha256(ipv4.canonical_document).hexdigest(),
@@ -252,19 +329,11 @@ class LoopbackSideBandProtocolTests(unittest.TestCase):
         body = {"execution_id": "exec_one", "turn_index": 0}
         request = build_loopback_request_frame(
             body,
-            key=_KEY,
-            nonce=_NONCE,
-            runtime=_RUNTIME,
-            original_request_hash=_REQUEST_HASH,
-            gateway_policy_hash=policy.content_hash,
+            **_loopback_correlation(policy),
         )
         parsed = parse_loopback_request_frame(
             request,
-            key=_KEY,
-            nonce=_NONCE,
-            runtime=_RUNTIME,
-            original_request_hash=_REQUEST_HASH,
-            gateway_policy_hash=policy.content_hash,
+            **_loopback_correlation(policy),
         )
         self.assertEqual(body, parsed.body)
         self.assertEqual(
@@ -272,42 +341,29 @@ class LoopbackSideBandProtocolTests(unittest.TestCase):
             parsed.body_length,
         )
 
-        response_body = {"accepted": True, "proof": "deterministic"}
+        response_body = ({"accepted": True, "step": 0}, {"accepted": True, "step": 1})
         response = build_loopback_response_frame(
-            response_body,
-            response_challenge="8" * 64,
-            key=_KEY,
-            nonce=_NONCE,
-            runtime=_RUNTIME,
-            original_request_hash=_REQUEST_HASH,
-            gateway_policy_hash=policy.content_hash,
+            _loopback_results(policy, body, response_body),
+            **_loopback_correlation(policy),
         )
         parsed_response = parse_loopback_response_frame(
             response,
-            key=_KEY,
-            nonce=_NONCE,
-            runtime=_RUNTIME,
-            original_request_hash=_REQUEST_HASH,
-            gateway_policy_hash=policy.content_hash,
+            **_loopback_correlation(policy),
         )
-        self.assertEqual(response_body, parsed_response.body)
-        self.assertEqual("8" * 64, parsed_response.response_challenge)
+        self.assertEqual(list(response_body), parsed_response.body)
+        self.assertEqual(2, parsed_response.completed_count)
         self.assertRegex(parsed_response.exchange_hash or "", r"^[0-9a-f]{64}$")
         second_response = parse_loopback_response_frame(
             build_loopback_response_frame(
-                response_body,
-                response_challenge="7" * 64,
-                key=_KEY,
-                nonce=_NONCE,
-                runtime=_RUNTIME,
-                original_request_hash=_REQUEST_HASH,
-                gateway_policy_hash=policy.content_hash,
+                _loopback_results(
+                    policy,
+                    body,
+                    response_body,
+                    challenges=("6" * 64, "7" * 64),
+                ),
+                **_loopback_correlation(policy),
             ),
-            key=_KEY,
-            nonce=_NONCE,
-            runtime=_RUNTIME,
-            original_request_hash=_REQUEST_HASH,
-            gateway_policy_hash=policy.content_hash,
+            **_loopback_correlation(policy),
         )
         self.assertNotEqual(parsed_response.exchange_hash, second_response.exchange_hash)
 
@@ -413,11 +469,7 @@ class LoopbackSideBandProtocolTests(unittest.TestCase):
         policy = LoopbackGatewayPolicy.create("http://127.0.0.1:43123")
         frame = build_loopback_request_frame(
             {"probe": "one"},
-            key=_KEY,
-            nonce=_NONCE,
-            runtime=_RUNTIME,
-            original_request_hash=_REQUEST_HASH,
-            gateway_policy_hash=policy.content_hash,
+            **_loopback_correlation(policy),
         )
         cases = (
             {"key": b"x" * 32},
@@ -426,13 +478,7 @@ class LoopbackSideBandProtocolTests(unittest.TestCase):
             {"original_request_hash": "0" * 64},
             {"gateway_policy_hash": "0" * 64},
         )
-        defaults = {
-            "key": _KEY,
-            "nonce": _NONCE,
-            "runtime": _RUNTIME,
-            "original_request_hash": _REQUEST_HASH,
-            "gateway_policy_hash": policy.content_hash,
-        }
+        defaults = _loopback_correlation(policy)
         for override in cases:
             with self.subTest(override=override), self.assertRaises(LoopbackProtocolError):
                 parse_loopback_request_frame(frame, **{**defaults, **override})
@@ -440,18 +486,23 @@ class LoopbackSideBandProtocolTests(unittest.TestCase):
             parse_loopback_request_frame(frame + b"x", **defaults)
         with self.assertRaises(LoopbackProtocolError):
             build_loopback_request_frame({"x": "y" * 8193}, **defaults)
+        with self.assertRaises(LoopbackProtocolError):
+            build_loopback_request_frame(("hostile", "tuple"), **defaults)
 
         session = LoopbackProtocolSession(**defaults)
         self.assertEqual({"probe": "one"}, session.accept_request(frame).body)
         with self.assertRaises(LoopbackProtocolError):
             session.accept_request(frame)
-        response = session.build_response({"accepted": True}, response_challenge="8" * 64)
+        response_bodies = ({"accepted": True, "step": 0}, {"accepted": True, "step": 1})
+        response = session.build_response(
+            _loopback_results(policy, {"probe": "one"}, response_bodies)
+        )
         self.assertEqual(
-            {"accepted": True},
+            list(response_bodies),
             parse_loopback_response_frame(response, **defaults).body,
         )
         with self.assertRaises(LoopbackProtocolError):
-            session.build_response({"accepted": True}, response_challenge="8" * 64)
+            session.build_response(_loopback_results(policy, {"probe": "one"}, response_bodies))
 
 
 class StrictHttpResponseTests(unittest.TestCase):
@@ -465,6 +516,22 @@ class StrictHttpResponseTests(unittest.TestCase):
             + body
         )
         self.assertEqual({"accepted": True}, parse_loopback_http_response(response))
+
+    def test_accepts_crlf_header_delimiters_as_ordinary_json_body_whitespace(self) -> None:
+        bodies = (
+            (b"\r\n{}\r\n\r\n", {}),
+            (b"[\r\n1,\r\n\r\n2\r\n]", [1, 2]),
+            (b"\r\n\r\nnull\r\n\r\n", None),
+        )
+        for body, expected in bodies:
+            response = (
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                + f"Content-Length: {len(body)}\r\n".encode("ascii")
+                + b"Connection: close\r\n\r\n"
+                + body
+            )
+            with self.subTest(body=body):
+                self.assertEqual(expected, parse_loopback_http_response(response))
 
     def test_rejects_malformed_or_ambiguous_http_framing(self) -> None:
         body = b'{"accepted":true}'
@@ -484,8 +551,10 @@ class StrictHttpResponseTests(unittest.TestCase):
             b"Content-Type: application/json\r\nConnection: upgrade\r\n\r\n",
             b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n"
             b"Content-Type: application/json\r\n\r\n{}trailer",
-            b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\n"
-            b'Content-Type: application/json\r\n\r\n{"b": 1}',
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n"
+            b"Content-Type: application/json\r\n\r\n{}\r\n\r\nX",
+            b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\n"
+            b"Content-Type: application/json\r\n\r\n{}\r\n\r\nX",
         )
         for value in invalid:
             with self.subTest(value=value[:40]), self.assertRaises(LoopbackGatewayError):
@@ -551,11 +620,11 @@ class ParentOwnedExchangeTests(unittest.TestCase):
             + b"Connection: close\r\n\r\n"
             + body
         )
-        stream = self._Socket(response)
+        streams = (self._Socket(response), self._Socket(response))
         bomb = mock.Mock(side_effect=AssertionError("forbidden helper"))
         with (
             mock.patch(
-                "worldforge.agent_harness.loopback_gateway.socket.socket", return_value=stream
+                "worldforge.agent_harness.loopback_gateway.socket.socket", side_effect=streams
             ),
             mock.patch("worldforge.agent_harness.loopback_gateway.socket.getaddrinfo", bomb),
             mock.patch("worldforge.agent_harness.loopback_gateway.socket.create_connection", bomb),
@@ -574,9 +643,11 @@ class ParentOwnedExchangeTests(unittest.TestCase):
                 boundary=lambda: None,
                 started=time.monotonic(),
             )
-        self.assertEqual({"accepted": True}, result)
-        self.assertTrue(stream.closed)
-        self.assertIn(b"Host: 127.0.0.1:43123\r\n", stream.sent)
+        self.assertEqual(
+            [{"accepted": True}, {"accepted": True}], [item.response_body for item in result]
+        )
+        self.assertTrue(all(stream.closed for stream in streams))
+        self.assertTrue(all(b"Host: 127.0.0.1:43123\r\n" in stream.sent for stream in streams))
         self.assertEqual(0, bomb.call_count)
 
     def test_failure_after_request_bytes_is_indeterminate_and_closes_socket(self) -> None:
@@ -667,7 +738,7 @@ class ParentOwnedExchangeTests(unittest.TestCase):
         def boundary() -> str | None:
             nonlocal polls
             polls += 1
-            return "execution_deadline_exceeded" if polls == 2 else None
+            return "execution_deadline_exceeded" if polls == 3 else None
 
         with (
             mock.patch(
@@ -816,7 +887,7 @@ class ParentOwnedExchangeTests(unittest.TestCase):
             def boundary() -> str | None:
                 nonlocal polls
                 polls += 1
-                if stage == "pre_send_stop" and polls == 2:
+                if stage == "pre_send_stop" and polls == 3:
                     return "execution_cancelled"
                 if stage == "post_response" and stream.recv_calls >= 2:
                     return "provider_not_authorized"
@@ -877,7 +948,7 @@ class ParentOwnedExchangeTests(unittest.TestCase):
         def boundary() -> str | None:
             nonlocal polls
             polls += 1
-            if polls == 2:
+            if polls == 3:
                 raise fatal
             return None
 
@@ -903,7 +974,52 @@ class ParentOwnedExchangeTests(unittest.TestCase):
                     started=time.monotonic(),
                 )
         self.assertIs(fatal, caught.exception)
-        self.assertEqual(1, stream.close_calls)
+        self.assertGreaterEqual(stream.close_calls, 1)
+        self.assertTrue(any("cleanup" in note for note in getattr(fatal, "__notes__", ())))
+
+    def test_close_base_exception_is_preserved_with_bounded_cleanup_note(self) -> None:
+        policy = LoopbackGatewayPolicy.create("http://127.0.0.1:43123")
+        response_body = b'{"accepted":true}'
+        response = (
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+            + f"Content-Length: {len(response_body)}\r\n".encode("ascii")
+            + b"Connection: close\r\n\r\n"
+            + response_body
+        )
+
+        class FatalClose(BaseException):
+            pass
+
+        fatal = FatalClose("RAW_CLOSE_BASE_SENTINEL")
+
+        class FatalCloseSocket(self._Socket):
+            def close(self) -> None:
+                super().close()
+                raise fatal
+
+        stream = FatalCloseSocket(response)
+        with (
+            mock.patch(
+                "worldforge.agent_harness.loopback_gateway.socket.socket",
+                return_value=stream,
+            ),
+            mock.patch(
+                "worldforge.agent_harness.loopback_gateway.select.select",
+                side_effect=lambda readable, writable, _exceptional, _timeout: (
+                    readable,
+                    writable,
+                    [],
+                ),
+            ),
+        ):
+            with self.assertRaises(FatalClose) as caught:
+                execute_loopback_exchange(
+                    policy,
+                    {"probe": "fatal-close"},
+                    boundary=lambda: None,
+                    started=time.monotonic(),
+                )
+        self.assertIs(fatal, caught.exception)
         self.assertTrue(any("cleanup" in note for note in getattr(fatal, "__notes__", ())))
 
     def test_timeout_with_uncertain_close_is_indeterminate_before_any_request_byte(
@@ -1001,7 +1117,7 @@ class ParentOwnedExchangeTests(unittest.TestCase):
                     private_deadline=100.2,
                 )
         self.assertGreater(len(stream.sent), 0)
-        self.assertEqual(1, stream.close_calls)
+        self.assertGreaterEqual(stream.close_calls, 1)
 
         with (
             mock.patch("worldforge.agent_harness.loopback_gateway.socket.socket") as constructor,
@@ -1395,7 +1511,7 @@ print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     def test_native_probe_uses_parent_gateway_and_returns_after_domain_empty(self) -> None:
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         listener.bind(("127.0.0.1", 0))
-        listener.listen(1)
+        listener.listen(2)
         port = listener.getsockname()[1]
         policy = LoopbackGatewayPolicy.create(f"http://127.0.0.1:{port}")
         received: list[bytes] = []
@@ -1403,30 +1519,14 @@ print(json.dumps(result, sort_keys=True, separators=(",", ":")))
 
         def serve() -> None:
             try:
-                connection, _address = listener.accept()
-                with connection:
-                    raw = bytearray()
-                    while b"\r\n\r\n" not in raw:
-                        raw.extend(connection.recv(4096))
-                    headers, initial_body = bytes(raw).split(b"\r\n\r\n", 1)
-                    length_line = next(
-                        line
-                        for line in headers.split(b"\r\n")
-                        if line.startswith(b"Content-Length:")
-                    )
-                    length = int(length_line.split(b":", 1)[1])
-                    body = bytearray(initial_body)
-                    while len(body) < length:
-                        body.extend(connection.recv(length - len(body)))
-                    received.append(headers + b"\r\n\r\n" + bytes(body))
-                    response_body = b'{"accepted":true,"source":"native-loopback"}'
-                    connection.sendall(
-                        b"HTTP/1.1 200 OK\r\n"
-                        b"Content-Type: application/json\r\n"
-                        + f"Content-Length: {len(response_body)}\r\n".encode("ascii")
-                        + b"Connection: close\r\n\r\n"
-                        + response_body
-                    )
+                for index in range(2):
+                    connection, _address = listener.accept()
+                    with connection:
+                        received.append(_read_http_request(connection))
+                        response_body = (
+                            f'{{"accepted":true,"source":"native-loopback","step":{index}}}'
+                        ).encode("ascii")
+                        _send_json_response(connection, response_body)
             finally:
                 listener.close()
                 finished.set()
@@ -1453,11 +1553,112 @@ print(json.dumps(result, sort_keys=True, separators=(",", ":")))
 
         self.assertTrue(finished.is_set())
         self.assertEqual(
-            {"accepted": True, "source": "native-loopback"},
+            [
+                {"accepted": True, "source": "native-loopback", "step": 0},
+                {"accepted": True, "source": "native-loopback", "step": 1},
+            ],
             result.private_output["gateway_response"],
         )
-        self.assertEqual(1, len(received))
-        self.assertIn(b"POST /worldforge/v1/loopback-probe HTTP/1.1\r\n", received[0])
+        self.assertEqual(2, len(received))
+        self.assertIn(b"GET /worldforge/v1/ordered-loopback-probe HTTP/1.1\r\n", received[0])
+        self.assertIn(b"POST /worldforge/v1/ordered-loopback-probe HTTP/1.1\r\n", received[1])
+        self.assertIsNone(supervisor.active_broker_pid)
+        self.assertIsNone(supervisor.active_worker_pid)
+
+    def test_native_probe_preserves_json_null_in_each_ordered_step(self) -> None:
+        for response_values in ((None, {"step": 1}), ({"step": 0}, None), (None, None)):
+            with self.subTest(response_values=response_values):
+                listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                listener.bind(("127.0.0.1", 0))
+                listener.listen(2)
+                port = listener.getsockname()[1]
+                policy = LoopbackGatewayPolicy.create(f"http://127.0.0.1:{port}")
+                finished = threading.Event()
+
+                def serve(
+                    response_values: tuple[object, object] = response_values,
+                    listener: socket.socket = listener,
+                    finished: threading.Event = finished,
+                ) -> None:
+                    try:
+                        for value in response_values:
+                            connection, _address = listener.accept()
+                            with connection:
+                                _read_http_request(connection)
+                                _send_json_response(
+                                    connection,
+                                    json.dumps(value, separators=(",", ":")).encode("utf-8"),
+                                )
+                    finally:
+                        listener.close()
+                        finished.set()
+
+                server = threading.Thread(target=serve, daemon=True)
+                server.start()
+                supervisor = OneShotProviderSupervisor.for_selection(
+                    _loopback_selection(policy),
+                    gateway_policy=policy,
+                    turn_timeout_ms=2_000,
+                )
+                result = supervisor.turn(
+                    ProviderTurnRequest(
+                        execution_id="exec_one",
+                        turn_index=0,
+                        private_input={"sentinel": "private-only"},
+                        transcript=(),
+                        tool_summaries=(),
+                        exposed_tools=(),
+                    ),
+                    boundary=ProviderBoundaryControl(lambda: None),
+                )
+                server.join(2)
+
+                self.assertTrue(finished.is_set())
+                self.assertEqual(list(response_values), result.private_output["gateway_response"])
+                self.assertIsNone(supervisor.active_broker_pid)
+                self.assertIsNone(supervisor.active_worker_pid)
+
+    def test_native_probe_accepts_json_whitespace_containing_header_delimiters(
+        self,
+    ) -> None:
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(2)
+        policy = LoopbackGatewayPolicy.create(f"http://127.0.0.1:{listener.getsockname()[1]}")
+        bodies = (b"\r\n{}\r\n\r\n", b"[\r\n1,\r\n\r\n2\r\n]")
+        finished = threading.Event()
+
+        def serve() -> None:
+            try:
+                for body in bodies:
+                    connection, _address = listener.accept()
+                    with connection:
+                        _read_http_request(connection)
+                        _send_json_response(connection, body)
+            finally:
+                listener.close()
+                finished.set()
+
+        server = threading.Thread(target=serve, daemon=True)
+        server.start()
+        supervisor = OneShotProviderSupervisor.for_selection(
+            _loopback_selection(policy), gateway_policy=policy, turn_timeout_ms=2_000
+        )
+        result = supervisor.turn(
+            ProviderTurnRequest(
+                execution_id="exec_one",
+                turn_index=0,
+                private_input={"sentinel": "private-only"},
+                transcript=(),
+                tool_summaries=(),
+                exposed_tools=(),
+            ),
+            boundary=ProviderBoundaryControl(lambda: None),
+        )
+        server.join(2)
+
+        self.assertTrue(finished.is_set())
+        self.assertEqual([{}, [1, 2]], result.private_output["gateway_response"])
         self.assertIsNone(supervisor.active_broker_pid)
         self.assertIsNone(supervisor.active_worker_pid)
 
@@ -1467,7 +1668,7 @@ print(json.dumps(result, sort_keys=True, separators=(",", ":")))
             with self.subTest(delay_seconds=delay_seconds):
                 listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 listener.bind(("127.0.0.1", 0))
-                listener.listen(1)
+                listener.listen(2)
                 listener.settimeout(2)
                 policy = LoopbackGatewayPolicy.create(
                     f"http://127.0.0.1:{listener.getsockname()[1]}"
@@ -1481,30 +1682,17 @@ print(json.dumps(result, sort_keys=True, separators=(",", ":")))
                     server_errors: list[BaseException] = server_errors,
                 ) -> None:
                     try:
-                        connection, _address = listener.accept()
-                        accepted_count[0] += 1
-                        with connection:
-                            raw = bytearray()
-                            while b"\r\n\r\n" not in raw:
-                                raw.extend(connection.recv(4096))
-                            headers, body = bytes(raw).split(b"\r\n\r\n", 1)
-                            length = int(
-                                next(
-                                    line
-                                    for line in headers.split(b"\r\n")
-                                    if line.startswith(b"Content-Length:")
-                                ).split(b":", 1)[1]
-                            )
-                            while len(body) < length:
-                                body += connection.recv(length - len(body))
-                            time.sleep(0.1)
-                            response = b'{"accepted":true}'
-                            connection.sendall(
-                                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
-                                + f"Content-Length: {len(response)}\r\n".encode("ascii")
-                                + b"Connection: close\r\n\r\n"
-                                + response
-                            )
+                        for index in range(2):
+                            connection, _address = listener.accept()
+                            accepted_count[0] += 1
+                            with connection:
+                                _read_http_request(connection)
+                                if index == 1:
+                                    time.sleep(0.1)
+                                _send_json_response(
+                                    connection,
+                                    f'{{"accepted":true,"step":{index}}}'.encode("ascii"),
+                                )
                     except BaseException as exc:
                         server_errors.append(exc)
                     finally:
@@ -1607,7 +1795,7 @@ print(json.dumps(result, sort_keys=True, separators=(",", ":")))
 
                 server.join(2)
                 self.assertEqual([], server_errors)
-                self.assertEqual(1, accepted_count[0])
+                self.assertEqual(2, accepted_count[0])
                 self.assertEqual(1, provider.spawn_count)
                 self.assertIsNone(provider.active_broker_pid)
                 self.assertIsNone(provider.active_worker_pid)
@@ -1615,7 +1803,7 @@ print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     def test_private_turn_deadline_bounds_slow_post_send_gateway(self) -> None:
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         listener.bind(("127.0.0.1", 0))
-        listener.listen(1)
+        listener.listen(2)
         listener.settimeout(2)
         policy = LoopbackGatewayPolicy.create(f"http://127.0.0.1:{listener.getsockname()[1]}")
         accepted = 0
@@ -1626,28 +1814,11 @@ print(json.dumps(result, sort_keys=True, separators=(",", ":")))
                 connection, _address = listener.accept()
                 accepted += 1
                 with connection:
-                    raw = bytearray()
-                    while b"\r\n\r\n" not in raw:
-                        raw.extend(connection.recv(4096))
-                    headers, body = bytes(raw).split(b"\r\n\r\n", 1)
-                    length = int(
-                        next(
-                            line
-                            for line in headers.split(b"\r\n")
-                            if line.startswith(b"Content-Length:")
-                        ).split(b":", 1)[1]
-                    )
-                    while len(body) < length:
-                        body += connection.recv(length - len(body))
+                    _read_http_request(connection)
                     time.sleep(1.0)
                     response = b'{"accepted":true}'
                     try:
-                        connection.sendall(
-                            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
-                            + f"Content-Length: {len(response)}\r\n".encode("ascii")
-                            + b"Connection: close\r\n\r\n"
-                            + response
-                        )
+                        _send_json_response(connection, response)
                     except OSError:
                         pass
             finally:
@@ -1719,37 +1890,24 @@ print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     def test_concurrent_turn_is_rejected_before_second_spawn_or_connect(self) -> None:
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         listener.bind(("127.0.0.1", 0))
-        listener.listen(1)
+        listener.listen(2)
         policy = LoopbackGatewayPolicy.create(f"http://127.0.0.1:{listener.getsockname()[1]}")
         accepted = threading.Event()
         release = threading.Event()
 
         def serve() -> None:
             try:
-                connection, _address = listener.accept()
-                with connection:
-                    raw = bytearray()
-                    while b"\r\n\r\n" not in raw:
-                        raw.extend(connection.recv(4096))
-                    headers, body = bytes(raw).split(b"\r\n\r\n", 1)
-                    length = int(
-                        next(
-                            line
-                            for line in headers.split(b"\r\n")
-                            if line.startswith(b"Content-Length:")
-                        ).split(b":", 1)[1]
-                    )
-                    while len(body) < length:
-                        body += connection.recv(length - len(body))
-                    accepted.set()
-                    release.wait(1)
-                    response = b'{"accepted":true}'
-                    connection.sendall(
-                        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
-                        + f"Content-Length: {len(response)}\r\n".encode("ascii")
-                        + b"Connection: close\r\n\r\n"
-                        + response
-                    )
+                for index in range(2):
+                    connection, _address = listener.accept()
+                    with connection:
+                        _read_http_request(connection)
+                        if index == 0:
+                            accepted.set()
+                            release.wait(1)
+                        _send_json_response(
+                            connection,
+                            f'{{"accepted":true,"step":{index}}}'.encode("ascii"),
+                        )
             finally:
                 listener.close()
 
@@ -1792,7 +1950,7 @@ print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     def test_kernel_governance_and_terminal_duplicate_perform_one_exchange(self) -> None:
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         listener.bind(("127.0.0.1", 0))
-        listener.listen(1)
+        listener.listen(2)
         listener.settimeout(2)
         port = listener.getsockname()[1]
         policy = LoopbackGatewayPolicy.create(f"http://127.0.0.1:{port}")
@@ -1801,29 +1959,15 @@ print(json.dumps(result, sort_keys=True, separators=(",", ":")))
         def serve() -> None:
             nonlocal accepted
             try:
-                connection, _address = listener.accept()
-                accepted += 1
-                with connection:
-                    raw = bytearray()
-                    while b"\r\n\r\n" not in raw:
-                        raw.extend(connection.recv(4096))
-                    headers, body = bytes(raw).split(b"\r\n\r\n", 1)
-                    length = int(
-                        next(
-                            line
-                            for line in headers.split(b"\r\n")
-                            if line.startswith(b"Content-Length:")
-                        ).split(b":", 1)[1]
-                    )
-                    while len(body) < length:
-                        body += connection.recv(length - len(body))
-                    response = b'{"accepted":true}'
-                    connection.sendall(
-                        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
-                        + f"Content-Length: {len(response)}\r\n".encode("ascii")
-                        + b"Connection: close\r\n\r\n"
-                        + response
-                    )
+                for index in range(2):
+                    connection, _address = listener.accept()
+                    accepted += 1
+                    with connection:
+                        _read_http_request(connection)
+                        _send_json_response(
+                            connection,
+                            f'{{"accepted":true,"step":{index}}}'.encode("ascii"),
+                        )
             finally:
                 listener.close()
 
@@ -1881,7 +2025,7 @@ print(json.dumps(result, sort_keys=True, separators=(",", ":")))
 
         self.assertEqual("succeeded", first.result.outcome)
         self.assertEqual("existing_terminal", duplicate.disposition)
-        self.assertEqual(1, accepted)
+        self.assertEqual(2, accepted)
         self.assertEqual(1, provider.spawn_count)
 
     def test_post_send_failure_leaves_private_open_prefix_for_offline_recovery(
@@ -1891,7 +2035,7 @@ print(json.dumps(result, sort_keys=True, separators=(",", ":")))
         response_sentinel = b"RAW_LOOPBACK_RESPONSE_SENTINEL"
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         listener.bind(("127.0.0.1", 0))
-        listener.listen(1)
+        listener.listen(2)
         listener.settimeout(2)
         policy = LoopbackGatewayPolicy.create(f"http://127.0.0.1:{listener.getsockname()[1]}")
         accepted = 0
@@ -1901,30 +2045,21 @@ print(json.dumps(result, sort_keys=True, separators=(",", ":")))
         def serve() -> None:
             nonlocal accepted
             try:
-                connection, _address = listener.accept()
-                accepted += 1
-                with connection:
-                    raw = bytearray()
-                    while b"\r\n\r\n" not in raw:
-                        raw.extend(connection.recv(4096))
-                    headers, body = bytes(raw).split(b"\r\n\r\n", 1)
-                    length = int(
-                        next(
-                            line
-                            for line in headers.split(b"\r\n")
-                            if line.startswith(b"Content-Length:")
-                        ).split(b":", 1)[1]
-                    )
-                    while len(body) < length:
-                        body += connection.recv(length - len(body))
-                    received.append(headers + b"\r\n\r\n" + body)
-                    connection.sendall(
-                        b"HTTP/1.1 200 OK\r\n"
-                        b"Content-Type: application/json\r\n"
-                        b"Content-Length: 99\r\n"
-                        b"Connection: close\r\n\r\n"
-                        b'{"private":"' + response_sentinel + b'"}'
-                    )
+                for index in range(2):
+                    connection, _address = listener.accept()
+                    accepted += 1
+                    with connection:
+                        received.append(_read_http_request(connection))
+                        if index == 0:
+                            _send_json_response(connection, b'{"accepted":true,"step":0}')
+                        else:
+                            connection.sendall(
+                                b"HTTP/1.1 200 OK\r\n"
+                                b"Content-Type: application/json\r\n"
+                                b"Content-Length: 99\r\n"
+                                b"Connection: close\r\n\r\n"
+                                b'{"private":"' + response_sentinel + b'"}'
+                            )
             except BaseException as exc:
                 server_errors.append(exc)
             finally:
@@ -2015,9 +2150,11 @@ print(json.dumps(result, sort_keys=True, separators=(",", ":")))
 
         server.join(2)
         self.assertEqual([], server_errors)
-        self.assertEqual(1, accepted)
-        self.assertEqual(1, len(received))
+        self.assertEqual(2, accepted)
+        self.assertEqual(2, len(received))
         self.assertNotIn(request_sentinel, received[0])
+        self.assertNotIn(request_sentinel, received[1])
+        self.assertIn(b'"private_input_hash":', received[1])
         self.assertNotIn(request_sentinel, public_records)
         self.assertNotIn(response_sentinel, public_records)
         self.assertNotIn(request_sentinel, sqlite_bytes)
@@ -2027,6 +2164,483 @@ print(json.dumps(result, sort_keys=True, separators=(",", ":")))
         self.assertEqual(1, provider.spawn_count)
         self.assertIsNone(provider.active_broker_pid)
         self.assertIsNone(provider.active_worker_pid)
+
+
+class OrderedLoopbackPlanTddTests(unittest.TestCase):
+    @staticmethod
+    def _response(value: object, *, ordinary: bool = False) -> bytes:
+        body = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=not ordinary,
+            separators=(", ", ": ") if ordinary else (",", ":"),
+        ).encode("utf-8")
+        return (
+            b"HTTP/1.1 200 OK\r\n"
+            b"Content-Type: application/json\r\n"
+            + f"Content-Length: {len(body)}\r\n".encode("ascii")
+            + b"Connection: close\r\n\r\n"
+            + body
+        )
+
+    def test_policy_freezes_exact_ordered_two_step_plan_and_aggregate_bounds(self) -> None:
+        policy = LoopbackGatewayPolicy.create("http://127.0.0.1:43123")
+        document = json.loads(policy.canonical_document)
+
+        self.assertEqual(2, document["format_version"])
+        self.assertEqual(2, policy.plan_count)
+        self.assertEqual(
+            [
+                {
+                    "body_present": False,
+                    "index": 0,
+                    "method": "GET",
+                    "path": "/worldforge/v1/ordered-loopback-probe",
+                    "request_body_limit": 0,
+                    "response_body_limit": 64 * 1024,
+                    "response_header_limit": 8 * 1024,
+                },
+                {
+                    "body_present": True,
+                    "index": 1,
+                    "method": "POST",
+                    "path": "/worldforge/v1/ordered-loopback-probe",
+                    "request_body_limit": 8 * 1024,
+                    "response_body_limit": 64 * 1024,
+                    "response_header_limit": 8 * 1024,
+                },
+            ],
+            document["ordered_steps"],
+        )
+        plan = document["ordered_plan"]
+        self.assertEqual(document["ordered_steps"], plan["ordered_steps"])
+        self.assertEqual(16 * 1024, plan["aggregate_bounds"]["response_header_bytes"])
+        self.assertEqual(64 * 1024, plan["aggregate_bounds"]["response_body_bytes"])
+        self.assertEqual(2_000, plan["deadline_policy"]["total_deadline_ms"])
+        self.assertEqual(
+            "process_supervisor_execute_after_authority_validation_and_turn_lock_before_scratch_or_process_setup",
+            plan["deadline_policy"]["anchor_event"],
+        )
+        self.assertEqual("main_parent", plan["socket_lifecycle"]["owner"])
+        self.assertTrue(plan["socket_lifecycle"]["fresh_socket_per_step"])
+        self.assertTrue(plan["socket_lifecycle"]["close_before_next_step"])
+        self.assertEqual("HTTP/1.1", plan["response_policy"]["http_version"])
+        self.assertEqual(
+            "first_crlf_crlf",
+            plan["response_policy"]["header_terminator_rule"],
+        )
+        self.assertIn(
+            "bare_lf_in_header_section",
+            plan["response_policy"]["forbidden"],
+        )
+        self.assertEqual("reject_any_depth", plan["json_policy"]["duplicate_keys"])
+        self.assertEqual(
+            "immediately_before_first_send_syscall",
+            plan["effect_policy"]["latch_point"],
+        )
+        self.assertEqual(
+            hashlib.sha256(
+                json.dumps(plan, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest(),
+            policy.plan_hash,
+        )
+
+    def test_each_semantic_cluster_mutation_propagates_through_selection_authority(self) -> None:
+        baseline = LoopbackGatewayPolicy.create("http://127.0.0.1:43123")
+        baseline_spec = runtime_spec(
+            _CodeOwnedRuntimeKey.DETERMINISTIC_PROBE, gateway_policy=baseline
+        )
+        baseline_catalog = code_owned_provider_catalog(gateway_policy=baseline)
+        baseline_selection = _loopback_selection(baseline)
+        original = loopback_gateway_module._ordered_plan_values
+        mutations = {
+            "aggregate_bounds": lambda plan: plan["aggregate_bounds"].__setitem__(
+                "response_header_bytes", 16 * 1024 - 1
+            ),
+            "deadline_policy": lambda plan: plan["deadline_policy"].__setitem__(
+                "anchor_event", "loopback_exchange_entry"
+            ),
+            "effect_policy": lambda plan: plan["effect_policy"].__setitem__(
+                "post_latch_failure", "closed"
+            ),
+            "json_policy": lambda plan: plan["json_policy"].__setitem__("maximum_depth", 63),
+            "operation_policy": lambda plan: plan["operation_policy"].__setitem__(
+                "query", "caller_selected"
+            ),
+            "request_policy": lambda plan: plan["request_policy"].__setitem__(
+                "host_generation", "literal"
+            ),
+            "response_policy": lambda plan: plan["response_policy"].__setitem__("status", 201),
+            "socket_lifecycle": lambda plan: plan["socket_lifecycle"].__setitem__("pooling", True),
+        }
+
+        for cluster, mutate in mutations.items():
+
+            def changed(steps: object, mutate: object = mutate) -> dict[str, object]:
+                plan = original(steps)  # type: ignore[arg-type]
+                mutate(plan)  # type: ignore[operator]
+                return plan
+
+            with (
+                self.subTest(cluster=cluster),
+                mock.patch.object(loopback_gateway_module, "_ordered_plan_values", changed),
+            ):
+                policy = LoopbackGatewayPolicy.create("http://127.0.0.1:43123")
+                spec = runtime_spec(_CodeOwnedRuntimeKey.DETERMINISTIC_PROBE, gateway_policy=policy)
+                catalog = code_owned_provider_catalog(gateway_policy=policy)
+                selection = _loopback_selection(policy)
+                self.assertNotEqual(baseline.plan_hash, policy.plan_hash)
+                self.assertNotEqual(baseline.content_hash, policy.content_hash)
+                self.assertNotEqual(baseline_spec.content_hash, spec.content_hash)
+                self.assertNotEqual(baseline_catalog.catalog_hash, catalog.catalog_hash)
+                self.assertNotEqual(baseline_selection.content_hash, selection.content_hash)
+
+    def test_embedded_worker_mirrors_the_exact_closed_host_plan_document(self) -> None:
+        policy = LoopbackGatewayPolicy.create("http://127.0.0.1:43123")
+        host_plan = json.loads(policy.canonical_document)["ordered_plan"]
+        source = runtime_entry(_CodeOwnedRuntimeKey.DETERMINISTIC_PROBE).bootstrap_template
+        prefix = source.split("def exact_context", 1)[0]
+        namespace: dict[str, object] = {}
+        exec(compile(prefix, "<ordered-plan-parity>", "exec"), namespace)
+
+        self.assertEqual(host_plan, namespace["PLAN_DOCUMENT"])
+        self.assertEqual(policy.plan_hash, namespace["PLAN_HASH"])
+
+    def test_scratch_setup_delay_consumes_plan_budget_from_execute_entry(self) -> None:
+        policy = LoopbackGatewayPolicy.create("http://127.0.0.1:43123")
+        supervisor = process_supervisor_module.LinuxProcessSupervisor()
+        now = [100.0]
+        captured_started: list[float] = []
+
+        def delayed_scratch(*_args: object, **_kwargs: object) -> str:
+            now[0] = 102.001
+            return scratch
+
+        def exchange_after_setup(*_args: object, **kwargs: object) -> object:
+            captured_started.append(kwargs["started"])
+            return execute_loopback_exchange(
+                policy,
+                {"semantic": "payload"},
+                boundary=lambda: None,
+                started=kwargs["started"],
+                private_deadline=kwargs["started"] + 3.0,
+            )
+
+        with tempfile.TemporaryDirectory() as root:
+            scratch = str(Path(root) / "scratch")
+            Path(scratch).mkdir()
+            with (
+                mock.patch(
+                    "worldforge.agent_harness.process_supervisor.time.monotonic",
+                    side_effect=lambda: now[0],
+                ),
+                mock.patch(
+                    "worldforge.agent_harness.process_supervisor.tempfile.mkdtemp",
+                    side_effect=delayed_scratch,
+                ),
+                mock.patch.object(
+                    supervisor,
+                    "_execute_with_scratch",
+                    side_effect=exchange_after_setup,
+                ),
+                mock.patch(
+                    "worldforge.agent_harness.loopback_gateway.socket.socket",
+                    side_effect=AssertionError("deadline reset reached socket creation"),
+                ) as socket_constructor,
+            ):
+                with self.assertRaises(ProviderBoundaryFailure):
+                    supervisor.execute(
+                        b"request",
+                        worker_key=b"k" * 32,
+                        boundary=ProviderBoundaryControl(lambda: None),
+                        turn_timeout_ms=3_000,
+                    )
+
+        self.assertEqual([100.0], captured_started)
+        socket_constructor.assert_not_called()
+
+    def test_parent_sends_exact_get_then_post_on_fresh_closed_sockets(self) -> None:
+        policy = LoopbackGatewayPolicy.create("http://127.0.0.1:43123")
+        first = ParentOwnedExchangeTests._Socket(self._response({"step": 0}, ordinary=True))
+        second = ParentOwnedExchangeTests._Socket(self._response({"step": 1}))
+        created: list[ParentOwnedExchangeTests._Socket] = []
+
+        def construct(*_args: object) -> ParentOwnedExchangeTests._Socket:
+            stream = (first, second)[len(created)]
+            if created:
+                self.assertTrue(created[-1].closed)
+            created.append(stream)
+            return stream
+
+        with (
+            mock.patch(
+                "worldforge.agent_harness.loopback_gateway.socket.socket",
+                side_effect=construct,
+            ),
+            mock.patch(
+                "worldforge.agent_harness.loopback_gateway.select.select",
+                side_effect=lambda readable, writable, _exceptional, _timeout: (
+                    readable,
+                    writable,
+                    [],
+                ),
+            ),
+        ):
+            results = execute_loopback_exchange(
+                policy,
+                {"semantic": "payload"},
+                boundary=lambda: None,
+                started=time.monotonic(),
+            )
+
+        self.assertEqual(2, len(results))
+        self.assertEqual(
+            b"GET /worldforge/v1/ordered-loopback-probe HTTP/1.1\r\n",
+            bytes(first.sent).split(b"\r\n", 1)[0] + b"\r\n",
+        )
+        self.assertNotIn(b"Content-Type:", first.sent)
+        self.assertNotIn(b"Content-Length:", first.sent)
+        self.assertTrue(bytes(first.sent).endswith(b"Connection: close\r\n\r\n"))
+        self.assertIn(
+            b"POST /worldforge/v1/ordered-loopback-probe HTTP/1.1\r\n",
+            second.sent,
+        )
+        self.assertTrue(bytes(second.sent).endswith(b'\r\n\r\n{"semantic":"payload"}'))
+        self.assertTrue(first.closed)
+        self.assertTrue(second.closed)
+
+    def test_http_json_is_canonicalized_after_ordinary_decode_and_rejects_hostile_numbers(
+        self,
+    ) -> None:
+        ordinary = self._response({"z": 1, "a": [True, None]}, ordinary=True)
+        self.assertEqual({"a": [True, None], "z": 1}, parse_loopback_http_response(ordinary))
+
+        hostile_bodies = (
+            b'{"a":1,"a":2}',
+            b'{"x":NaN}',
+            b'{"x":Infinity}',
+            b'{"x":-Infinity}',
+            b'{"x":1e999}',
+            b'{"x":9007199254740992}',
+            b"[" * 65 + b"0" + b"]" * 65,
+        )
+        for body in hostile_bodies:
+            response = (
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                + f"Content-Length: {len(body)}\r\n".encode("ascii")
+                + b"Connection: close\r\n\r\n"
+                + body
+            )
+            with self.subTest(body=body), self.assertRaises(LoopbackGatewayError):
+                parse_loopback_http_response(response)
+
+    def test_first_send_attempt_latches_all_later_step_failures_indeterminate(self) -> None:
+        policy = LoopbackGatewayPolicy.create("http://127.0.0.1:43123")
+        first = ParentOwnedExchangeTests._Socket(self._response({"step": 0}))
+        second = ParentOwnedExchangeTests._Socket(b"")
+        second.connect_ex = lambda _address: errno.ECONNREFUSED  # type: ignore[method-assign]
+
+        with (
+            mock.patch(
+                "worldforge.agent_harness.loopback_gateway.socket.socket",
+                side_effect=(first, second),
+            ),
+            mock.patch(
+                "worldforge.agent_harness.loopback_gateway.select.select",
+                side_effect=lambda readable, writable, _exceptional, _timeout: (
+                    readable,
+                    writable,
+                    [],
+                ),
+            ),
+        ):
+            with self.assertRaises(LoopbackGatewayIndeterminate):
+                execute_loopback_exchange(
+                    policy,
+                    {"semantic": "payload"},
+                    boundary=lambda: None,
+                    started=time.monotonic(),
+                )
+        self.assertTrue(first.closed)
+        self.assertTrue(second.closed)
+
+    def test_sideband_v2_binds_plan_order_steps_and_terminal_hmac_chain(self) -> None:
+        policy = LoopbackGatewayPolicy.create("http://127.0.0.1:43123")
+        correlation = {
+            "key": _KEY,
+            "nonce": _NONCE,
+            "runtime": {**_RUNTIME, "revision": 6},
+            "original_request_hash": _REQUEST_HASH,
+            "gateway_policy_hash": policy.content_hash,
+            "gateway_plan_hash": policy.plan_hash,
+            "gateway_plan_count": policy.plan_count,
+            "gateway_step_policy_hashes": tuple(step.content_hash for step in policy.ordered_steps),
+        }
+        context = build_loopback_context_frame(**correlation)
+        parse_loopback_context_frame(context, **correlation)
+        request = build_loopback_request_frame({"semantic": "payload"}, **correlation)
+        parsed_request = parse_loopback_request_frame(request, **correlation)
+        self.assertEqual({"semantic": "payload"}, parsed_request.body)
+
+        results = tuple(
+            LoopbackStepResult(
+                index=index,
+                step_policy_hash=policy.ordered_steps[index].content_hash,
+                request_body_present=index == 1,
+                request_body_hash=hashlib.sha256(
+                    b'{"semantic":"payload"}' if index == 1 else b""
+                ).hexdigest(),
+                request_body_length=22 if index == 1 else 0,
+                response_body={"step": index},
+                response_body_hash=hashlib.sha256(
+                    f'{{"step":{index}}}'.encode("ascii")
+                ).hexdigest(),
+                response_body_length=10,
+                response_challenge=("8" if index == 0 else "9") * 64,
+            )
+            for index in range(2)
+        )
+        response = build_loopback_response_frame(results, **correlation)
+        parsed = parse_loopback_response_frame(response, **correlation)
+        self.assertEqual(2, parsed.completed_count)
+        self.assertEqual((0, 1), tuple(step["index"] for step in parsed.steps))
+        self.assertRegex(parsed.terminal_chain_hash or "", r"^[0-9a-f]{64}$")
+        self.assertNotEqual(
+            parsed.steps[0]["cumulative_chain_hash"],
+            parsed.steps[1]["cumulative_chain_hash"],
+        )
+
+        document = json.loads(response[4:])
+        document["steps"][1]["prior_chain_hash"] = "0" * 64
+        unsigned = {name: value for name, value in document.items() if name != "mac"}
+        document["mac"] = hmac.new(
+            _KEY,
+            json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode(),
+            hashlib.sha256,
+        ).hexdigest()
+        payload = json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
+        with self.assertRaises(LoopbackProtocolError):
+            parse_loopback_response_frame(len(payload).to_bytes(4, "big") + payload, **correlation)
+
+    def test_sideband_rejects_v1_skip_reorder_surplus_duplicate_and_challenge_reuse(self) -> None:
+        policy = LoopbackGatewayPolicy.create("http://127.0.0.1:43123")
+        correlation = _loopback_correlation(policy)
+        request_body = {"semantic": "payload"}
+        results = _loopback_results(
+            policy,
+            request_body,
+            ({"step": 0}, {"step": 1}),
+        )
+        response = build_loopback_response_frame(results, **correlation)
+        original = json.loads(response[4:])
+
+        def signed(document: dict[str, object]) -> bytes:
+            unsigned = {name: value for name, value in document.items() if name != "mac"}
+            document["mac"] = hmac.new(
+                _KEY,
+                json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode(),
+                hashlib.sha256,
+            ).hexdigest()
+            payload = json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
+            return len(payload).to_bytes(4, "big") + payload
+
+        hostile_documents = []
+        for mutate in (
+            lambda value: value.update(format_version=1),
+            lambda value: value["steps"].pop(0),
+            lambda value: value["steps"].reverse(),
+            lambda value: value["steps"].append(copy.deepcopy(value["steps"][1])),
+            lambda value: value["steps"].__setitem__(1, copy.deepcopy(value["steps"][0])),
+            lambda value: value.update(completed_count=1),
+            lambda value: value.update(terminal_chain_hash="0" * 64),
+        ):
+            candidate = copy.deepcopy(original)
+            mutate(candidate)
+            hostile_documents.append(candidate)
+        for document in hostile_documents:
+            with self.assertRaises(LoopbackProtocolError):
+                parse_loopback_response_frame(signed(document), **correlation)
+
+        with self.assertRaises(LoopbackProtocolError):
+            build_loopback_response_frame(
+                _loopback_results(
+                    policy,
+                    request_body,
+                    ({"step": 0}, {"step": 1}),
+                    challenges=("8" * 64, "8" * 64),
+                ),
+                **correlation,
+            )
+        with self.assertRaises(LoopbackProtocolError):
+            parse_loopback_response_frame(
+                response,
+                **{**correlation, "gateway_plan_hash": "0" * 64},
+            )
+
+    def test_first_send_syscall_failure_and_cumulative_wire_overflow_are_indeterminate(
+        self,
+    ) -> None:
+        policy = LoopbackGatewayPolicy.create("http://127.0.0.1:43123")
+
+        send_failure = ParentOwnedExchangeTests._Socket(b"")
+        send_failure.send = lambda _value: (_ for _ in ()).throw(  # type: ignore[method-assign]
+            OSError("RAW_SEND_SENTINEL")
+        )
+        with (
+            mock.patch(
+                "worldforge.agent_harness.loopback_gateway.socket.socket",
+                return_value=send_failure,
+            ),
+            mock.patch(
+                "worldforge.agent_harness.loopback_gateway.select.select",
+                side_effect=lambda readable, writable, _exceptional, _timeout: (
+                    readable,
+                    writable,
+                    [],
+                ),
+            ),
+        ):
+            with self.assertRaises(LoopbackGatewayIndeterminate):
+                execute_loopback_exchange(
+                    policy,
+                    {"semantic": "payload"},
+                    boundary=lambda: None,
+                    started=time.monotonic(),
+                )
+
+        wire_body = b" " * (33 * 1024 - 2) + b"{}"
+        wire_response = (
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+            + f"Content-Length: {len(wire_body)}\r\n".encode("ascii")
+            + b"Connection: close\r\n\r\n"
+            + wire_body
+        )
+        streams = (
+            ParentOwnedExchangeTests._Socket(wire_response),
+            ParentOwnedExchangeTests._Socket(wire_response),
+        )
+        with (
+            mock.patch(
+                "worldforge.agent_harness.loopback_gateway.socket.socket",
+                side_effect=streams,
+            ),
+            mock.patch(
+                "worldforge.agent_harness.loopback_gateway.select.select",
+                side_effect=lambda readable, writable, _exceptional, _timeout: (
+                    readable,
+                    writable,
+                    [],
+                ),
+            ),
+        ):
+            with self.assertRaises(LoopbackGatewayIndeterminate):
+                execute_loopback_exchange(
+                    policy,
+                    {"semantic": "payload"},
+                    boundary=lambda: None,
+                    started=time.monotonic(),
+                )
+        self.assertTrue(all(stream.closed for stream in streams))
 
 
 if __name__ == "__main__":

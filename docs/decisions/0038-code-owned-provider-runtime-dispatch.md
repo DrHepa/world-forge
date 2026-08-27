@@ -14,6 +14,9 @@
 > ADR-0042 advances conformance to revision 4, the deterministic probe to
 > revision 5, and the private provider-turn protocol to version 3 with explicit
 > code-owned usage-policy identities; the closed two-runtime catalog remains.
+>
+> ADR-0043 advances only the deterministic probe to revision 6 and the private
+> loopback side-band to version 2 for one fixed ordered two-step plan.
 
 ## Context
 

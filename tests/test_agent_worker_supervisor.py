@@ -140,6 +140,9 @@ def _slow_no_ready_broker(
     _worker_key: bytes,
     _request_frame: bytes,
     _scratch: str,
+    _loopback_turn: object,
+    _local_service_launch: object,
+    _test_synchronization: object,
 ) -> None:
     """Fork-only test broker that never reaches the authenticated ready gate."""
 

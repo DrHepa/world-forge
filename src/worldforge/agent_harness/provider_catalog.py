@@ -171,6 +171,11 @@ def _endpoint_origin(value: object, *, network_scope: str, reason_code: str) -> 
         if value is not None:
             raise ProviderCatalogError(reason_code)
         return None
+    if network_scope == "loopback" and value is None:
+        # A code-owned ephemeral local-service lease binds its destination by
+        # launch-policy hash; its one-use numeric port does not exist yet when
+        # governance freezes the selection.
+        return None
     if type(value) is not str or not value or len(value.encode("utf-8")) > 512:
         raise ProviderCatalogError(reason_code)
     try:
@@ -297,7 +302,6 @@ class ProviderRuntimeSpec:
         elif network_scope == "loopback":
             valid = (
                 deployment_class == "local"
-                and endpoint is not None
                 and endpoint_hash is not None
                 and egress_hash is not None
                 and telemetry_hash is not None
@@ -724,13 +728,17 @@ def _has_catalog_authority(value: ProviderRuntimeCatalog) -> bool:
 def _create_code_owned_provider_catalog(
     *,
     gateway_policy: object = None,
+    local_service_policy: object = None,
 ) -> ProviderRuntimeCatalog:
     """Build and register only the closed construction-owned runtime catalog."""
 
     try:
         from .worker_registry import _code_owned_provider_specs
 
-        specs = _code_owned_provider_specs(gateway_policy=gateway_policy)
+        specs = _code_owned_provider_specs(
+            gateway_policy=gateway_policy,
+            local_service_policy=local_service_policy,
+        )
         catalog = ProviderRuntimeCatalog.create(specs)
     except ProviderCatalogError:
         raise

@@ -7,6 +7,11 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import Enum
 
+from .local_service import (
+    LocalServiceLaunchPolicy,
+    _validate_local_service_launch_policy,
+    code_owned_local_service_launch_policy,
+)
 from .loopback_gateway import (
     LoopbackGatewayPolicy,
     code_owned_no_telemetry_branch_hash,
@@ -100,6 +105,7 @@ def _expected_spec(
     artifact: _WorkerArtifact,
     egress_enforcement: ProviderEgressEnforcementProfile,
     gateway_policy: LoopbackGatewayPolicy | None = None,
+    local_service_policy: LocalServiceLaunchPolicy | None = None,
 ) -> ProviderRuntimeSpec:
     if key is _CodeOwnedRuntimeKey.CONFORMANCE:
         model_id = "conformance"
@@ -107,7 +113,20 @@ def _expected_spec(
         model_id = "deterministic_probe"
     else:
         raise RuntimeError(_REGISTRY_ERROR)
-    if gateway_policy is not None:
+    if gateway_policy is not None and local_service_policy is not None:
+        raise RuntimeError(_REGISTRY_ERROR)
+    if local_service_policy is not None:
+        if key is not _CodeOwnedRuntimeKey.DETERMINISTIC_PROBE:
+            raise RuntimeError(_REGISTRY_ERROR)
+        try:
+            checked_local_service = _validate_local_service_launch_policy(local_service_policy)
+        except Exception:
+            raise RuntimeError(_REGISTRY_ERROR) from None
+        network_scope = "loopback"
+        endpoint_origin = None
+        endpoint_policy_hash = checked_local_service.content_hash
+        telemetry_attestation_hash = code_owned_no_telemetry_branch_hash()
+    elif gateway_policy is not None:
         if key is not _CodeOwnedRuntimeKey.DETERMINISTIC_PROBE:
             raise RuntimeError(_REGISTRY_ERROR)
         try:
@@ -275,16 +294,23 @@ def _validate_entry(value: object) -> _CodeOwnedRuntimeEntry:
         egress_enforcement = _validate_provider_egress_profile(value.egress_enforcement)
         supplied_spec = ProviderRuntimeCatalog.create((value.spec,)).specs[0]
         gateway_policy = None
+        local_service_policy = None
         if (
             value.key is _CodeOwnedRuntimeKey.DETERMINISTIC_PROBE
             and supplied_spec.network_scope == "loopback"
         ):
-            gateway_policy = LoopbackGatewayPolicy.create(supplied_spec.endpoint_origin)
+            if supplied_spec.endpoint_origin is None:
+                local_service_policy = code_owned_local_service_launch_policy()
+                if supplied_spec.endpoint_policy_hash != local_service_policy.content_hash:
+                    raise RuntimeError(_REGISTRY_ERROR)
+            else:
+                gateway_policy = LoopbackGatewayPolicy.create(supplied_spec.endpoint_origin)
         expected_spec = _expected_spec(
             value.key,
             artifact,
             egress_enforcement,
             gateway_policy,
+            local_service_policy,
         )
     except Exception:
         raise RuntimeError(_REGISTRY_ERROR) from None
@@ -298,6 +324,7 @@ def _validate_entry(value: object) -> _CodeOwnedRuntimeEntry:
         or tuple(tuple.__iter__(value.environment_profile)) != _ENVIRONMENT_PROFILE
         or artifact != canonical_artifact
         or gateway_policy is None
+        and local_service_policy is None
         and supplied_spec != canonical_spec
         or tuple(value.environment_profile) != canonical_environment
         or egress_enforcement != canonical_egress_enforcement
@@ -342,6 +369,7 @@ def runtime_entry(
     key: _CodeOwnedRuntimeKey,
     *,
     gateway_policy: LoopbackGatewayPolicy | None = None,
+    local_service_policy: LocalServiceLaunchPolicy | None = None,
 ) -> _CodeOwnedRuntimeEntry:
     """Return a detached validated entry for one internal enum key."""
 
@@ -351,13 +379,21 @@ def runtime_entry(
     if len(matches) != 1:
         raise RuntimeError(_REGISTRY_ERROR)
     entry = _validate_entry(matches[0])
-    if gateway_policy is None:
+    if gateway_policy is None and local_service_policy is None:
         return entry
+    if gateway_policy is not None and local_service_policy is not None:
+        raise RuntimeError(_REGISTRY_ERROR)
     if key is not _CodeOwnedRuntimeKey.DETERMINISTIC_PROBE:
         raise RuntimeError(_REGISTRY_ERROR)
     return replace(
         entry,
-        spec=_expected_spec(key, entry.artifact, entry.egress_enforcement, gateway_policy),
+        spec=_expected_spec(
+            key,
+            entry.artifact,
+            entry.egress_enforcement,
+            gateway_policy,
+            local_service_policy,
+        ),
     )
 
 
@@ -404,12 +440,18 @@ def _matches_runtime(key: _CodeOwnedRuntimeKey, value: object) -> bool:
 def _code_owned_provider_specs(
     *,
     gateway_policy: LoopbackGatewayPolicy | None = None,
+    local_service_policy: LocalServiceLaunchPolicy | None = None,
 ) -> tuple[ProviderRuntimeSpec, ...]:
     entries = tuple(
         runtime_entry(
             entry.key,
             gateway_policy=(
                 gateway_policy if entry.key is _CodeOwnedRuntimeKey.DETERMINISTIC_PROBE else None
+            ),
+            local_service_policy=(
+                local_service_policy
+                if entry.key is _CodeOwnedRuntimeKey.DETERMINISTIC_PROBE
+                else None
             ),
         )
         for entry in _validated_entries()
@@ -422,6 +464,25 @@ def code_owned_provider_catalog(
     gateway_policy: LoopbackGatewayPolicy | None = None,
 ) -> ProviderRuntimeCatalog:
     return _create_code_owned_provider_catalog(gateway_policy=gateway_policy)
+
+
+def local_service_runtime_spec() -> ProviderRuntimeSpec:
+    """Return the stable probe descriptor for one fresh local-service lease."""
+
+    policy = code_owned_local_service_launch_policy()
+    return replace(
+        runtime_entry(
+            _CodeOwnedRuntimeKey.DETERMINISTIC_PROBE,
+            local_service_policy=policy,
+        ).spec
+    )
+
+
+def code_owned_local_service_provider_catalog() -> ProviderRuntimeCatalog:
+    """Return the exact two-entry catalog bound to the fixed launch policy."""
+
+    policy = code_owned_local_service_launch_policy()
+    return _create_code_owned_provider_catalog(local_service_policy=policy)
 
 
 def runtime_entry_for_selection(
@@ -459,6 +520,26 @@ def runtime_entry_for_selection(
     return replace(entry)
 
 
+def runtime_entry_for_local_service_selection(
+    selection: object,
+) -> _CodeOwnedRuntimeEntry:
+    policy = code_owned_local_service_launch_policy()
+    catalog = code_owned_local_service_provider_catalog()
+    resolved = catalog.resolve(selection)
+    entry = runtime_entry(
+        _CodeOwnedRuntimeKey.DETERMINISTIC_PROBE,
+        local_service_policy=policy,
+    )
+    if (
+        resolved.spec != entry.spec
+        or resolved.selection.runtime_id != entry.identifier
+        or resolved.selection.runtime_revision != entry.revision
+        or resolved.selection.runtime_content_hash != entry.content_hash
+    ):
+        raise ProviderCatalogError("provider_runtime_unavailable")
+    return replace(entry)
+
+
 def fixed_runtime_identity() -> dict[str, object]:
     """Return the historical default conformance identity."""
 
@@ -478,8 +559,10 @@ def fixed_provider_catalog() -> ProviderRuntimeCatalog:
 
 
 __all__ = (
+    "code_owned_local_service_provider_catalog",
     "code_owned_provider_catalog",
     "fixed_provider_catalog",
     "fixed_runtime_identity",
     "fixed_runtime_spec",
+    "local_service_runtime_spec",
 )

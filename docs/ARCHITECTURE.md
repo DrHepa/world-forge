@@ -814,6 +814,65 @@ authority validation and turn-lock acquisition, before scratch creation or
 process setup. That captured value is passed unchanged into the gateway, where
 the private turn deadline composes by minimum rather than resetting either.
 
+ADR-0045 adds one code-owned neutral synthetic service behind that same parent
+gateway without making package imports Linux-dependent. Portable module
+definitions do not dereference `_fork_exec`, pidfd, pthread signal-mask, or
+`prctl` symbols. The closed factory first rejects any unsupported platform or
+runtime, before policy, catalog, journal, bind, spawn, or provider action. Only
+then does a lock-guarded loader resolve and freeze one Linux CPython 3.12 native
+authority, build the immutable policy/recipe hashes, and reject any missing or
+mutated dependency.
+
+Each genuinely new supported turn creates a fresh parent-retained
+`127.0.0.1:0` listener lease. The subreaper broker blocks all catchable launch
+signals before proving its exact PID, single thread, and absence of trace/profile
+callbacks. It precomputes the fixed argv, four-key environment, cwd, streams,
+pass-FDs, and exec-error pipe, emits the standard `subprocess.Popen` audit event,
+then revalidates the captured low-level and native authorities after that
+synchronous callback. Only after the post-audit fence does it construct the
+pre-exec closure and invoke its captured CPython 3.12
+`subprocess._fork_exec`; no mutable module lookup remains in the launch window.
+The child calls `prctl(PR_SET_PDEATHSIG, SIGKILL)`, immediately checks the exact
+broker PPID, restores the prior signal mask, and execs the pinned regular
+executable. Setuid, setgid, and file-capability executables are rejected so exec
+cannot clear the parent-death policy. The broker opens a pidfd immediately after
+`_fork_exec` returns the PID and retains it through the exec-error handshake.
+Its private process handle uses `waitid(P_PIDFD, ...)` and
+`pidfd_send_signal`, retries EINTR, and closes/reaps owned descriptors exactly
+once across success and failure.
+
+The configuration pipe remains empty while the parent proves live
+PID/PPID/start, executable identity and bytes, cmdline, root, scratch cwd, and
+the exact six FD roles and access modes. Before reading configuration, the fixed
+bootstrap itself verifies the four-key `os.environ`, re-reads
+`PR_GET_PDEATHSIG`, reads `/proc/self/status` `SigBlk`, and sends a bounded
+pre-configuration proof over the already-attested readiness pipe. The broker
+validates the expected `SIGKILL`, restored mask, PID/PPID/start, cwd, and process
+facts. It then sends an authenticated PID/start handoff; the main parent retains
+an exact pidfd and acknowledges that identity before the broker writes the
+configuration/HMAC secret. Canonical readiness binds that custody and process
+proof with the nonce, recipe/policy, root/cwd, listener FD/inode/tuple,
+bootstrap/runtime, exact environment, FD census, filter, and self-test.
+
+The main parent composes service liveness and listener ownership with every
+gateway boundary poll. Only exact retained PID/start/pidfd identities enter the
+freeze/rescan/kill/reap fixed-point cleanup domain. A listener-inode scan may
+observe and prove absence, including processes older than the broker, but never
+retains or signals a holder; an inaccessible or changing plausible holder makes
+absence indeterminate. The retained listener closes only after both domain-empty
+and listener-absent proof. Broker death before fencing remains
+`ProviderBoundaryIndeterminate` even when kernel custody kills the service.
+Exact terminal duplicates create no lease, and there is no restart, retry,
+attach, reuse, or recovery path.
+
+Native evidence is limited to Linux `aarch64`, CPython `3.12.3`,
+`/usr/bin/python3`. Simulated `win32`/`darwin` clean imports prove import
+portability only, not native Windows/macOS operation. Python 3.11, x86_64,
+actual Windows/macOS, hosted CI, full discovery, real providers/models/APIs,
+credentials, vendor telemetry guarantees, general sandboxing, Studio exposure,
+and production readiness remain untested or pending. See
+[ADR-0045](decisions/0045-code-owned-local-service-lease-attestation.md).
+
 ADR-0041 replaces arbitrary private provider history with an exact typed
 transcript. A completed provider turn contributes one assistant record first,
 followed immediately by ordered tool-result records matching mandatory

@@ -8,6 +8,14 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from functools import partial
 
+from .local_service import (
+    LocalServiceLaunchPolicy,
+    _code_owned_local_service_launch_recipe,
+    _LocalServiceLaunchRecipe,
+    _validate_local_service_launch_policy,
+    _validate_local_service_launch_recipe,
+    code_owned_local_service_launch_policy,
+)
 from .loopback_gateway import LoopbackGatewayPolicy
 from .loopback_protocol import build_loopback_context_frame
 from .ports import ProviderBoundaryControl, ProviderTurnRequest, ProviderTurnResult
@@ -29,13 +37,16 @@ from .worker_protocol import (
 from .worker_registry import (
     _CodeOwnedRuntimeEntry,
     _CodeOwnedRuntimeKey,
+    code_owned_local_service_provider_catalog,
     code_owned_provider_catalog,
     runtime_entry,
+    runtime_entry_for_local_service_selection,
     runtime_entry_for_selection,
 )
 
 _MAX_PRIVATE_TURN_TIMEOUT_MS = 60_000
 _GATEWAY_AUTHORITY_PROOF = object()
+_LOCAL_SERVICE_AUTHORITY_PROOF = object()
 
 
 class _GatewayAuthorityCapability:
@@ -82,6 +93,55 @@ class _GatewayAuthorityCapability:
         raise AttributeError("gateway authority is immutable")
 
 
+class _LocalServiceAuthorityCapability:
+    __slots__ = (
+        "_catalog_hash",
+        "_dispatch",
+        "_owner",
+        "_policy",
+        "_policy_hash",
+        "_process_supervisor",
+        "_proof",
+        "_runtime_launch",
+        "_recipe",
+        "_selection_hash",
+        "_state",
+    )
+
+    def __init__(
+        self,
+        *,
+        owner: OneShotProviderSupervisor,
+        catalog: ProviderRuntimeCatalog,
+        selection: ProviderExecutionSelection,
+        policy: LocalServiceLaunchPolicy,
+        recipe: _LocalServiceLaunchRecipe,
+        process_supervisor: LinuxProcessSupervisor,
+        runtime_launch: _CodeOwnedRuntimeLaunch,
+        dispatch: Callable[..., ProviderTurnResult],
+        proof: object,
+    ) -> None:
+        if proof is not _LOCAL_SERVICE_AUTHORITY_PROOF:
+            raise ValueError("provider_runtime_unavailable")
+        object.__setattr__(self, "_owner", owner)
+        object.__setattr__(self, "_catalog_hash", catalog.catalog_hash)
+        object.__setattr__(self, "_selection_hash", selection.content_hash)
+        object.__setattr__(self, "_policy_hash", policy.content_hash)
+        object.__setattr__(self, "_policy", policy)
+        object.__setattr__(self, "_recipe", recipe)
+        object.__setattr__(self, "_process_supervisor", process_supervisor)
+        object.__setattr__(self, "_runtime_launch", runtime_launch)
+        object.__setattr__(self, "_dispatch", dispatch)
+        object.__setattr__(self, "_state", "open")
+        object.__setattr__(self, "_proof", proof)
+
+    def __setattr__(self, _name: str, _value: object) -> None:
+        raise AttributeError("local service authority is immutable")
+
+    def __delattr__(self, _name: str) -> None:
+        raise AttributeError("local service authority is immutable")
+
+
 @dataclass(frozen=True, slots=True)
 class _ProviderSupervisorAuthority:
     runtime: _CodeOwnedRuntimeEntry
@@ -93,6 +153,9 @@ class _ProviderSupervisorAuthority:
     provider_catalog: ProviderRuntimeCatalog | None
     provider_selection: ProviderExecutionSelection | None
     gateway_capability: _GatewayAuthorityCapability | None
+    local_service_policy: LocalServiceLaunchPolicy | None
+    local_service_recipe: _LocalServiceLaunchRecipe | None
+    local_service_capability: _LocalServiceAuthorityCapability | None
 
 
 class OneShotProviderSupervisor:
@@ -111,6 +174,8 @@ class OneShotProviderSupervisor:
             gateway_policy=None,
             provider_catalog=None,
             provider_selection=None,
+            local_service_policy=None,
+            local_service_recipe=None,
         )
 
     @classmethod
@@ -147,6 +212,48 @@ class OneShotProviderSupervisor:
             gateway_policy=gateway_policy,
             provider_catalog=frozen_catalog,
             provider_selection=replace(selection),
+            local_service_policy=None,
+            local_service_recipe=None,
+        )
+        return instance
+
+    @classmethod
+    def for_local_service(
+        cls,
+        selection: object,
+        *,
+        turn_timeout_ms: int = 2_000,
+    ) -> OneShotProviderSupervisor:
+        """Bind one stable selection to a fresh synthetic service per turn."""
+
+        if (
+            type(sys.platform) is not str
+            or sys.platform != "linux"
+            or type(sys.implementation.name) is not str
+            or sys.implementation.name != "cpython"
+            or type(sys.version_info.major) is not int
+            or sys.version_info.major != 3
+            or type(sys.version_info.minor) is not int
+            or sys.version_info.minor != 12
+        ):
+            raise ProviderBoundaryUnsupported()
+        if cls is not OneShotProviderSupervisor:
+            raise ValueError("provider_runtime_unavailable")
+        policy = code_owned_local_service_launch_policy()
+        recipe = _code_owned_local_service_launch_recipe(policy)
+        catalog = code_owned_local_service_provider_catalog()
+        entry = runtime_entry_for_local_service_selection(selection)
+        if type(selection) is not ProviderExecutionSelection:
+            raise ValueError("provider_runtime_unavailable")
+        instance = cls.__new__(cls)
+        instance._initialize(
+            runtime=entry,
+            turn_timeout_ms=turn_timeout_ms,
+            gateway_policy=None,
+            provider_catalog=catalog,
+            provider_selection=replace(selection),
+            local_service_policy=policy,
+            local_service_recipe=recipe,
         )
         return instance
 
@@ -158,6 +265,8 @@ class OneShotProviderSupervisor:
         gateway_policy: LoopbackGatewayPolicy | None,
         provider_catalog: ProviderRuntimeCatalog | None,
         provider_selection: ProviderExecutionSelection | None,
+        local_service_policy: LocalServiceLaunchPolicy | None,
+        local_service_recipe: _LocalServiceLaunchRecipe | None,
     ) -> None:
         if (
             type(turn_timeout_ms) is not int
@@ -166,7 +275,33 @@ class OneShotProviderSupervisor:
             raise ValueError("provider_turn_timeout_invalid")
         if type(runtime) is not _CodeOwnedRuntimeEntry:
             raise ValueError("provider_runtime_unavailable")
-        if gateway_policy is not None:
+        if (local_service_policy is None) != (local_service_recipe is None):
+            raise ValueError("provider_runtime_unavailable")
+        if gateway_policy is not None and local_service_policy is not None:
+            raise ValueError("provider_runtime_unavailable")
+        if local_service_policy is not None:
+            try:
+                checked_local_service = _validate_local_service_launch_policy(local_service_policy)
+                checked_local_service_recipe = _validate_local_service_launch_recipe(
+                    local_service_recipe,
+                    policy=checked_local_service,
+                )
+            except Exception:
+                raise ValueError("provider_runtime_unavailable") from None
+            if (
+                runtime.key is not _CodeOwnedRuntimeKey.DETERMINISTIC_PROBE
+                or provider_catalog is None
+                or provider_selection is None
+                or turn_timeout_ms > 2_000
+                or runtime.spec.network_scope != "loopback"
+                or runtime.spec.endpoint_origin is not None
+                or runtime.spec.endpoint_policy_hash != checked_local_service.content_hash
+                or provider_catalog.resolve(provider_selection).spec != runtime.spec
+            ):
+                raise ValueError("provider_runtime_unavailable")
+            local_service_policy = checked_local_service
+            local_service_recipe = checked_local_service_recipe
+        elif gateway_policy is not None:
             if (
                 runtime.key is not _CodeOwnedRuntimeKey.DETERMINISTIC_PROBE
                 or provider_catalog is None
@@ -201,10 +336,13 @@ class OneShotProviderSupervisor:
                 salvage_authenticated_usage=True,
             ),
             gateway_policy=gateway_policy,
+            local_service_policy=local_service_policy,
+            local_service_recipe=local_service_recipe,
         )
         frozen_catalog = None if provider_catalog is None else provider_catalog.snapshot()
         frozen_selection = None if provider_selection is None else replace(provider_selection)
         gateway_capability = None
+        local_service_capability = None
         if gateway_policy is not None:
             if frozen_catalog is None or frozen_selection is None:
                 raise ValueError("provider_runtime_unavailable")
@@ -218,6 +356,20 @@ class OneShotProviderSupervisor:
                 dispatch=dispatch,
                 proof=_GATEWAY_AUTHORITY_PROOF,
             )
+        if local_service_policy is not None:
+            if frozen_catalog is None or frozen_selection is None:
+                raise ValueError("provider_runtime_unavailable")
+            local_service_capability = _LocalServiceAuthorityCapability(
+                owner=self,
+                catalog=frozen_catalog,
+                selection=frozen_selection,
+                policy=local_service_policy,
+                recipe=local_service_recipe,
+                process_supervisor=process_supervisor,
+                runtime_launch=runtime_launch,
+                dispatch=dispatch,
+                proof=_LOCAL_SERVICE_AUTHORITY_PROOF,
+            )
         authority = _ProviderSupervisorAuthority(
             runtime=runtime,
             process_supervisor=process_supervisor,
@@ -228,6 +380,9 @@ class OneShotProviderSupervisor:
             provider_catalog=frozen_catalog,
             provider_selection=frozen_selection,
             gateway_capability=gateway_capability,
+            local_service_policy=local_service_policy,
+            local_service_recipe=local_service_recipe,
+            local_service_capability=local_service_capability,
         )
         object.__setattr__(self, "_authority", authority)
         gateway_validator = None
@@ -251,6 +406,37 @@ class OneShotProviderSupervisor:
 
             gateway_validator = validate_gateway_issuance
         object.__setattr__(self, "_gateway_authority_validator", gateway_validator)
+        local_service_validator = None
+        if local_service_capability is not None:
+            issued_owner = self
+            issued_authority = authority
+            issued_capability = local_service_capability
+            issued_policy = local_service_policy
+            issued_recipe = local_service_recipe
+            issued_proof = _LOCAL_SERVICE_AUTHORITY_PROOF
+
+            def validate_local_service_issuance(
+                candidate_owner: object,
+                candidate_authority: object,
+                candidate_capability: object,
+            ) -> bool:
+                return (
+                    issued_proof is _LOCAL_SERVICE_AUTHORITY_PROOF
+                    and candidate_owner is issued_owner
+                    and candidate_authority is issued_authority
+                    and candidate_capability is issued_capability
+                    and candidate_authority.local_service_policy is issued_policy
+                    and candidate_authority.local_service_recipe is issued_recipe
+                    and candidate_capability._policy is issued_policy
+                    and candidate_capability._recipe is issued_recipe
+                )
+
+            local_service_validator = validate_local_service_issuance
+        object.__setattr__(
+            self,
+            "_local_service_authority_validator",
+            local_service_validator,
+        )
 
     @classmethod
     def _require_gateway_authority(
@@ -269,6 +455,8 @@ class OneShotProviderSupervisor:
             authority = object.__getattribute__(provider, "_authority")
             if type(authority) is not _ProviderSupervisorAuthority:
                 raise ValueError
+            if authority.local_service_policy is not None:
+                return cls._require_local_service_authority(provider, frozen_catalog)
             capability = authority.gateway_capability
             validator = object.__getattribute__(provider, "_gateway_authority_validator")
             policy = authority.gateway_policy
@@ -284,6 +472,7 @@ class OneShotProviderSupervisor:
                 or type(policy) is not LoopbackGatewayPolicy
                 or type(selection) is not ProviderExecutionSelection
                 or type(captured_catalog) is not ProviderRuntimeCatalog
+                or authority.local_service_capability is not None
                 or type(authority.runtime) is not _CodeOwnedRuntimeEntry
                 or authority.runtime.key is not _CodeOwnedRuntimeKey.DETERMINISTIC_PROBE
                 or authority.runtime.spec.network_scope != "loopback"
@@ -319,6 +508,87 @@ class OneShotProviderSupervisor:
                 or expected_runtime != authority.runtime
                 or checked_launch != authority.runtime_launch
                 or not 1 <= authority.turn_timeout_ms <= checked_policy.total_deadline_ms
+            ):
+                raise ValueError
+            return replace(selection)
+        except BaseException as exc:
+            if not isinstance(exc, Exception):
+                raise
+            raise ValueError("provider_gateway_authority_invalid") from None
+
+    @classmethod
+    def _require_local_service_authority(
+        cls,
+        provider: object,
+        catalog: object,
+    ) -> ProviderExecutionSelection:
+        """Validate the construction-owned stable lease-launch authority."""
+
+        try:
+            if cls is not OneShotProviderSupervisor or type(provider) is not cls:
+                raise ValueError
+            if type(catalog) is not ProviderRuntimeCatalog:
+                raise ValueError
+            frozen_catalog = catalog.snapshot()
+            authority = object.__getattribute__(provider, "_authority")
+            if type(authority) is not _ProviderSupervisorAuthority:
+                raise ValueError
+            capability = authority.local_service_capability
+            validator = object.__getattribute__(
+                provider,
+                "_local_service_authority_validator",
+            )
+            policy = authority.local_service_policy
+            recipe = authority.local_service_recipe
+            selection = authority.provider_selection
+            captured_catalog = authority.provider_catalog
+            if (
+                type(capability) is not _LocalServiceAuthorityCapability
+                or not callable(validator)
+                or validator(provider, authority, capability) is not True
+                or capability._proof is not _LOCAL_SERVICE_AUTHORITY_PROOF
+                or capability._owner is not provider
+                or capability._state != "open"
+                or capability._policy is not policy
+                or capability._recipe is not recipe
+                or type(policy) is not LocalServiceLaunchPolicy
+                or type(recipe) is not _LocalServiceLaunchRecipe
+                or type(selection) is not ProviderExecutionSelection
+                or type(captured_catalog) is not ProviderRuntimeCatalog
+                or authority.gateway_policy is not None
+                or authority.gateway_capability is not None
+                or type(authority.runtime) is not _CodeOwnedRuntimeEntry
+                or authority.runtime.key is not _CodeOwnedRuntimeKey.DETERMINISTIC_PROBE
+                or authority.runtime.spec.network_scope != "loopback"
+                or authority.runtime.spec.endpoint_origin is not None
+                or type(authority.runtime_launch) is not _CodeOwnedRuntimeLaunch
+                or type(authority.process_supervisor) is not LinuxProcessSupervisor
+                or capability._catalog_hash != frozen_catalog.catalog_hash
+                or capability._selection_hash != selection.content_hash
+                or capability._policy_hash != policy.content_hash
+                or capability._process_supervisor is not authority.process_supervisor
+                or capability._runtime_launch is not authority.runtime_launch
+                or capability._dispatch is not authority.dispatch
+                or authority.process_supervisor._runtime_launch is not authority.runtime_launch
+            ):
+                raise ValueError
+            _validate_local_service_launch_policy(policy)
+            _validate_local_service_launch_recipe(recipe, policy=policy)
+            expected_catalog = code_owned_local_service_provider_catalog()
+            if (
+                captured_catalog.snapshot() != expected_catalog
+                or frozen_catalog != expected_catalog
+                or captured_catalog != frozen_catalog
+            ):
+                raise ValueError
+            resolved = frozen_catalog.resolve(selection)
+            expected_runtime = runtime_entry_for_local_service_selection(selection)
+            checked_launch = _validate_runtime_launch(authority.runtime_launch)
+            if (
+                resolved.spec != authority.runtime.spec
+                or expected_runtime != authority.runtime
+                or checked_launch != authority.runtime_launch
+                or not 1 <= authority.turn_timeout_ms <= 2_000
             ):
                 raise ValueError
             return replace(selection)
@@ -392,6 +662,8 @@ def _bind_runtime_dispatch(
     request_parser: Callable[..., object],
     result_parser: Callable[..., ProviderTurnResult],
     gateway_policy: LoopbackGatewayPolicy | None,
+    local_service_policy: LocalServiceLaunchPolicy | None,
+    local_service_recipe: _LocalServiceLaunchRecipe | None,
 ) -> Callable[..., ProviderTurnResult]:
     def dispatch(
         request: ProviderTurnRequest,
@@ -447,6 +719,23 @@ def _bind_runtime_dispatch(
                     "worker_nonce": nonce,
                     "original_request_hash": request_hash,
                     "gateway_context_frame": context_frame,
+                }
+            )
+        elif local_service_policy is not None:
+            try:
+                checked_local_service = _validate_local_service_launch_policy(local_service_policy)
+                checked_recipe = _validate_local_service_launch_recipe(
+                    local_service_recipe,
+                    policy=checked_local_service,
+                )
+            except Exception:
+                raise ProviderBoundaryFailure() from None
+            process_values.update(
+                {
+                    "local_service_policy": checked_local_service,
+                    "local_service_recipe": checked_recipe,
+                    "worker_nonce": nonce,
+                    "original_request_hash": request_hash,
                 }
             )
         report = process_execute(frame, **process_values)

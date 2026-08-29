@@ -1019,6 +1019,46 @@ Its exact monotonic anchor is captured after supervisor authority validation and
 turn-lock acquisition but before scratch or process setup, so setup delay consumes
 the plan budget and loopback entry cannot reset it.
 
+The deterministic probe can now run that exact gateway plan against one
+code-owned neutral synthetic local service. Importing `worldforge.agent_harness`
+does not resolve Linux-only symbols: an exact platform/runtime preflight runs
+before policy, catalog, journal, bind, spawn, or provider effects, and a
+lock-guarded loader then freezes the required Linux CPython 3.12 authority.
+Unsupported hosts reject instead of creating synthetic provider state.
+
+For each genuinely new supported turn, the parent retains a fresh one-use
+`127.0.0.1:0` listener lease. The single-threaded broker blocks every catchable
+launch signal before checking that no sibling thread, trace, or profile callback
+exists. It emits the normal `subprocess.Popen` audit event, revalidates the exact
+frozen authority after that callback, constructs the fixed pre-exec custody
+closure only then, and calls the captured low-level `subprocess._fork_exec`.
+The child installs `prctl(PR_SET_PDEATHSIG, SIGKILL)`, immediately verifies the
+exact broker PPID, restores the broker's prior signal mask, and execs the pinned
+non-privilege-changing executable. The broker opens a pidfd immediately and uses
+pidfd-based wait, signal, and reap operations with EINTR-safe, idempotent cleanup.
+
+Before any configuration or HMAC secret is released, the fixed bootstrap and
+parent jointly prove the exact parent-death signal, PID/PPID/start identity,
+`SigBlk`, executable and bytes, cmdline, root, scratch-directory cwd,
+four-key environment, and complete FD roles. An authenticated PID/start handoff
+then lets the main parent retain its own pidfd before the broker opens the
+configuration gate. Canonical readiness remains bound to the exact
+lease/recipe/policy identities, and listener ownership is rechecked at every
+gateway boundary. Listener-inode scanning is observation-only absence evidence:
+it never adds a process to a kill set or grants signal authority. Cleanup signals
+only exactly retained PID/start/pidfd identities and requires a fixed-point
+domain-empty plus listener-absent proof before return; broker loss before
+fencing remains indeterminate even when kernel custody removes the service.
+There is no restart, retry, attach, reuse, or recovery path.
+
+This capability has native evidence only on Linux `aarch64`, CPython `3.12.3`,
+`/usr/bin/python3`. Simulated `win32` and `darwin` clean-import tests are not
+native Windows or macOS execution. Python 3.11, x86_64, actual Windows/macOS,
+hosted CI, full test discovery, real providers/models/APIs, credentials, vendor
+telemetry guarantees, Studio surface, and production readiness remain untested
+or pending and are not claimed. See
+[ADR-0045](docs/decisions/0045-code-owned-local-service-lease-attestation.md).
+
 Private provider turns use the version-2 authenticated correlated transcript
 instead of arbitrary history. Every accepted turn records one transient
 assistant item first, including ordered calls with mandatory provider-neutral

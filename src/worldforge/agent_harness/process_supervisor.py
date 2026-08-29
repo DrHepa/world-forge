@@ -22,6 +22,27 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from .local_service import (
+    LocalServiceLaunchPolicy,
+    LocalServicePolicyError,
+    _acquire_local_service_lease,
+    _broker_launch_from_lease,
+    _close_local_service_lease,
+    _LocalServiceBrokerLaunch,
+    _LocalServiceLaunchRecipe,
+    _LocalServiceLease,
+    _LocalServiceProcess,
+    _LocalServiceReadyAttestation,
+    _parse_local_service_ready_frame,
+    _release_code_owned_local_service,
+    _spawn_code_owned_local_service,
+    _SpawnedLocalService,
+    _validate_broker_launch,
+    _validate_local_service_attestation,
+    _validate_local_service_launch_policy,
+    _validate_local_service_launch_recipe,
+    _validate_local_service_lease,
+)
 from .loopback_gateway import (
     LoopbackGatewayError,
     LoopbackGatewayIndeterminate,
@@ -34,6 +55,7 @@ from .loopback_protocol import (
     MAX_LOOPBACK_RESPONSE_FRAME_BYTES,
     LoopbackProtocolError,
     LoopbackProtocolSession,
+    build_loopback_context_frame,
     parse_loopback_context_frame,
     parse_loopback_response_frame,
 )
@@ -63,6 +85,7 @@ _CONTROL_VERSION = 1
 _CONTROL_LIMIT = 48 * 1024 * 1024
 _CONTROL_POLL_SECONDS = 0.01
 _BROKER_EXIT_SECONDS = 2.0
+_LOCAL_SERVICE_READY_SECONDS = 0.75
 _DOMAIN_FIXED_POINT_LIMIT = 128
 _HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 _CONTROL_SEQUENCE_BY_KIND = {
@@ -72,6 +95,8 @@ _CONTROL_SEQUENCE_BY_KIND = {
     "release": 0,
     "start": 0,
     "gateway_request": 1,
+    "local_service_release": 1,
+    "local_service_spawned": 1,
     "gateway_response": 2,
 }
 _ALLOWED_STOP_REASONS = frozenset(
@@ -122,6 +147,13 @@ class _ProcessIdentity:
 
 
 @dataclass(frozen=True, slots=True)
+class _BrokerTestSynchronization:
+    spawned: object
+    release: object
+    phase: str
+
+
+@dataclass(frozen=True, slots=True)
 class _BrokerReport:
     status: str
     response: bytes | None
@@ -133,6 +165,7 @@ class _LoopbackTurnAuthority:
     worker_nonce: str
     original_request_hash: str
     context_frame: bytes
+    local_service_policy_hash: str | None = None
 
     @property
     def correlation(self) -> dict[str, object]:
@@ -209,25 +242,34 @@ def _validate_control_payload(kind: str, payload: dict[str, object]) -> None:
         valid = not payload
     elif kind == "release":
         valid = set(payload) == {"release"} and type(payload["release"]) is bool
+    elif kind in {"local_service_spawned", "local_service_release"}:
+        valid = set(payload) == {"service_pid", "service_start_time"} and all(
+            type(payload[name]) is int and payload[name] > 0 for name in payload
+        )
     elif kind in {"gateway_request", "gateway_response"}:
         encoded = payload.get("frame_base64")
         runtime = payload.get("runtime")
+        base_fields = {
+            "frame_base64",
+            "frame_hash",
+            "gateway_policy_hash",
+            "original_request_hash",
+            "runtime",
+            "worker_nonce",
+        }
+        service_fields = {"local_service_ready_base64", "local_service_ready_hash"}
+        supplied_fields = set(payload)
         maximum = (
             MAX_LOOPBACK_REQUEST_FRAME_BYTES + 4
             if kind == "gateway_request"
             else MAX_LOOPBACK_RESPONSE_FRAME_BYTES + 4
         )
         valid = (
-            set(payload)
-            == {
-                "frame_base64",
-                "frame_hash",
-                "gateway_policy_hash",
-                "original_request_hash",
-                "runtime",
-                "worker_nonce",
-            }
-            and type(encoded) is str
+            supplied_fields == base_fields
+            or kind == "gateway_request"
+            and supplied_fields == base_fields | service_fields
+        ) and (
+            type(encoded) is str
             and type(payload.get("frame_hash")) is str
             and _HEX_RE.fullmatch(payload["frame_hash"]) is not None
             and type(payload.get("gateway_policy_hash")) is str
@@ -253,6 +295,22 @@ def _validate_control_payload(kind: str, payload: dict[str, object]) -> None:
                     len(decoded) <= maximum
                     and hashlib.sha256(decoded).hexdigest() == payload["frame_hash"]
                 )
+        if valid and supplied_fields == base_fields | service_fields:
+            service_encoded = payload.get("local_service_ready_base64")
+            service_hash = payload.get("local_service_ready_hash")
+            if type(service_encoded) is not str or type(service_hash) is not str:
+                valid = False
+            else:
+                try:
+                    service_ready = base64.b64decode(service_encoded, validate=True)
+                except Exception:
+                    valid = False
+                else:
+                    valid = (
+                        1 <= len(service_ready) <= 8 * 1024
+                        and _HEX_RE.fullmatch(service_hash) is not None
+                        and hashlib.sha256(service_ready).hexdigest() == service_hash
+                    )
     elif kind == "ready":
         valid = (
             set(payload) == {"worker_pid", "worker_start_time"}
@@ -444,8 +502,9 @@ def _gateway_control_payload(
     *,
     runtime: dict[str, object],
     authority: _LoopbackTurnAuthority,
+    local_service_ready_frame: bytes | None = None,
 ) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "frame_base64": base64.b64encode(frame).decode("ascii"),
         "frame_hash": hashlib.sha256(frame).hexdigest(),
         "gateway_policy_hash": authority.policy.content_hash,
@@ -453,6 +512,16 @@ def _gateway_control_payload(
         "runtime": dict(runtime),
         "worker_nonce": authority.worker_nonce,
     }
+    if local_service_ready_frame is not None:
+        payload.update(
+            {
+                "local_service_ready_base64": base64.b64encode(local_service_ready_frame).decode(
+                    "ascii"
+                ),
+                "local_service_ready_hash": hashlib.sha256(local_service_ready_frame).hexdigest(),
+            }
+        )
+    return payload
 
 
 def _validate_gateway_control_payload(
@@ -493,11 +562,24 @@ def _validate_loopback_turn_authority(
         policy = LoopbackGatewayPolicy.create(value.policy.endpoint_origin)
         if policy != value.policy or policy.canonical_document != value.policy.canonical_document:
             raise ValueError
+        direct_gateway = value.local_service_policy_hash is None
         if (
             runtime_launch.authority.key is not _CodeOwnedRuntimeKey.DETERMINISTIC_PROBE
             or runtime_launch.authority.spec.network_scope != "loopback"
-            or runtime_launch.authority.spec.endpoint_origin != policy.endpoint_origin
-            or runtime_launch.authority.spec.endpoint_policy_hash != policy.content_hash
+            or direct_gateway
+            and runtime_launch.authority.spec.endpoint_origin != policy.endpoint_origin
+            or direct_gateway
+            and runtime_launch.authority.spec.endpoint_policy_hash != policy.content_hash
+            or not direct_gateway
+            and runtime_launch.authority.spec.endpoint_origin is not None
+            or not direct_gateway
+            and runtime_launch.authority.spec.endpoint_policy_hash
+            != value.local_service_policy_hash
+            or value.local_service_policy_hash is not None
+            and (
+                type(value.local_service_policy_hash) is not str
+                or _HEX_RE.fullmatch(value.local_service_policy_hash) is None
+            )
             or type(value.worker_nonce) is not str
             or _HEX_RE.fullmatch(value.worker_nonce) is None
             or type(value.original_request_hash) is not str
@@ -523,6 +605,7 @@ def _validate_loopback_turn_authority(
         value.worker_nonce,
         value.original_request_hash,
         bytes(value.context_frame),
+        value.local_service_policy_hash,
     )
 
 
@@ -705,6 +788,61 @@ def _proc_identity(pid: int) -> tuple[int, int, str] | None:
         raise ProviderBoundaryIndeterminate() from None
 
 
+def _listener_inode_matches_tcp(port: int, inode: int) -> bool:
+    try:
+        expected = f"0100007F:{port:04X}"
+        matches = 0
+        for line in Path("/proc/net/tcp").read_text(encoding="ascii").splitlines()[1:]:
+            fields = line.split()
+            if len(fields) >= 10 and fields[1] == expected and fields[3] == "0A":
+                if int(fields[9]) == inode:
+                    matches += 1
+        return matches == 1
+    except BaseException:
+        return False
+
+
+def _retain_attested_local_service(
+    attestation: object,
+    *,
+    lease: _LocalServiceLease,
+    broker_identity: _ProcessIdentity,
+) -> _ProcessIdentity:
+    try:
+        checked = _validate_local_service_attestation(attestation, lease=lease)
+        current = _proc_identity(checked.service_pid)
+        if (
+            current is None
+            or current[0] != checked.service_ppid
+            or current[0] != broker_identity.pid
+            or current[1] != checked.service_start_time
+            or not _entry_is_live(current)
+            or checked.service_pid not in _descendants(broker_identity.pid, _process_table())
+            or os.readlink(f"/proc/{checked.service_pid}/fd/{checked.listener_fd}")
+            != f"socket:[{checked.listener_inode}]"
+            or os.stat(f"/proc/{checked.service_pid}/root").st_dev != checked.root_device
+            or os.stat(f"/proc/{checked.service_pid}/root").st_ino != checked.root_inode
+            or os.stat(f"/proc/{checked.service_pid}/cwd").st_dev != checked.cwd_device
+            or os.stat(f"/proc/{checked.service_pid}/cwd").st_ino != checked.cwd_inode
+            or not _listener_inode_matches_tcp(
+                checked.listener_port,
+                checked.listener_inode,
+            )
+        ):
+            raise LocalServicePolicyError()
+        identity = _retain_linux_identity(
+            checked.service_pid,
+            checked.service_start_time,
+        )
+        if identity is None:
+            raise LocalServicePolicyError()
+        return identity
+    except LocalServicePolicyError:
+        raise ProviderBoundaryFailure() from None
+    except BaseException:
+        raise ProviderBoundaryFailure() from None
+
+
 def _process_table() -> dict[int, tuple[int, int, str]]:
     result: dict[int, tuple[int, int, str]] = {}
     try:
@@ -875,15 +1013,67 @@ def _attempt_linux_domain_cleanup(
     broker: multiprocessing.Process,
     broker_identity: _ProcessIdentity,
     tracked: dict[int, int],
+    listener_inode: int | None = None,
 ) -> bool:
     """Make emergency cleanup total so it cannot replace a latched outcome."""
 
     try:
-        return _cleanup_linux_broker_domain(
+        domain_empty = _cleanup_linux_broker_domain(
             broker=broker,
             broker_identity=broker_identity,
             tracked=tracked,
         )
+        if not domain_empty:
+            return False
+        return listener_inode is None or _prove_listener_inode_absent(listener_inode)
+    except BaseException:
+        return False
+
+
+def _prove_listener_inode_absent(listener_inode: int) -> bool:
+    """Observe listener absence without turning inode possession into signal authority."""
+
+    if type(listener_inode) is not int or listener_inode <= 0:
+        return False
+    target = f"socket:[{listener_inode}]"
+    try:
+        table = _process_table()
+        for pid, observed in table.items():
+            if pid == os.getpid() or not _entry_is_live(observed):
+                continue
+            try:
+                if os.stat(f"/proc/{pid}").st_uid != os.geteuid():
+                    continue
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+            except OSError:
+                return False
+            holds_listener = False
+            try:
+                with os.scandir(f"/proc/{pid}/fd") as descriptors:
+                    for descriptor in descriptors:
+                        try:
+                            if os.readlink(descriptor.path) == target:
+                                holds_listener = True
+                        except (FileNotFoundError, ProcessLookupError):
+                            continue
+                        except OSError:
+                            return False
+            except (FileNotFoundError, ProcessLookupError):
+                current = _proc_identity(pid)
+                if current is None:
+                    continue
+                return False
+            except OSError:
+                return False
+            current = _proc_identity(pid)
+            if current is None:
+                continue
+            if current != observed or not _entry_is_live(current):
+                return False
+            if holds_listener:
+                return False
+        return True
     except BaseException:
         return False
 
@@ -1110,6 +1300,14 @@ def _cleanup_linux_broker_domain(
                 proof_possible = False
                 continue
             if not _entry_is_live(current):
+                if current[0] == os.getpid():
+                    try:
+                        reaped, _status = os.waitpid(identity.pid, os.WNOHANG)
+                    except (ChildProcessError, OSError):
+                        proof_possible = False
+                    else:
+                        if reaped not in {0, identity.pid}:
+                            proof_possible = False
                 continue
             all_absent = False
             for descendant in _descendants(identity.pid, table):
@@ -1166,18 +1364,191 @@ def _linux_broker_main(
     request_frame: bytes,
     scratch: str,
     loopback_turn: _LoopbackTurnAuthority | None = None,
+    local_service_launch: _LocalServiceBrokerLaunch | None = None,
+    test_synchronization: _BrokerTestSynchronization | None = None,
 ) -> int:
     if type(runtime_launch) is not _CodeOwnedRuntimeLaunch:
         raise ProviderBoundaryIndeterminate()
+    local_service_expected = (
+        loopback_turn is not None and loopback_turn.local_service_policy_hash is not None
+    )
+    if (local_service_launch is None) != (not local_service_expected):
+        raise ProviderBoundaryIndeterminate()
+    if local_service_launch is not None:
+        try:
+            local_service_launch = _validate_broker_launch(local_service_launch)
+        except LocalServicePolicyError:
+            raise ProviderBoundaryIndeterminate() from None
     control = socket.socket(fileno=control_fd)
     control.setblocking(False)
     reader = _ControlReader(control)
     broker_pid = os.getpid()
     process: subprocess.Popen[bytes] | None = None
     worker_identity: _ProcessIdentity | None = None
+    local_service: _SpawnedLocalService | None = None
+    local_service_identity: _ProcessIdentity | None = None
     tracked: dict[int, int] = {}
     status = "containment_lost"
     response: bytes | None = None
+    local_service_stdout = bytearray()
+    local_service_stderr = bytearray()
+
+    def activate_local_service() -> tuple[bytes | None, bool]:
+        nonlocal local_service
+        nonlocal local_service_identity
+
+        if local_service_launch is None or local_service is not None:
+            raise ProviderBoundaryIndeterminate()
+        control_frame = reader.poll()
+        if control_frame is not None:
+            _decode_control(
+                control_frame,
+                key=broker_key,
+                nonce=broker_nonce,
+                kind="cancel",
+                sequence=1,
+            )
+            return None, True
+        if reader.closed:
+            return None, True
+        if test_synchronization is not None and (
+            type(test_synchronization) is not _BrokerTestSynchronization
+            or test_synchronization.phase not in {"post_popen", "post_proof"}
+        ):
+            raise ProviderBoundaryIndeterminate()
+
+        def synchronize_test_barrier(_service_pid: int | None = None) -> None:
+            assert test_synchronization is not None
+            if type(_service_pid) is not int or _service_pid <= 0:
+                raise ProviderBoundaryIndeterminate()
+            test_synchronization.spawned.send_bytes(str(_service_pid).encode("ascii"))
+            if not test_synchronization.release.poll(_LOCAL_SERVICE_READY_SECONDS):
+                raise ProviderBoundaryIndeterminate()
+            if test_synchronization.release.recv_bytes() != b"1":
+                raise ProviderBoundaryIndeterminate()
+
+        try:
+            local_service = _spawn_code_owned_local_service(
+                local_service_launch,
+                scratch=scratch,
+                _test_after_popen=(
+                    synchronize_test_barrier
+                    if test_synchronization is not None
+                    and test_synchronization.phase == "post_popen"
+                    else None
+                ),
+            )
+        except LocalServicePolicyError:
+            return None, False
+        if test_synchronization is not None and test_synchronization.phase == "post_proof":
+            synchronize_test_barrier(local_service.service_pid)
+        local_service_identity = _retain_linux_identity(
+            local_service.service_pid,
+            local_service.service_start_time,
+        )
+        if (
+            local_service_identity is None
+            or local_service.process.pid != local_service.service_pid
+            or local_service.service_ppid != broker_pid
+        ):
+            raise ProviderBoundaryIndeterminate()
+        tracked[local_service_identity.pid] = local_service_identity.start_time
+        _send_all(
+            control,
+            _encode_control(
+                kind="local_service_spawned",
+                sequence=1,
+                nonce=broker_nonce,
+                payload={
+                    "service_pid": local_service_identity.pid,
+                    "service_start_time": local_service_identity.start_time,
+                },
+                key=broker_key,
+            ),
+        )
+        while True:
+            control_frame = reader.poll()
+            if control_frame is not None:
+                payload = _decode_control(
+                    control_frame,
+                    key=broker_key,
+                    nonce=broker_nonce,
+                    kind="local_service_release",
+                    sequence=1,
+                )
+                if payload != {
+                    "service_pid": local_service_identity.pid,
+                    "service_start_time": local_service_identity.start_time,
+                }:
+                    raise ProviderBoundaryIndeterminate()
+                break
+            if reader.closed:
+                return None, True
+            time.sleep(_CONTROL_POLL_SECONDS)
+        try:
+            _release_code_owned_local_service(local_service)
+        except LocalServicePolicyError:
+            return None, False
+        ready = bytearray()
+        ready_eof = False
+        deadline = time.monotonic() + _LOCAL_SERVICE_READY_SECONDS
+        while time.monotonic() < deadline:
+            control_frame = reader.poll()
+            if control_frame is not None:
+                _decode_control(
+                    control_frame,
+                    key=broker_key,
+                    nonce=broker_nonce,
+                    kind="cancel",
+                    sequence=1,
+                )
+                return None, True
+            if reader.closed:
+                return None, True
+            try:
+                chunk = os.read(
+                    local_service.ready_read_fd,
+                    max(1, 8 * 1024 + 5 - len(ready)),
+                )
+            except BlockingIOError:
+                chunk = None
+            except InterruptedError:
+                continue
+            except OSError:
+                return None, False
+            if chunk == b"":
+                ready_eof = True
+            elif chunk:
+                ready.extend(chunk)
+            assert local_service.process.stdout is not None
+            assert local_service.process.stderr is not None
+            _read_pipe_nonblocking(
+                local_service.process.stdout,
+                MAX_WORKER_STDERR_BYTES,
+                local_service_stdout,
+            )
+            _read_pipe_nonblocking(
+                local_service.process.stderr,
+                MAX_WORKER_STDERR_BYTES,
+                local_service_stderr,
+            )
+            if local_service_stdout or local_service_stderr or len(ready) > 8 * 1024 + 4:
+                return None, False
+            if len(ready) >= 4:
+                size = int.from_bytes(ready[:4], "big")
+                if not 1 <= size <= 8 * 1024:
+                    return None, False
+                if ready_eof:
+                    if len(ready) != size + 4:
+                        return None, False
+                    if local_service.process.poll() is not None:
+                        return None, False
+                    return bytes(ready[4:]), False
+            if local_service.process.poll() is not None:
+                return None, False
+            time.sleep(0.001)
+        return None, False
+
     try:
         _set_linux_subreaper()
         if not os.path.isabs(scratch) or not os.path.isdir(scratch):
@@ -1332,6 +1703,26 @@ def _linux_broker_main(
                 if stderr:
                     protocol_failure = True
                     break
+                if local_service is not None:
+                    assert local_service.process.stdout is not None
+                    assert local_service.process.stderr is not None
+                    _read_pipe_nonblocking(
+                        local_service.process.stdout,
+                        MAX_WORKER_STDERR_BYTES,
+                        local_service_stdout,
+                    )
+                    _read_pipe_nonblocking(
+                        local_service.process.stderr,
+                        MAX_WORKER_STDERR_BYTES,
+                        local_service_stderr,
+                    )
+                    if (
+                        local_service_stdout
+                        or local_service_stderr
+                        or (local_service.process.poll() is not None and not gateway_requested)
+                    ):
+                        protocol_failure = True
+                        break
                 if loopback_turn is not None and not gateway_requested and len(stdout) >= 4:
                     size = int.from_bytes(stdout[:4], "big")
                     if size > MAX_LOOPBACK_REQUEST_FRAME_BYTES:
@@ -1347,6 +1738,17 @@ def _linux_broker_main(
                                 **loopback_turn.correlation,
                             )
                             gateway_session.accept_request(gateway_frame)
+                            local_service_ready_frame = None
+                            if local_service_launch is not None:
+                                (
+                                    local_service_ready_frame,
+                                    service_cancelled,
+                                ) = activate_local_service()
+                                if service_cancelled:
+                                    cancelled = True
+                                    break
+                                if local_service_ready_frame is None:
+                                    raise LoopbackProtocolError()
                             _send_all(
                                 control,
                                 _encode_control(
@@ -1357,11 +1759,16 @@ def _linux_broker_main(
                                         gateway_frame,
                                         runtime=runtime_launch.authority.runtime_binding,
                                         authority=loopback_turn,
+                                        local_service_ready_frame=(local_service_ready_frame),
                                     ),
                                     key=broker_key,
                                 ),
                             )
-                        except (LoopbackProtocolError, ProviderBoundaryIndeterminate):
+                        except (
+                            LocalServicePolicyError,
+                            LoopbackProtocolError,
+                            ProviderBoundaryIndeterminate,
+                        ):
                             protocol_failure = True
                             break
                         gateway_requested = True
@@ -1489,8 +1896,45 @@ def _linux_broker_main(
                         stream.close()
                     except BaseException:
                         pass
+        if local_service is not None:
+            for descriptor in (
+                local_service.control_write_fd,
+                local_service.ready_read_fd,
+            ):
+                try:
+                    os.close(descriptor)
+                except BaseException:
+                    pass
+            for stream in (
+                local_service.process.stdout,
+                local_service.process.stderr,
+            ):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except BaseException:
+                        pass
+            try:
+                local_service.process.wait(timeout=0.25)
+            except BaseException:
+                if type(local_service.process) is _LocalServiceProcess:
+                    try:
+                        local_service.process.kill()
+                        local_service.process.wait(timeout=0.5)
+                    except BaseException:
+                        pass
+            finally:
+                if type(local_service.process) is _LocalServiceProcess:
+                    local_service.process.close()
         if worker_identity is not None:
             _close_linux_identity(worker_identity)
+        if local_service_identity is not None:
+            _close_linux_identity(local_service_identity)
+        if local_service_launch is not None:
+            try:
+                local_service_launch.listener.close()
+            except BaseException:
+                pass
         try:
             control.close()
         except BaseException:
@@ -1507,6 +1951,8 @@ def _linux_broker_process_entry(
     request_frame: bytes,
     scratch: str,
     loopback_turn: _LoopbackTurnAuthority | None = None,
+    local_service_launch: _LocalServiceBrokerLaunch | None = None,
+    test_synchronization: _BrokerTestSynchronization | None = None,
 ) -> None:
     descriptor = control.detach()
     gate = socket.socket(fileno=descriptor)
@@ -1530,6 +1976,8 @@ def _linux_broker_process_entry(
             request_frame=request_frame,
             scratch=scratch,
             loopback_turn=loopback_turn,
+            local_service_launch=local_service_launch,
+            test_synchronization=test_synchronization,
         )
     except BaseException:
         try:
@@ -1565,7 +2013,11 @@ class LinuxProcessSupervisor:
     """A per-turn subreaper broker whose private domain contains only one worker tree."""
 
     def __init__(self, *, runtime_launch: _CodeOwnedRuntimeLaunch | None = None) -> None:
-        if not sys.platform.startswith("linux") or not Path("/proc/self/stat").is_file():
+        if (
+            type(sys.platform) is not str
+            or sys.platform != "linux"
+            or not Path("/proc/self/stat").is_file()
+        ):
             raise ProviderBoundaryUnsupported()
         if not callable(getattr(os, "pidfd_open", None)) or not callable(
             getattr(signal, "pidfd_send_signal", None)
@@ -1579,8 +2031,12 @@ class LinuxProcessSupervisor:
             raise ProviderBoundaryFailure()
         self._runtime_launch = runtime_launch
         self.spawn_count = 0
+        self.local_service_bind_count = 0
+        self.local_service_spawn_count = 0
         self.active_broker_pid: int | None = None
         self.active_worker_pid: int | None = None
+        self.active_local_service_pid: int | None = None
+        self.active_local_service_port: int | None = None
         self._lock = threading.Lock()
         self._turn_lock = threading.Lock()
 
@@ -1591,6 +2047,11 @@ class LinuxProcessSupervisor:
     def _set_worker(self, pid: int | None) -> None:
         with self._lock:
             self.active_worker_pid = pid
+
+    def _set_local_service(self, pid: int | None, port: int | None) -> None:
+        with self._lock:
+            self.active_local_service_pid = pid
+            self.active_local_service_port = port
 
     @staticmethod
     def _close_socket(stream: socket.socket) -> None:
@@ -1650,6 +2111,8 @@ class LinuxProcessSupervisor:
         worker_nonce: str | None = None,
         original_request_hash: str | None = None,
         gateway_context_frame: bytes | None = None,
+        local_service_policy: LocalServiceLaunchPolicy | None = None,
+        local_service_recipe: _LocalServiceLaunchRecipe | None = None,
     ) -> _BrokerReport:
         if type(runtime_key) is not _CodeOwnedRuntimeKey:
             raise ProviderBoundaryFailure()
@@ -1662,14 +2125,26 @@ class LinuxProcessSupervisor:
             raise ProviderBoundaryFailure()
         supplied_gateway = (
             gateway_policy,
-            worker_nonce,
-            original_request_hash,
             gateway_context_frame,
         )
-        if all(value is None for value in supplied_gateway):
-            loopback_turn = None
+        supplied_correlation = (worker_nonce, original_request_hash)
+        if gateway_policy is None and gateway_context_frame is None:
+            direct_gateway = False
         elif any(value is None for value in supplied_gateway):
             raise ProviderBoundaryFailure()
+        else:
+            direct_gateway = True
+        if (local_service_policy is None) != (local_service_recipe is None):
+            raise ProviderBoundaryFailure()
+        if local_service_policy is not None and direct_gateway:
+            raise ProviderBoundaryFailure()
+        if direct_gateway or local_service_policy is not None:
+            if any(value is None for value in supplied_correlation):
+                raise ProviderBoundaryFailure()
+        elif any(value is not None for value in supplied_correlation):
+            raise ProviderBoundaryFailure()
+        if not direct_gateway:
+            loopback_turn = None
         else:
             loopback_turn = _validate_loopback_turn_authority(
                 _LoopbackTurnAuthority(
@@ -1681,13 +2156,71 @@ class LinuxProcessSupervisor:
                 worker_key=worker_key,
                 runtime_launch=runtime_launch,
             )
+        checked_local_service: LocalServiceLaunchPolicy | None = None
+        checked_local_service_recipe: _LocalServiceLaunchRecipe | None = None
+        if local_service_policy is not None:
+            try:
+                checked_local_service = _validate_local_service_launch_policy(local_service_policy)
+                checked_local_service_recipe = _validate_local_service_launch_recipe(
+                    local_service_recipe,
+                    policy=checked_local_service,
+                )
+            except LocalServicePolicyError:
+                raise ProviderBoundaryFailure() from None
         if not self._turn_lock.acquire(blocking=False):
             raise ProviderBoundaryFailure()
         started = 0.0
         scratch: str | None = None
+        local_service_lease: _LocalServiceLease | None = None
+        local_service_launch: _LocalServiceBrokerLaunch | None = None
         original: BaseException | None = None
         try:
             started = time.monotonic()
+            if checked_local_service is not None:
+                reason = boundary.poll_stop_reason()
+                if reason is not None:
+                    raise ProviderBoundaryStopped(reason)
+                if (time.monotonic() - started) * 1000 > turn_timeout_ms:
+                    raise ProviderBoundaryFailure()
+                try:
+                    local_service_lease = _acquire_local_service_lease(
+                        checked_local_service,
+                        recipe=checked_local_service_recipe,
+                    )
+                    self.local_service_bind_count += 1
+                    dynamic_policy = LoopbackGatewayPolicy.create(
+                        f"http://{local_service_lease.host}:{local_service_lease.port}"
+                    )
+                    context_frame = build_loopback_context_frame(
+                        key=worker_key,
+                        nonce=worker_nonce,  # type: ignore[arg-type]
+                        runtime=runtime_launch.authority.runtime_binding,
+                        original_request_hash=original_request_hash,  # type: ignore[arg-type]
+                        gateway_policy_hash=dynamic_policy.content_hash,
+                        gateway_plan_hash=dynamic_policy.plan_hash,
+                        gateway_plan_count=dynamic_policy.plan_count,
+                        gateway_step_policy_hashes=tuple(
+                            step.content_hash for step in dynamic_policy.ordered_steps
+                        ),
+                    )
+                    loopback_turn = _validate_loopback_turn_authority(
+                        _LoopbackTurnAuthority(
+                            dynamic_policy,
+                            worker_nonce,  # type: ignore[arg-type]
+                            original_request_hash,  # type: ignore[arg-type]
+                            context_frame,
+                            checked_local_service.content_hash,
+                        ),
+                        worker_key=worker_key,
+                        runtime_launch=runtime_launch,
+                    )
+                    local_service_launch = _broker_launch_from_lease(
+                        local_service_lease,
+                        key=os.urandom(32),
+                        nonce=os.urandom(32).hex(),
+                    )
+                except LocalServicePolicyError:
+                    raise ProviderBoundaryFailure() from None
             scratch = tempfile.mkdtemp(prefix="worldforge-worker-")
             os.chmod(scratch, 0o700)
             return self._execute_with_scratch(
@@ -1699,6 +2232,8 @@ class LinuxProcessSupervisor:
                 scratch=scratch,
                 started=started,
                 loopback_turn=loopback_turn,
+                local_service_lease=local_service_lease,
+                local_service_launch=local_service_launch,
             )
         except BaseException as exc:
             original = exc
@@ -1716,13 +2251,25 @@ class LinuxProcessSupervisor:
             raise
         finally:
             try:
-                if scratch is not None and not _remove_scratch(scratch):
-                    if original is None or isinstance(original, Exception):
-                        raise ProviderBoundaryIndeterminate() from None
-                    try:
-                        original.add_note("provider scratch cleanup was indeterminate")
-                    except BaseException:
-                        pass
+                try:
+                    if local_service_lease is not None and not _close_local_service_lease(
+                        local_service_lease
+                    ):
+                        if original is None or isinstance(original, Exception):
+                            raise ProviderBoundaryIndeterminate() from None
+                        try:
+                            original.add_note("local service listener cleanup was indeterminate")
+                        except BaseException:
+                            pass
+                finally:
+                    self._set_local_service(None, None)
+                    if scratch is not None and not _remove_scratch(scratch):
+                        if original is None or isinstance(original, Exception):
+                            raise ProviderBoundaryIndeterminate() from None
+                        try:
+                            original.add_note("provider scratch cleanup was indeterminate")
+                        except BaseException:
+                            pass
             finally:
                 self._turn_lock.release()
 
@@ -1737,7 +2284,23 @@ class LinuxProcessSupervisor:
         scratch: str,
         started: float,
         loopback_turn: _LoopbackTurnAuthority | None = None,
+        local_service_lease: _LocalServiceLease | None = None,
+        local_service_launch: _LocalServiceBrokerLaunch | None = None,
+        broker_test_synchronization: _BrokerTestSynchronization | None = None,
     ) -> _BrokerReport:
+        if (local_service_lease is None) != (local_service_launch is None):
+            raise ProviderBoundaryFailure()
+        if local_service_lease is not None:
+            try:
+                _validate_local_service_lease(local_service_lease)
+                if (
+                    loopback_turn is None
+                    or loopback_turn.local_service_policy_hash
+                    != local_service_lease.policy.content_hash
+                ):
+                    raise LocalServicePolicyError()
+            except LocalServicePolicyError:
+                raise ProviderBoundaryFailure() from None
         initial = boundary.poll_stop_reason()
         if initial is not None:
             raise ProviderBoundaryStopped(initial)
@@ -1763,9 +2326,10 @@ class LinuxProcessSupervisor:
                 worker_key,
                 request_frame,
                 scratch,
+                loopback_turn,
+                local_service_launch,
+                broker_test_synchronization,
             )
-            if loopback_turn is not None:
-                broker_args = (*broker_args, loopback_turn)
             broker = context.Process(
                 target=_linux_broker_process_entry,
                 args=broker_args,
@@ -1799,6 +2363,9 @@ class LinuxProcessSupervisor:
                     broker=broker,
                     broker_identity=broker_identity,
                     tracked={},
+                    listener_inode=(
+                        None if local_service_lease is None else local_service_lease.listener_inode
+                    ),
                 )
             elif broker is not None:
                 setup_domain_proven = self._stop_unidentified_broker(broker)
@@ -1811,6 +2378,9 @@ class LinuxProcessSupervisor:
                     broker=broker,
                     broker_identity=broker_identity,
                     tracked={},
+                    listener_inode=(
+                        None if local_service_lease is None else local_service_lease.listener_inode
+                    ),
                 )
             elif broker is not None:
                 setup_domain_proven = self._stop_unidentified_broker(broker)
@@ -1823,6 +2393,9 @@ class LinuxProcessSupervisor:
                     broker=broker,
                     broker_identity=broker_identity,
                     tracked={},
+                    listener_inode=(
+                        None if local_service_lease is None else local_service_lease.listener_inode
+                    ),
                 )
             elif broker is not None:
                 setup_domain_proven = self._stop_unidentified_broker(broker)
@@ -1858,6 +2431,7 @@ class LinuxProcessSupervisor:
         parent.setblocking(False)
         reader = _ControlReader(parent)
         ready_identity: _ProcessIdentity | None = None
+        local_service_identity: _ProcessIdentity | None = None
         released = False
         cancel_sent = False
         stop_reason: str | None = None
@@ -1941,6 +2515,11 @@ class LinuxProcessSupervisor:
                         broker=broker,
                         broker_identity=broker_identity,
                         tracked=tracked,
+                        listener_inode=(
+                            None
+                            if local_service_lease is None
+                            else local_service_lease.listener_inode
+                        ),
                     )
                     domain_report_proven = cleanup_domain_proven
                     raise_latched_control_outcome(domain_empty=cleanup_domain_proven)
@@ -1977,6 +2556,11 @@ class LinuxProcessSupervisor:
                                 broker=broker,
                                 broker_identity=broker_identity,
                                 tracked=tracked,
+                                listener_inode=(
+                                    None
+                                    if local_service_lease is None
+                                    else local_service_lease.listener_inode
+                                ),
                             )
                             domain_report_proven = cleanup_domain_proven
                             raise_latched_control_outcome(domain_empty=cleanup_domain_proven)
@@ -1993,6 +2577,69 @@ class LinuxProcessSupervisor:
                         released = True
                     else:
                         if loopback_turn is not None and not gateway_exchanged:
+                            try:
+                                handoff_payload = _decode_control(
+                                    frame,
+                                    key=broker_key,
+                                    nonce=broker_nonce,
+                                    kind="local_service_spawned",
+                                    sequence=1,
+                                )
+                            except ProviderBoundaryIndeterminate:
+                                handoff_payload = None
+                            else:
+                                if (
+                                    local_service_identity is not None
+                                    or set(handoff_payload)
+                                    != {
+                                        "service_pid",
+                                        "service_start_time",
+                                    }
+                                    or any(
+                                        type(handoff_payload[name]) is not int
+                                        or handoff_payload[name] <= 0
+                                        for name in (
+                                            "service_pid",
+                                            "service_start_time",
+                                        )
+                                    )
+                                ):
+                                    raise ProviderBoundaryIndeterminate()
+                                local_service_identity = _retain_linux_identity(
+                                    handoff_payload["service_pid"],
+                                    handoff_payload["service_start_time"],
+                                )
+                                current = _proc_identity(local_service_identity.pid)
+                                if (
+                                    current is None
+                                    or current[0] != broker_identity.pid
+                                    or current[1] != local_service_identity.start_time
+                                    or not _entry_is_live(current)
+                                ):
+                                    raise ProviderBoundaryIndeterminate()
+                                tracked[local_service_identity.pid] = (
+                                    local_service_identity.start_time
+                                )
+                                self.local_service_spawn_count += 1
+                                self._set_local_service(
+                                    local_service_identity.pid,
+                                    (
+                                        None
+                                        if local_service_lease is None
+                                        else local_service_lease.port
+                                    ),
+                                )
+                                _send_all(
+                                    parent,
+                                    _encode_control(
+                                        kind="local_service_release",
+                                        sequence=1,
+                                        nonce=broker_nonce,
+                                        payload=handoff_payload,
+                                        key=broker_key,
+                                    ),
+                                )
+                                continue
                             try:
                                 gateway_payload = _decode_control(
                                     frame,
@@ -2016,6 +2663,98 @@ class LinuxProcessSupervisor:
                                     authority=loopback_turn,
                                     kind="gateway_request",
                                 )
+                                exchange_boundary = boundary.poll_stop_reason
+                                if loopback_turn.local_service_policy_hash is not None:
+                                    if (
+                                        local_service_lease is None
+                                        or local_service_launch is None
+                                        or local_service_identity is None
+                                        or set(gateway_payload)
+                                        != {
+                                            "frame_base64",
+                                            "frame_hash",
+                                            "gateway_policy_hash",
+                                            "local_service_ready_base64",
+                                            "local_service_ready_hash",
+                                            "original_request_hash",
+                                            "runtime",
+                                            "worker_nonce",
+                                        }
+                                    ):
+                                        raise ProviderBoundaryFailure()
+                                    try:
+                                        ready_frame = base64.b64decode(
+                                            gateway_payload["local_service_ready_base64"],
+                                            validate=True,
+                                        )
+                                        service_cwd = os.stat(
+                                            os.path.join(scratch, "local-service")
+                                        )
+                                        attestation = _parse_local_service_ready_frame(
+                                            ready_frame,
+                                            lease=local_service_lease,
+                                            key=local_service_launch.key,
+                                            expected_nonce=local_service_launch.nonce,
+                                            expected_cwd_device=service_cwd.st_dev,
+                                            expected_cwd_inode=service_cwd.st_ino,
+                                        )
+                                    except (LocalServicePolicyError, TypeError, ValueError):
+                                        raise ProviderBoundaryFailure() from None
+                                    attested_service_identity = _retain_attested_local_service(
+                                        attestation,
+                                        lease=local_service_lease,
+                                        broker_identity=broker_identity,
+                                    )
+                                    if (
+                                        attested_service_identity.pid != local_service_identity.pid
+                                        or attested_service_identity.start_time
+                                        != local_service_identity.start_time
+                                        or not _close_linux_identity(attested_service_identity)
+                                    ):
+                                        raise ProviderBoundaryIndeterminate()
+                                    captured_service_identity = local_service_identity
+                                    captured_attestation = attestation
+
+                                    def poll_local_service_boundary(
+                                        service_identity: _ProcessIdentity = (
+                                            captured_service_identity
+                                        ),
+                                        service_attestation: _LocalServiceReadyAttestation = (
+                                            captured_attestation
+                                        ),
+                                    ) -> str | None:
+                                        reason = boundary.poll_stop_reason()
+                                        if reason is not None:
+                                            return reason
+                                        current = _proc_identity(service_identity.pid)
+                                        if (
+                                            current is None
+                                            or current[1] != service_identity.start_time
+                                            or not _entry_is_live(current)
+                                            or os.readlink(
+                                                f"/proc/"
+                                                f"{service_attestation.service_pid}/fd/"
+                                                f"{service_attestation.listener_fd}"
+                                            )
+                                            != f"socket:[{service_attestation.listener_inode}]"
+                                            or not _listener_inode_matches_tcp(
+                                                service_attestation.listener_port,
+                                                service_attestation.listener_inode,
+                                            )
+                                        ):
+                                            raise ProviderBoundaryFailure()
+                                        return None
+
+                                    exchange_boundary = poll_local_service_boundary
+                                elif set(gateway_payload) != {
+                                    "frame_base64",
+                                    "frame_hash",
+                                    "gateway_policy_hash",
+                                    "original_request_hash",
+                                    "runtime",
+                                    "worker_nonce",
+                                }:
+                                    raise ProviderBoundaryIndeterminate()
                                 session = LoopbackProtocolSession(
                                     key=worker_key,
                                     runtime=runtime_launch.authority.runtime_binding,
@@ -2026,7 +2765,7 @@ class LinuxProcessSupervisor:
                                     response_steps = execute_loopback_exchange(
                                         loopback_turn.policy,
                                         request.body,
-                                        boundary=boundary.poll_stop_reason,
+                                        boundary=exchange_boundary,
                                         started=started,
                                         private_deadline=(started + turn_timeout_ms / 1000.0),
                                     )
@@ -2136,6 +2875,11 @@ class LinuxProcessSupervisor:
                         broker=broker,
                         broker_identity=broker_identity,
                         tracked=tracked,
+                        listener_inode=(
+                            None
+                            if local_service_lease is None
+                            else local_service_lease.listener_inode
+                        ),
                     )
                     domain_report_proven = cleanup_domain_proven
                 raise_latched_control_outcome(
@@ -2148,6 +2892,11 @@ class LinuxProcessSupervisor:
                         broker=broker,
                         broker_identity=broker_identity,
                         tracked=tracked,
+                        listener_inode=(
+                            None
+                            if local_service_lease is None
+                            else local_service_lease.listener_inode
+                        ),
                     )
                 raise
             if isinstance(exc, (ProviderBoundaryFailure, ProviderBoundaryStopped)):
@@ -2158,6 +2907,11 @@ class LinuxProcessSupervisor:
                             broker=broker,
                             broker_identity=broker_identity,
                             tracked=tracked,
+                            listener_inode=(
+                                None
+                                if local_service_lease is None
+                                else local_service_lease.listener_inode
+                            ),
                         )
                     if not cleanup_domain_proven:
                         raise ProviderBoundaryIndeterminate() from None
@@ -2169,6 +2923,11 @@ class LinuxProcessSupervisor:
                         broker=broker,
                         broker_identity=broker_identity,
                         tracked=tracked,
+                        listener_inode=(
+                            None
+                            if local_service_lease is None
+                            else local_service_lease.listener_inode
+                        ),
                     )
                 if not (domain_report_proven or cleanup_domain_proven):
                     raise ProviderBoundaryIndeterminate() from None
@@ -2182,6 +2941,9 @@ class LinuxProcessSupervisor:
                 broker=broker,
                 broker_identity=broker_identity,
                 tracked=tracked,
+                listener_inode=(
+                    None if local_service_lease is None else local_service_lease.listener_inode
+                ),
             )
             if not cleanup_domain_proven:
                 try:
@@ -2198,10 +2960,15 @@ class LinuxProcessSupervisor:
             identities_closed = True
             if ready_identity is not None:
                 identities_closed = _close_linux_identity(ready_identity)
+            if local_service_identity is not None and not _close_linux_identity(
+                local_service_identity
+            ):
+                identities_closed = False
             if not _close_linux_identity(broker_identity):
                 identities_closed = False
             self._set_active(None)
             self._set_worker(None)
+            self._set_local_service(None, None)
             if not identities_closed:
                 active = sys.exception()
                 if active is None or isinstance(active, Exception):

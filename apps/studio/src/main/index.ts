@@ -23,7 +23,11 @@ import {
   ApplicationLifecycleCoordinator,
   ApplicationQuitGate,
 } from "./app-lifecycle";
-import { createStudioAuthorityModalClient } from "./authority-modal";
+import {
+  createStudioAuthorityModalClient,
+  createStudioDirectorModalClient,
+} from "./authority-modal";
+import { StudioDirectorAuthority } from "./director-authority";
 import { registerStudioIpc } from "./ipc";
 import { resolveCodexRuntime, resolveForgeServiceLaunch } from "./runtime-manifest";
 import {
@@ -83,15 +87,27 @@ async function startApplication(
   const codex = await createCodexBridge(service, dataDir);
   lifecycle.ownCodex(codex);
   const window = createMainWindow();
-  const unregisterIpc = registerStudioIpc(
+  const directorAuthority = new StudioDirectorAuthority({
+    service,
+    dialogs: dialog,
+    modal: createStudioDirectorModalClient(ipcMain),
+  });
+  const unregisterStudioIpc = registerStudioIpc(
     ipcMain,
     window,
     service,
     codex,
     dialog,
     undefined,
-    { authorityModal: createStudioAuthorityModalClient(ipcMain) },
+    {
+      authorityModal: createStudioAuthorityModalClient(ipcMain),
+      directorAuthority,
+    },
   );
+  const unregisterIpc = (): void => {
+    directorAuthority.close();
+    unregisterStudioIpc();
+  };
   lifecycle.ownIpc(unregisterIpc);
   await window.loadURL(STUDIO_ENTRY_URL);
 }

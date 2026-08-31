@@ -1,0 +1,845 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://world-forge.local/schemas/studio-protocol-v6.schema.json",
+  "title": "World Forge Studio Director protocol v6",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/request"
+    },
+    {
+      "$ref": "#/$defs/response"
+    },
+    {
+      "$ref": "#/$defs/errorEnvelope"
+    }
+  ],
+  "$defs": {
+    "entityId": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,127}$"
+    },
+    "harnessId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{1,63}$"
+    },
+    "toolId": {
+      "type": "string",
+      "maxLength": 1024,
+      "pattern": "^[a-z][a-z0-9_]{1,63}(?:\\.[a-z][a-z0-9_]{1,63})+$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "safeInteger": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "nullableSafeInteger": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/safeInteger"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "nullableSha256": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/sha256"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "emptyParams": {
+      "type": "object",
+      "additionalProperties": false
+    },
+    "passphraseParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "passphrase"
+      ],
+      "properties": {
+        "passphrase": {
+          "type": "string",
+          "x-worldforge-min-utf8-bytes": 16,
+          "x-worldforge-max-utf8-bytes": 1024
+        }
+      }
+    },
+    "toolCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tool_id",
+        "descriptor_hash"
+      ],
+      "properties": {
+        "tool_id": {
+          "$ref": "#/$defs/toolId"
+        },
+        "descriptor_hash": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "executionApprovalReview": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "format",
+        "format_version",
+        "approval_id",
+        "execution_id",
+        "activation_hash",
+        "grant_hash",
+        "private_input_hash",
+        "runtime_id",
+        "runtime_revision",
+        "runtime_content_hash",
+        "max_turns",
+        "max_tool_calls",
+        "max_total_tokens",
+        "max_cost_minor_units",
+        "currency",
+        "max_duration_ms",
+        "deadline_ms",
+        "tool_candidates",
+        "generation",
+        "content_hash"
+      ],
+      "properties": {
+        "format": {
+          "const": "world-forge.private.execution_approval_review"
+        },
+        "format_version": {
+          "const": 1
+        },
+        "approval_id": {
+          "$ref": "#/$defs/harnessId"
+        },
+        "execution_id": {
+          "$ref": "#/$defs/harnessId"
+        },
+        "activation_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "grant_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "private_input_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "runtime_id": {
+          "$ref": "#/$defs/harnessId"
+        },
+        "runtime_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "runtime_content_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "max_turns": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64
+        },
+        "max_tool_calls": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 128
+        },
+        "max_total_tokens": {
+          "$ref": "#/$defs/safeInteger"
+        },
+        "max_cost_minor_units": {
+          "$ref": "#/$defs/nullableSafeInteger"
+        },
+        "currency": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Z]{3}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "max_duration_ms": {
+          "$ref": "#/$defs/safeInteger"
+        },
+        "deadline_ms": {
+          "$ref": "#/$defs/nullableSafeInteger"
+        },
+        "tool_candidates": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {
+            "$ref": "#/$defs/toolCandidate"
+          }
+        },
+        "generation": {
+          "const": 0
+        },
+        "content_hash": {
+          "$ref": "#/$defs/sha256"
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "max_cost_minor_units": {
+              "$ref": "#/$defs/safeInteger"
+            },
+            "currency": {
+              "type": "string",
+              "pattern": "^[A-Z]{3}$"
+            }
+          }
+        },
+        {
+          "properties": {
+            "max_cost_minor_units": {
+              "type": "null"
+            },
+            "currency": {
+              "type": "null"
+            }
+          }
+        }
+      ]
+    },
+    "executionApprovalDecision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "format",
+        "format_version",
+        "approval_id",
+        "execution_id",
+        "review_hash",
+        "generation",
+        "reviewer_id",
+        "outcome",
+        "approved_tool_ids",
+        "expires_at_ms",
+        "content_hash"
+      ],
+      "properties": {
+        "format": {
+          "const": "world-forge.private.execution_approval_decision"
+        },
+        "format_version": {
+          "const": 1
+        },
+        "approval_id": {
+          "$ref": "#/$defs/harnessId"
+        },
+        "execution_id": {
+          "$ref": "#/$defs/harnessId"
+        },
+        "review_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "generation": {
+          "const": 1
+        },
+        "reviewer_id": {
+          "const": "director_local"
+        },
+        "outcome": {
+          "enum": [
+            "approved",
+            "denied"
+          ]
+        },
+        "approved_tool_ids": {
+          "type": "array",
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/toolId"
+          }
+        },
+        "expires_at_ms": {
+          "$ref": "#/$defs/nullableSafeInteger"
+        },
+        "content_hash": {
+          "$ref": "#/$defs/sha256"
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "outcome": {
+              "const": "approved"
+            },
+            "expires_at_ms": {
+              "$ref": "#/$defs/safeInteger"
+            }
+          }
+        },
+        {
+          "properties": {
+            "outcome": {
+              "const": "denied"
+            },
+            "approved_tool_ids": {
+              "type": "array",
+              "maxItems": 0
+            },
+            "expires_at_ms": {
+              "type": "null"
+            }
+          }
+        }
+      ]
+    },
+    "directorStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "credential_id",
+        "state"
+      ],
+      "properties": {
+        "credential_id": {
+          "const": "director_local"
+        },
+        "state": {
+          "enum": [
+            "not_enrolled",
+            "locked",
+            "unlocked"
+          ]
+        }
+      }
+    },
+    "approvalAuthoritySnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "prepared_review",
+        "current_decision",
+        "generation",
+        "review_hash",
+        "decision_hash",
+        "state"
+      ],
+      "properties": {
+        "prepared_review": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/executionApprovalReview"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "current_decision": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/executionApprovalDecision"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2
+        },
+        "review_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "decision_hash": {
+          "$ref": "#/$defs/nullableSha256"
+        },
+        "state": {
+          "enum": [
+            "missing",
+            "prepared",
+            "approved",
+            "denied",
+            "revoked",
+            "stale"
+          ]
+        }
+      }
+    },
+    "reviewParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "review"
+      ],
+      "properties": {
+        "review": {
+          "$ref": "#/$defs/executionApprovalReview"
+        }
+      }
+    },
+    "prepareParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "review",
+        "expected_generation"
+      ],
+      "properties": {
+        "review": {
+          "$ref": "#/$defs/executionApprovalReview"
+        },
+        "expected_generation": {
+          "const": 0
+        }
+      }
+    },
+    "approveParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "review",
+        "expected_generation",
+        "expected_review_hash",
+        "approved_tool_ids",
+        "expires_at_ms"
+      ],
+      "properties": {
+        "review": {
+          "$ref": "#/$defs/executionApprovalReview"
+        },
+        "expected_generation": {
+          "const": 0
+        },
+        "expected_review_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "approved_tool_ids": {
+          "type": "array",
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/toolId"
+          }
+        },
+        "expires_at_ms": {
+          "$ref": "#/$defs/safeInteger"
+        }
+      }
+    },
+    "denyParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "review",
+        "expected_generation",
+        "expected_review_hash"
+      ],
+      "properties": {
+        "review": {
+          "$ref": "#/$defs/executionApprovalReview"
+        },
+        "expected_generation": {
+          "const": 0
+        },
+        "expected_review_hash": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "revokeParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "review",
+        "expected_generation",
+        "expected_decision_hash"
+      ],
+      "properties": {
+        "review": {
+          "$ref": "#/$defs/executionApprovalReview"
+        },
+        "expected_generation": {
+          "const": 1
+        },
+        "expected_decision_hash": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "method": {
+      "enum": [
+        "service.initialize",
+        "director.status",
+        "director.enroll",
+        "director.unlock",
+        "director.lock",
+        "director.review.inspect",
+        "director.review.prepare",
+        "director.review.approve",
+        "director.review.deny",
+        "director.review.revoke"
+      ]
+    },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol",
+        "protocol_version",
+        "kind",
+        "request_id",
+        "method",
+        "params"
+      ],
+      "properties": {
+        "protocol": {
+          "const": "rpg-world-forge.studio_protocol"
+        },
+        "protocol_version": {
+          "const": 6
+        },
+        "kind": {
+          "const": "request"
+        },
+        "request_id": {
+          "$ref": "#/$defs/entityId"
+        },
+        "method": {
+          "$ref": "#/$defs/method"
+        },
+        "params": {}
+      },
+      "oneOf": [
+        {
+          "required": ["method", "params"],
+          "properties": {
+            "method": {
+              "const": "service.initialize"
+            },
+            "params": {
+              "$ref": "#/$defs/emptyParams"
+            }
+          }
+        },
+        {
+          "required": ["method", "params"],
+          "properties": {
+            "method": {
+              "enum": [
+                "director.status",
+                "director.lock"
+              ]
+            },
+            "params": {
+              "$ref": "#/$defs/emptyParams"
+            }
+          }
+        },
+        {
+          "required": ["method", "params"],
+          "properties": {
+            "method": {
+              "enum": [
+                "director.enroll",
+                "director.unlock"
+              ]
+            },
+            "params": {
+              "$ref": "#/$defs/passphraseParams"
+            }
+          }
+        },
+        {
+          "required": ["method", "params"],
+          "properties": {
+            "method": {
+              "const": "director.review.inspect"
+            },
+            "params": {
+              "$ref": "#/$defs/reviewParams"
+            }
+          }
+        },
+        {
+          "required": ["method", "params"],
+          "properties": {
+            "method": {
+              "const": "director.review.prepare"
+            },
+            "params": {
+              "$ref": "#/$defs/prepareParams"
+            }
+          }
+        },
+        {
+          "required": ["method", "params"],
+          "properties": {
+            "method": {
+              "const": "director.review.approve"
+            },
+            "params": {
+              "$ref": "#/$defs/approveParams"
+            }
+          }
+        },
+        {
+          "required": ["method", "params"],
+          "properties": {
+            "method": {
+              "const": "director.review.deny"
+            },
+            "params": {
+              "$ref": "#/$defs/denyParams"
+            }
+          }
+        },
+        {
+          "required": ["method", "params"],
+          "properties": {
+            "method": {
+              "const": "director.review.revoke"
+            },
+            "params": {
+              "$ref": "#/$defs/revokeParams"
+            }
+          }
+        }
+      ]
+    },
+    "initializeResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "service",
+        "service_version",
+        "protocol",
+        "protocol_version",
+        "methods",
+        "capabilities"
+      ],
+      "properties": {
+        "service": {
+          "const": "world-forge.studio"
+        },
+        "service_version": {
+          "const": 6
+        },
+        "protocol": {
+          "const": "rpg-world-forge.studio_protocol"
+        },
+        "protocol_version": {
+          "const": 6
+        },
+        "methods": {
+          "type": "array",
+          "minItems": 10,
+          "maxItems": 10,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/method"
+          }
+        },
+        "capabilities": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "authenticated_director_decisions",
+            "harness_hydration",
+            "civil_identity",
+            "secure_zeroization"
+          ],
+          "properties": {
+            "authenticated_director_decisions": {
+              "const": true
+            },
+            "harness_hydration": {
+              "const": false
+            },
+            "civil_identity": {
+              "const": false
+            },
+            "secure_zeroization": {
+              "const": false
+            }
+          }
+        }
+      }
+    },
+    "directorStatusResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "$ref": "#/$defs/directorStatus"
+        }
+      }
+    },
+    "directorReviewResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "snapshot"
+      ],
+      "properties": {
+        "snapshot": {
+          "$ref": "#/$defs/approvalAuthoritySnapshot"
+        }
+      }
+    },
+    "response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol",
+        "protocol_version",
+        "kind",
+        "request_id",
+        "method",
+        "result"
+      ],
+      "properties": {
+        "protocol": {
+          "const": "rpg-world-forge.studio_protocol"
+        },
+        "protocol_version": {
+          "const": 6
+        },
+        "kind": {
+          "const": "response"
+        },
+        "request_id": {
+          "$ref": "#/$defs/entityId"
+        },
+        "method": {
+          "$ref": "#/$defs/method"
+        },
+        "result": {}
+      },
+      "oneOf": [
+        {
+          "required": ["method", "result"],
+          "properties": {
+            "method": {
+              "const": "service.initialize"
+            },
+            "result": {
+              "$ref": "#/$defs/initializeResult"
+            }
+          }
+        },
+        {
+          "required": ["method", "result"],
+          "properties": {
+            "method": {
+              "enum": [
+                "director.status",
+                "director.enroll",
+                "director.unlock",
+                "director.lock"
+              ]
+            },
+            "result": {
+              "$ref": "#/$defs/directorStatusResult"
+            }
+          }
+        },
+        {
+          "required": ["method", "result"],
+          "properties": {
+            "method": {
+              "enum": [
+                "director.review.inspect",
+                "director.review.prepare",
+                "director.review.approve",
+                "director.review.deny",
+                "director.review.revoke"
+              ]
+            },
+            "result": {
+              "$ref": "#/$defs/directorReviewResult"
+            }
+          }
+        }
+      ]
+    },
+    "errorEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol",
+        "protocol_version",
+        "kind",
+        "request_id",
+        "error"
+      ],
+      "properties": {
+        "protocol": {
+          "const": "rpg-world-forge.studio_protocol"
+        },
+        "protocol_version": {
+          "const": 6
+        },
+        "kind": {
+          "const": "error"
+        },
+        "request_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/entityId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "enum": [
+                "invalid_request",
+                "not_found",
+                "conflict",
+                "invalid_state",
+                "internal_error",
+                "recovery_ambiguous",
+                "recovery_failed"
+              ]
+            },
+            "message": {
+              "type": "string",
+              "minLength": 1
+            },
+            "details": {
+              "type": "object"
+            }
+          }
+        }
+      }
+    }
+  }
+}

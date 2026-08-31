@@ -44,7 +44,11 @@ afterEach(() => {
 
 describe("App creation navigation authority", () => {
   it("labels every generic workspace by its actual project kind", async () => {
-    const { api } = navigationApi(["game", "asset_library", "universe_library"]);
+    const { api, getDirectorStatus } = navigationApi([
+      "game",
+      "asset_library",
+      "universe_library",
+    ]);
     Object.defineProperty(window, "forgeStudio", {
       configurable: true,
       value: api,
@@ -62,10 +66,11 @@ describe("App creation navigation authority", () => {
         name: /creation_universe_library.*Universe library/iu,
       }),
     ).toBeInTheDocument();
+    expect(getDirectorStatus).toHaveBeenCalledTimes(1);
   });
 
   it("never offers discard navigation for durable output or unresolved native requests", async () => {
-    const { api, getWorkspaceOverview } = navigationApi();
+    const { api, getDirectorStatus, getWorkspaceOverview } = navigationApi();
     Object.defineProperty(window, "forgeStudio", {
       configurable: true,
       value: api,
@@ -102,6 +107,7 @@ describe("App creation navigation authority", () => {
     ).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Discard draft" })).not.toBeInTheDocument();
     expect(getWorkspaceOverview).not.toHaveBeenCalled();
+    expect(getDirectorStatus).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -111,6 +117,7 @@ function navigationApi(
   ],
 ): {
   api: ForgeStudioApi;
+  getDirectorStatus: ReturnType<typeof vi.fn>;
   getWorkspaceOverview: ReturnType<typeof vi.fn>;
 } {
   const response = (version: number, method: string, result: Record<string, unknown>) => ({
@@ -124,6 +131,18 @@ function navigationApi(
       result,
     },
   });
+  const unavailable = vi.fn().mockResolvedValue({
+    ok: false,
+    error: { code: "service_unavailable", message: "Unavailable in fixture" },
+  });
+  const getDirectorStatus = vi.fn().mockResolvedValue({
+    ok: true,
+    value: {
+      status: { credentialId: "director_local", state: "locked" },
+      selectedReview: null,
+      snapshot: null,
+    },
+  });
   const getWorkspaceOverview = vi.fn();
   const api = {
     initialize: vi.fn().mockResolvedValue(response(1, "service.initialize", {})),
@@ -135,6 +154,14 @@ function navigationApi(
       ok: true,
       value: { state: "ready", message: "ready", pid: 2 },
     }),
+    getDirectorStatus,
+    enrollDirector: unavailable,
+    unlockDirector: unavailable,
+    lockDirector: unavailable,
+    selectDirectorReview: unavailable,
+    prepareSelectedDirectorReview: unavailable,
+    requestSelectedDirectorDecision: unavailable,
+    revokeSelectedDirectorDecision: unavailable,
     onEvent: vi.fn().mockReturnValue(() => undefined),
     onCodexEvent: vi.fn().mockReturnValue(() => undefined),
     listWorkspaces: vi.fn().mockResolvedValue(
@@ -170,5 +197,5 @@ function navigationApi(
     ),
     getWorkspaceOverview,
   } as unknown as ForgeStudioApi;
-  return { api, getWorkspaceOverview };
+  return { api, getDirectorStatus, getWorkspaceOverview };
 }

@@ -97,9 +97,20 @@ import type {
     WorldForgeStudioCreationJobV12 as StudioCreationJobV12,
     WorldForgeStudioCreationOutputGrantV6 as StudioCreationOutputGrantV6,
 } from "../generated/studio-protocol-v5";
+import type {
+    ApprovalAuthoritySnapshot as StudioDirectorSnapshot,
+    DirectorStatus as StudioDirectorWireStatus,
+    ErrorEnvelope as StudioV6ErrorEnvelope,
+    ExecutionApprovalReview as StudioDirectorReview,
+    Method as StudioV6Method,
+    Response as StudioV6ResponseEnvelope,
+} from "../generated/studio-protocol-v6";
 import type { CreationContentMode } from "../generated/creation-content-modes";
 
 export type {
+    StudioDirectorReview,
+    StudioDirectorSnapshot,
+    StudioDirectorWireStatus,
     StudioAssetCatalogEntry,
     StudioAssetCatalogInspectResponse,
     StudioAssetCatalogListResponse,
@@ -190,6 +201,11 @@ export type {
     StudioV5Method,
     StudioV5ResponseEnvelope,
 };
+export type {
+    StudioV6ErrorEnvelope,
+    StudioV6Method,
+    StudioV6ResponseEnvelope,
+};
 
 export type StudioReplyEnvelope = StudioResponseEnvelope | StudioErrorEnvelope;
 export type StudioCreationOutputGrant = StudioCreationOutputGrantV6;
@@ -201,6 +217,8 @@ export type StudioV4ReplyEnvelope =
     StudioV4ResponseEnvelope | StudioV4ErrorEnvelope;
 export type StudioV5ReplyEnvelope =
     StudioV5ResponseEnvelope | StudioV5ErrorEnvelope;
+export type StudioV6ReplyEnvelope =
+    StudioV6ResponseEnvelope | StudioV6ErrorEnvelope;
 export type StudioCreationWorkspaceReplyEnvelope =
     StudioV3ReplyEnvelope | StudioV5ReplyEnvelope;
 export type StudioWorkspaceOverviewReply =
@@ -906,16 +924,54 @@ export interface StudioClientError {
         | "service_unavailable"
         | "timeout"
         | "cancelled"
-        | "internal_error";
+        | "internal_error"
+        | "not_found"
+        | "conflict"
+        | "invalid_state"
+        | "recovery_ambiguous"
+        | "recovery_failed";
     message: string;
 }
 
 export type StudioClientResult<T> =
     { ok: true; value: T } | { ok: false; error: StudioClientError };
 
+export interface StudioDirectorCeremonyState {
+    status: {
+        credentialId: "director_local";
+        state: StudioDirectorWireStatus["state"] | "unknown";
+    };
+    selectedReview: StudioDirectorReview | null;
+    snapshot: StudioDirectorSnapshot | null;
+}
+
 export interface ForgeStudioApi {
     initialize(): Promise<StudioClientResult<StudioReplyEnvelope>>;
     getServiceStatus(): Promise<StudioClientResult<ForgeServiceStatus>>;
+    getDirectorStatus(): Promise<
+        StudioClientResult<StudioDirectorCeremonyState>
+    >;
+    enrollDirector(): Promise<
+        StudioClientResult<StudioDirectorCeremonyState>
+    >;
+    unlockDirector(): Promise<
+        StudioClientResult<StudioDirectorCeremonyState>
+    >;
+    lockDirector(): Promise<
+        StudioClientResult<StudioDirectorCeremonyState>
+    >;
+    selectDirectorReview(): Promise<
+        StudioClientResult<StudioDirectorCeremonyState>
+    >;
+    prepareSelectedDirectorReview(): Promise<
+        StudioClientResult<StudioDirectorCeremonyState>
+    >;
+    requestSelectedDirectorDecision(): Promise<
+        StudioClientResult<StudioDirectorCeremonyState>
+    >;
+    revokeSelectedDirectorDecision(): Promise<
+        StudioClientResult<StudioDirectorCeremonyState>
+    >;
     listWorkspaces(): Promise<StudioClientResult<StudioReplyEnvelope>>;
     listEvents(
         params?: EventsListParams,
@@ -1361,6 +1417,19 @@ export const STUDIO_V5_METHODS: ReadonlySet<StudioV5Method> = new Set([
     "creation_workspace.create",
 ]);
 
+export const STUDIO_V6_METHODS: ReadonlySet<StudioV6Method> = new Set([
+    "service.initialize",
+    "director.status",
+    "director.enroll",
+    "director.unlock",
+    "director.lock",
+    "director.review.inspect",
+    "director.review.prepare",
+    "director.review.approve",
+    "director.review.deny",
+    "director.review.revoke",
+]);
+
 export const STUDIO_READ_METHODS: ReadonlySet<StudioReadMethod> = new Set([
     "workspace.list",
     "events.list",
@@ -1371,6 +1440,16 @@ export const STUDIO_READ_METHODS: ReadonlySet<StudioReadMethod> = new Set([
 export const IPC_CHANNELS = Object.freeze({
     initialize: "studio:initialize",
     status: "studio:get-service-status",
+    getDirectorStatus: "studio:get-director-status",
+    enrollDirector: "studio:enroll-director",
+    unlockDirector: "studio:unlock-director",
+    lockDirector: "studio:lock-director",
+    selectDirectorReview: "studio:select-director-review",
+    prepareSelectedDirectorReview: "studio:prepare-selected-director-review",
+    requestSelectedDirectorDecision:
+        "studio:request-selected-director-decision",
+    revokeSelectedDirectorDecision:
+        "studio:revoke-selected-director-decision",
     listWorkspaces: "studio:list-workspaces",
     listEvents: "studio:list-events",
     listChangesets: "studio:list-changesets",

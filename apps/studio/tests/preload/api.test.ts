@@ -39,6 +39,7 @@ describe("preload API", () => {
             "createCreationProject",
             "createExternalGrant",
             "diffCreationChangeset",
+            "enrollDirector",
             "extractCreationGamePackage",
             "extractGamePackage",
             "forkCodexThread",
@@ -49,6 +50,7 @@ describe("preload API", () => {
             "getCreationChangeset",
             "getCreationJob",
             "getCreationWorkflow",
+            "getDirectorStatus",
             "getExternalGrant",
             "getExternalJob",
             "getServiceStatus",
@@ -73,6 +75,7 @@ describe("preload API", () => {
             "listJobs",
             "listSourceDocuments",
             "listWorkspaces",
+            "lockDirector",
             "materializeCreationGame",
             "materializeGame",
             "onCodexEvent",
@@ -82,6 +85,7 @@ describe("preload API", () => {
             "openCreationWorkspace",
             "packageCreationGame",
             "packageGame",
+            "prepareSelectedDirectorReview",
             "processCreationAsset",
             "readAssetPreviewChunk",
             "readChangesetDiff",
@@ -99,10 +103,12 @@ describe("preload API", () => {
             "reopenCreationPhase",
             "requestCreationJobCancel",
             "requestCreationJobRecovery",
+            "requestSelectedDirectorDecision",
             "resumeCodexThread",
             "reviewCreationAssetQa",
             "revokeCreationAssetpackOutput",
             "revokeExternalGrant",
+            "revokeSelectedDirectorDecision",
             "runHeadless",
             "runReplay",
             "sealCreationAssetRelease",
@@ -113,6 +119,7 @@ describe("preload API", () => {
             "selectCreationMaterializationBundleOutput",
             "selectCreationRuntimeBundleOutput",
             "selectCreationStandaloneGameOutput",
+            "selectDirectorReview",
             "stageCreationModuleChange",
             "stageCreationProfile",
             "stageSourceDocument",
@@ -120,6 +127,7 @@ describe("preload API", () => {
             "startCodexThread",
             "startCodexTurn",
             "steerCodexTurn",
+            "unlockDirector",
             "validateAssetReceipt",
             "validateCreationPhase",
             "validateWorld",
@@ -134,6 +142,14 @@ describe("preload API", () => {
         await api.initialize();
         await api.getCreationAuthorityCapabilities!();
         await api.getServiceStatus();
+        await api.getDirectorStatus();
+        await api.enrollDirector();
+        await api.unlockDirector();
+        await api.lockDirector();
+        await api.selectDirectorReview();
+        await api.prepareSelectedDirectorReview();
+        await api.requestSelectedDirectorDecision();
+        await api.revokeSelectedDirectorDecision();
         await api.listWorkspaces();
         await api.listEvents({ workspace_id: "workspace_01", limit: 10 });
         await api.listChangesets({ status: "staged" });
@@ -234,6 +250,14 @@ describe("preload API", () => {
             [IPC_CHANNELS.initialize],
             [IPC_CHANNELS.getCreationAuthorityCapabilities],
             [IPC_CHANNELS.status],
+            [IPC_CHANNELS.getDirectorStatus],
+            [IPC_CHANNELS.enrollDirector],
+            [IPC_CHANNELS.unlockDirector],
+            [IPC_CHANNELS.lockDirector],
+            [IPC_CHANNELS.selectDirectorReview],
+            [IPC_CHANNELS.prepareSelectedDirectorReview],
+            [IPC_CHANNELS.requestSelectedDirectorDecision],
+            [IPC_CHANNELS.revokeSelectedDirectorDecision],
             [IPC_CHANNELS.listWorkspaces],
             [
                 IPC_CHANNELS.listEvents,

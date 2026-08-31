@@ -64,6 +64,7 @@ STUDIO_PROTOCOL_V2 = 2
 STUDIO_PROTOCOL_V3 = 3
 STUDIO_PROTOCOL_V4 = 4
 STUDIO_PROTOCOL_V5 = 5
+STUDIO_PROTOCOL_V6 = 6
 MAX_CHANGE_FILE_BYTES = 16 * 1024 * 1024
 MAX_CHANGESET_BYTES = 64 * 1024 * 1024
 MAX_CHANGESET_OPERATIONS = 256
@@ -75,6 +76,10 @@ ENTITY_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,127}$")
 OPERATION_PATTERN = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
 PUBLIC_TOKEN_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_.:-]{0,127}$")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+HARNESS_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
+HARNESS_TOOL_ID_PATTERN = re.compile(
+    r"^[a-z][a-z0-9_]{1,63}(?:\.[a-z][a-z0-9_]{1,63})+$"
+)
 ASSET_ENTRY_ID_PATTERN = re.compile(r"^asset_[0-9a-f]{64}$")
 ASSET_PREVIEW_HANDLE_PATTERN = re.compile(r"^[A-Za-z0-9_-]{43}$")
 TIMESTAMP_PATTERN = re.compile(
@@ -304,6 +309,20 @@ METHODS_V4 = frozenset(
     }
 )
 METHODS_V5 = METHODS_V4 | {"creation_workspace.create"}
+METHODS_V6 = frozenset(
+    {
+        "service.initialize",
+        "director.status",
+        "director.enroll",
+        "director.unlock",
+        "director.lock",
+        "director.review.inspect",
+        "director.review.prepare",
+        "director.review.approve",
+        "director.review.deny",
+        "director.review.revoke",
+    }
+)
 MAX_CREATION_ARTIFACT_PAGE = 64
 MAX_CREATION_OUTPUT_GRANT_PAGE = 8
 MAX_CREATION_ARTIFACTS = 4096
@@ -5899,6 +5918,336 @@ def _validate_creation_authority_response_v5(
         raise StudioContractError(f"{context}/capabilities does not describe Studio v5")
 
 
+def _validate_director_review(value: object, context: str) -> dict[str, Any]:
+    review = _object(value, context)
+    fields = {
+        "format",
+        "format_version",
+        "approval_id",
+        "execution_id",
+        "activation_hash",
+        "grant_hash",
+        "private_input_hash",
+        "runtime_id",
+        "runtime_revision",
+        "runtime_content_hash",
+        "max_turns",
+        "max_tool_calls",
+        "max_total_tokens",
+        "max_cost_minor_units",
+        "currency",
+        "max_duration_ms",
+        "deadline_ms",
+        "tool_candidates",
+        "generation",
+        "content_hash",
+    }
+    _closed(review, fields, context)
+    if (
+        review["format"] != "world-forge.private.execution_approval_review"
+        or review["format_version"] != 1
+        or review["generation"] != 0
+    ):
+        raise StudioContractError(f"{context} does not describe an approval review v1")
+    for field in ("approval_id", "execution_id", "runtime_id"):
+        _identifier(review[field], f"{context}/{field}", HARNESS_ID_PATTERN)
+    for field in (
+        "activation_hash",
+        "grant_hash",
+        "private_input_hash",
+        "runtime_content_hash",
+        "content_hash",
+    ):
+        _sha256(review[field], f"{context}/{field}")
+    _integer(
+        review["runtime_revision"],
+        f"{context}/runtime_revision",
+        minimum=1,
+        maximum=9_007_199_254_740_991,
+    )
+    _integer(review["max_turns"], f"{context}/max_turns", minimum=1, maximum=64)
+    _integer(review["max_tool_calls"], f"{context}/max_tool_calls", maximum=128)
+    _integer(
+        review["max_total_tokens"],
+        f"{context}/max_total_tokens",
+        maximum=9_007_199_254_740_991,
+    )
+    _integer(review["max_duration_ms"], f"{context}/max_duration_ms", maximum=9_007_199_254_740_991)
+    for field in ("max_cost_minor_units", "deadline_ms"):
+        if review[field] is not None:
+            _integer(review[field], f"{context}/{field}", maximum=9_007_199_254_740_991)
+    currency = review["currency"]
+    if (review["max_cost_minor_units"] is None) != (currency is None):
+        raise StudioContractError(f"{context}/currency and cost ceiling must be paired")
+    if currency is not None and (
+        type(currency) is not str or re.fullmatch(r"[A-Z]{3}", currency) is None
+    ):
+        raise StudioContractError(f"{context}/currency is invalid")
+    candidates = review["tool_candidates"]
+    if not isinstance(candidates, list) or len(candidates) > 128:
+        raise StudioContractError(f"{context}/tool_candidates is invalid")
+    seen: set[str] = set()
+    for index, raw in enumerate(candidates):
+        item_context = f"{context}/tool_candidates/{index}"
+        item = _object(raw, item_context)
+        _closed(item, {"tool_id", "descriptor_hash"}, item_context)
+        tool_id = _identifier(item["tool_id"], f"{item_context}/tool_id", HARNESS_TOOL_ID_PATTERN)
+        if len(tool_id) > 1024 or tool_id in seen:
+            raise StudioContractError(f"{context}/tool_candidates must contain unique bounded IDs")
+        seen.add(tool_id)
+        _sha256(item["descriptor_hash"], f"{item_context}/descriptor_hash")
+    return review
+
+
+def _validate_director_decision(value: object, context: str) -> dict[str, Any]:
+    decision = _object(value, context)
+    _closed(
+        decision,
+        {
+            "format",
+            "format_version",
+            "approval_id",
+            "execution_id",
+            "review_hash",
+            "generation",
+            "reviewer_id",
+            "outcome",
+            "approved_tool_ids",
+            "expires_at_ms",
+            "content_hash",
+        },
+        context,
+    )
+    if (
+        decision["format"] != "world-forge.private.execution_approval_decision"
+        or decision["format_version"] != 1
+        or decision["generation"] != 1
+        or decision["reviewer_id"] != "director_local"
+        or decision["outcome"] not in {"approved", "denied"}
+    ):
+        raise StudioContractError(f"{context} does not describe a Director decision v1")
+    for field in ("approval_id", "execution_id"):
+        _identifier(decision[field], f"{context}/{field}", HARNESS_ID_PATTERN)
+    for field in ("review_hash", "content_hash"):
+        _sha256(decision[field], f"{context}/{field}")
+    approved = decision["approved_tool_ids"]
+    if not isinstance(approved, list) or len(approved) > 128:
+        raise StudioContractError(f"{context}/approved_tool_ids is invalid")
+    checked: list[str] = []
+    for index, tool_id in enumerate(approved):
+        checked.append(
+            _identifier(tool_id, f"{context}/approved_tool_ids/{index}", HARNESS_TOOL_ID_PATTERN)
+        )
+    if len(set(checked)) != len(checked):
+        raise StudioContractError(f"{context}/approved_tool_ids must be unique")
+    expires_at = decision["expires_at_ms"]
+    if decision["outcome"] == "approved":
+        _integer(expires_at, f"{context}/expires_at_ms", maximum=9_007_199_254_740_991)
+    elif approved or expires_at is not None:
+        raise StudioContractError(f"{context} denied decision carries approval authority")
+    return decision
+
+
+def _validate_director_snapshot(value: object, context: str) -> None:
+    snapshot = _object(value, context)
+    _closed(
+        snapshot,
+        {
+            "prepared_review",
+            "current_decision",
+            "generation",
+            "review_hash",
+            "decision_hash",
+            "state",
+        },
+        context,
+    )
+    state = snapshot["state"]
+    if state not in {"missing", "prepared", "approved", "denied", "revoked", "stale"}:
+        raise StudioContractError(f"{context}/state is invalid")
+    review_hash = _sha256(snapshot["review_hash"], f"{context}/review_hash")
+    decision_hash = _sha256(snapshot["decision_hash"], f"{context}/decision_hash", nullable=True)
+    generation = _integer(snapshot["generation"], f"{context}/generation", maximum=2)
+    review = None
+    if snapshot["prepared_review"] is not None:
+        review = _validate_director_review(
+            snapshot["prepared_review"], f"{context}/prepared_review"
+        )
+        if review["content_hash"] != review_hash:
+            raise StudioContractError(f"{context}/review_hash does not match prepared review")
+    decision = None
+    if snapshot["current_decision"] is not None:
+        decision = _validate_director_decision(
+            snapshot["current_decision"], f"{context}/current_decision"
+        )
+        if decision["content_hash"] != decision_hash or decision["review_hash"] != review_hash:
+            raise StudioContractError(f"{context}/decision hashes are inconsistent")
+        if review is None or (
+            decision["approval_id"] != review["approval_id"]
+            or decision["execution_id"] != review["execution_id"]
+        ):
+            raise StudioContractError(f"{context}/decision identity is inconsistent")
+        if decision["outcome"] == "approved":
+            candidate_ids = [item["tool_id"] for item in review["tool_candidates"]]
+            approved_ids = decision["approved_tool_ids"]
+            if approved_ids != [
+                tool_id for tool_id in candidate_ids if tool_id in approved_ids
+            ]:
+                raise StudioContractError(
+                    f"{context}/current_decision approved tools are not a canonical candidate subset"
+                )
+    if state in {"missing", "stale"}:
+        coherent = review is None and decision is None and generation == 0 and decision_hash is None
+    elif state == "prepared":
+        coherent = (
+            review is not None
+            and decision is None
+            and generation == 0
+            and decision_hash is None
+        )
+    elif state in {"approved", "denied"}:
+        coherent = (
+            review is not None
+            and decision is not None
+            and generation == 1
+            and decision["outcome"] == state
+        )
+    else:
+        coherent = review is not None and decision is not None and generation == 2
+    if not coherent:
+        raise StudioContractError(f"{context} is not a coherent authority snapshot")
+
+
+def _validate_director_status(value: object, context: str) -> None:
+    status = _object(value, context)
+    _closed(status, {"credential_id", "state"}, context)
+    if status["credential_id"] != "director_local" or status["state"] not in {
+        "not_enrolled",
+        "locked",
+        "unlocked",
+    }:
+        raise StudioContractError(f"{context} is not a Director credential status")
+
+
+def _validate_director_request(method: str, value: object, context: str) -> None:
+    params = _object(value, context)
+    if method in {"service.initialize", "director.status", "director.lock"}:
+        _closed(params, set(), context)
+        return
+    if method in {"director.enroll", "director.unlock"}:
+        _closed(params, {"passphrase"}, context)
+        passphrase = params["passphrase"]
+        if type(passphrase) is not str:
+            raise StudioContractError(
+                f"{context}/passphrase must contain 16 to 1024 UTF-8 bytes"
+            )
+        try:
+            byte_length = len(passphrase.encode("utf-8", errors="strict"))
+        except UnicodeEncodeError as exc:
+            raise StudioContractError(
+                f"{context}/passphrase must contain only Unicode scalar values"
+            ) from exc
+        if not 16 <= byte_length <= 1024:
+            raise StudioContractError(
+                f"{context}/passphrase must contain 16 to 1024 UTF-8 bytes"
+            )
+        return
+    review = _validate_director_review(params.get("review"), f"{context}/review")
+    if method == "director.review.inspect":
+        _closed(params, {"review"}, context)
+        return
+    if method == "director.review.prepare":
+        _closed(params, {"review", "expected_generation"}, context)
+        if params["expected_generation"] != 0:
+            raise StudioContractError(f"{context}/expected_generation must be 0")
+        return
+    if method == "director.review.approve":
+        _closed(
+            params,
+            {
+                "review",
+                "expected_generation",
+                "expected_review_hash",
+                "approved_tool_ids",
+                "expires_at_ms",
+            },
+            context,
+        )
+        if params["expected_generation"] != 0:
+            raise StudioContractError(f"{context}/expected_generation must be 0")
+        expected_hash = _sha256(params["expected_review_hash"], f"{context}/expected_review_hash")
+        if expected_hash != review["content_hash"]:
+            raise StudioContractError(f"{context}/expected_review_hash does not match review")
+        approved = params["approved_tool_ids"]
+        if not isinstance(approved, list) or len(approved) > 128:
+            raise StudioContractError(f"{context}/approved_tool_ids is invalid")
+        candidate_ids = [candidate["tool_id"] for candidate in review["tool_candidates"]]
+        checked = [
+            _identifier(tool_id, f"{context}/approved_tool_ids/{index}", HARNESS_TOOL_ID_PATTERN)
+            for index, tool_id in enumerate(approved)
+        ]
+        if checked != [tool_id for tool_id in candidate_ids if tool_id in checked]:
+            raise StudioContractError(
+                f"{context}/approved_tool_ids is not a canonical candidate subset"
+            )
+        _integer(params["expires_at_ms"], f"{context}/expires_at_ms", maximum=9_007_199_254_740_991)
+        return
+    if method == "director.review.deny":
+        _closed(params, {"review", "expected_generation", "expected_review_hash"}, context)
+        if params["expected_generation"] != 0:
+            raise StudioContractError(f"{context}/expected_generation must be 0")
+        expected_hash = _sha256(params["expected_review_hash"], f"{context}/expected_review_hash")
+        if expected_hash != review["content_hash"]:
+            raise StudioContractError(f"{context}/expected_review_hash does not match review")
+        return
+    _closed(params, {"review", "expected_generation", "expected_decision_hash"}, context)
+    if params["expected_generation"] != 1:
+        raise StudioContractError(f"{context}/expected_generation must be 1")
+    _sha256(params["expected_decision_hash"], f"{context}/expected_decision_hash")
+
+
+def _validate_director_response(method: str, value: object, context: str) -> None:
+    result = _object(value, context)
+    if method == "service.initialize":
+        _closed(
+            result,
+            {
+                "service",
+                "service_version",
+                "protocol",
+                "protocol_version",
+                "methods",
+                "capabilities",
+            },
+            context,
+        )
+        if (
+            result["service"] != "world-forge.studio"
+            or result["service_version"] != STUDIO_PROTOCOL_V6
+            or result["protocol"] != PROTOCOL_FORMAT
+            or result["protocol_version"] != STUDIO_PROTOCOL_V6
+            or result["methods"] != sorted(METHODS_V6)
+        ):
+            raise StudioContractError(f"{context} does not describe Studio protocol v6")
+        capabilities = _object(result["capabilities"], f"{context}/capabilities")
+        expected = {
+            "authenticated_director_decisions": True,
+            "harness_hydration": False,
+            "civil_identity": False,
+            "secure_zeroization": False,
+        }
+        _closed(capabilities, set(expected), f"{context}/capabilities")
+        if capabilities != expected:
+            raise StudioContractError(f"{context}/capabilities does not describe Studio v6")
+        return
+    if method in {"director.status", "director.enroll", "director.unlock", "director.lock"}:
+        _closed(result, {"status"}, context)
+        _validate_director_status(result["status"], f"{context}/status")
+        return
+    _closed(result, {"snapshot"}, context)
+    _validate_director_snapshot(result["snapshot"], f"{context}/snapshot")
+
+
 def validate_studio_protocol_envelope(value: object) -> dict[str, Any]:
     envelope = _object(value, "envelope")
     common = {"protocol", "protocol_version", "kind", "request_id"}
@@ -5925,9 +6274,12 @@ def validate_studio_protocol_envelope(value: object) -> dict[str, Any]:
             STUDIO_PROTOCOL_V3,
             STUDIO_PROTOCOL_V4,
             STUDIO_PROTOCOL_V5,
+            STUDIO_PROTOCOL_V6,
         }
     ):
-        raise StudioContractError("envelope/protocol_version must be 1, 2, 3, 4 or 5")
+        raise StudioContractError("envelope/protocol_version must be 1, 2, 3, 4, 5 or 6")
+    if protocol_version == STUDIO_PROTOCOL_V6 and kind == "event":
+        raise StudioContractError("protocol v6 does not define event envelopes")
     request_id = envelope["request_id"]
     if kind == "event":
         if request_id is not None:
@@ -5935,7 +6287,10 @@ def validate_studio_protocol_envelope(value: object) -> dict[str, Any]:
     elif kind == "error" and request_id is None:
         pass
     else:
-        _string(request_id, "envelope/request_id")
+        if protocol_version == STUDIO_PROTOCOL_V6:
+            _identifier(request_id, "envelope/request_id", ENTITY_ID_PATTERN)
+        else:
+            _string(request_id, "envelope/request_id")
     if kind == "request":
         method = envelope["method"]
         allowed_methods = (
@@ -5948,17 +6303,22 @@ def validate_studio_protocol_envelope(value: object) -> dict[str, Any]:
             else METHODS_V4
             if protocol_version == STUDIO_PROTOCOL_V4
             else METHODS_V5
+            if protocol_version == STUDIO_PROTOCOL_V5
+            else METHODS_V6
         )
         if not isinstance(method, str) or method not in allowed_methods:
             if (
                 isinstance(method, str)
-                and method in METHODS | EXTERNAL_METHODS | METHODS_V3 | METHODS_V4 | METHODS_V5
+                and method
+                in METHODS | EXTERNAL_METHODS | METHODS_V3 | METHODS_V4 | METHODS_V5 | METHODS_V6
             ):
                 raise StudioContractError(
                     f"envelope/method {method} is not available in protocol v{protocol_version}"
                 )
             raise StudioContractError("envelope/method is unknown")
-        if protocol_version == STUDIO_PROTOCOL_V5:
+        if protocol_version == STUDIO_PROTOCOL_V6:
+            _validate_director_request(method, envelope["params"], "envelope/params")
+        elif protocol_version == STUDIO_PROTOCOL_V5:
             if method == "service.initialize":
                 params = _object(envelope["params"], "envelope/params")
                 _closed(params, set(), "envelope/params")
@@ -6220,17 +6580,22 @@ def validate_studio_protocol_envelope(value: object) -> dict[str, Any]:
             else METHODS_V4
             if protocol_version == STUDIO_PROTOCOL_V4
             else METHODS_V5
+            if protocol_version == STUDIO_PROTOCOL_V5
+            else METHODS_V6
         )
         if not isinstance(method, str) or method not in allowed_methods:
             if (
                 isinstance(method, str)
-                and method in METHODS | EXTERNAL_METHODS | METHODS_V3 | METHODS_V4 | METHODS_V5
+                and method
+                in METHODS | EXTERNAL_METHODS | METHODS_V3 | METHODS_V4 | METHODS_V5 | METHODS_V6
             ):
                 raise StudioContractError(
                     f"envelope/method {method} is not available in protocol v{protocol_version}"
                 )
             raise StudioContractError("envelope/method is unknown")
-        if protocol_version == STUDIO_PROTOCOL_V5:
+        if protocol_version == STUDIO_PROTOCOL_V6:
+            _validate_director_response(method, envelope["result"], "envelope/result")
+        elif protocol_version == STUDIO_PROTOCOL_V5:
             _validate_creation_authority_response_v5(
                 method,
                 envelope["result"],

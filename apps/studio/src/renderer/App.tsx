@@ -26,6 +26,7 @@ import { AssetsCockpit } from "./AssetsCockpit";
 import { ChangesetReviewPanel } from "./ChangesetReviewPanel";
 import { CreationProjectEntry } from "./CreationProjectEntry";
 import { CreationWorkspace } from "./CreationWorkspace";
+import { DirectorControl } from "./DirectorControl";
 import { GameCockpit } from "./GameCockpit";
 import { NeutralMapCanvas } from "./NeutralMapCanvas";
 import {
@@ -1307,6 +1308,11 @@ export function App() {
           ) : null}
         </div>
         </header>
+
+      <DirectorControl
+        api={window.forgeStudio}
+        serviceReady={status.state === "ready"}
+      />
 
       {errors.length > 0 ? (
         <section className="error-banner" role="alert" aria-label="Studio errors">

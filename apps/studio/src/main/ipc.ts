@@ -63,6 +63,10 @@ import { CodexTransportError } from "./codex-supervisor";
 import { noFollowOpenFlagForPlatform } from "./no-follow-open-flag";
 import type { ForgeServiceClient } from "./forge-service";
 import {
+    StudioDirectorDomainError,
+    type StudioDirectorAuthority,
+} from "./director-authority";
+import {
     StudioRequestCancelledError,
     StudioProtocolError,
     StudioRequestTimeoutError,
@@ -280,6 +284,7 @@ export interface StudioAuthorityModalClient {
 
 export interface StudioIpcOptions {
     authorityModal?: StudioAuthorityModalClient;
+    directorAuthority?: StudioDirectorAuthority;
 }
 
 const DEFAULT_CREATION_PROJECT_SELECTION: StudioCreationProjectSelectionClient =
@@ -297,6 +302,21 @@ const DEFAULT_AUTHORITY_MODAL: StudioAuthorityModalClient = {
     },
 };
 
+const DEFAULT_DIRECTOR_AUTHORITY = {
+    getStatus: rejectUnavailableDirector,
+    enroll: rejectUnavailableDirector,
+    unlock: rejectUnavailableDirector,
+    lock: rejectUnavailableDirector,
+    selectReview: rejectUnavailableDirector,
+    prepareSelectedReview: rejectUnavailableDirector,
+    requestSelectedDecision: rejectUnavailableDirector,
+    revokeSelectedDecision: rejectUnavailableDirector,
+} as unknown as StudioDirectorAuthority;
+
+function rejectUnavailableDirector(): Promise<never> {
+    return Promise.reject(new Error("Studio Director ceremony is unavailable"));
+}
+
 export function registerStudioIpc(
     ipcMain: IpcMain,
     window: BrowserWindow,
@@ -310,6 +330,8 @@ export function registerStudioIpc(
         isTrustedStudioSender(event, window.webContents);
     const assetPreviews = new Map<string, AssetPreviewState>();
     const authorityModal = options.authorityModal ?? DEFAULT_AUTHORITY_MODAL;
+    const directorAuthority =
+        options.directorAuthority ?? DEFAULT_DIRECTOR_AUTHORITY;
 
     ipcMain.handle(
         IPC_CHANNELS.initialize,
@@ -329,6 +351,46 @@ export function registerStudioIpc(
         );
         return invalid ?? success(service.status);
     });
+
+    const registerDirectorOperation = (
+        channel: string,
+        operation: () => Promise<unknown>,
+    ): void => {
+        ipcMain.handle(channel, async (event, ...args: unknown[]) => {
+            const invalid = rejectUntrustedOrUnexpectedArguments(
+                trusted(event),
+                args,
+            );
+            return invalid ?? (await captureDirector(operation));
+        });
+    };
+    registerDirectorOperation(IPC_CHANNELS.getDirectorStatus, () =>
+        directorAuthority.getStatus(),
+    );
+    registerDirectorOperation(IPC_CHANNELS.enrollDirector, () =>
+        directorAuthority.enroll(window),
+    );
+    registerDirectorOperation(IPC_CHANNELS.unlockDirector, () =>
+        directorAuthority.unlock(window),
+    );
+    registerDirectorOperation(IPC_CHANNELS.lockDirector, () =>
+        directorAuthority.lock(),
+    );
+    registerDirectorOperation(IPC_CHANNELS.selectDirectorReview, () =>
+        directorAuthority.selectReview(window),
+    );
+    registerDirectorOperation(
+        IPC_CHANNELS.prepareSelectedDirectorReview,
+        () => directorAuthority.prepareSelectedReview(),
+    );
+    registerDirectorOperation(
+        IPC_CHANNELS.requestSelectedDirectorDecision,
+        () => directorAuthority.requestSelectedDecision(window),
+    );
+    registerDirectorOperation(
+        IPC_CHANNELS.revokeSelectedDirectorDecision,
+        () => directorAuthority.revokeSelectedDecision(),
+    );
 
     ipcMain.handle(
         IPC_CHANNELS.listWorkspaces,
@@ -2584,6 +2646,14 @@ export function registerStudioIpc(
         unsubscribeCodex();
         ipcMain.removeHandler(IPC_CHANNELS.initialize);
         ipcMain.removeHandler(IPC_CHANNELS.status);
+        ipcMain.removeHandler(IPC_CHANNELS.getDirectorStatus);
+        ipcMain.removeHandler(IPC_CHANNELS.enrollDirector);
+        ipcMain.removeHandler(IPC_CHANNELS.unlockDirector);
+        ipcMain.removeHandler(IPC_CHANNELS.lockDirector);
+        ipcMain.removeHandler(IPC_CHANNELS.selectDirectorReview);
+        ipcMain.removeHandler(IPC_CHANNELS.prepareSelectedDirectorReview);
+        ipcMain.removeHandler(IPC_CHANNELS.requestSelectedDirectorDecision);
+        ipcMain.removeHandler(IPC_CHANNELS.revokeSelectedDirectorDecision);
         ipcMain.removeHandler(IPC_CHANNELS.listWorkspaces);
         ipcMain.removeHandler(IPC_CHANNELS.listEvents);
         ipcMain.removeHandler(IPC_CHANNELS.listChangesets);
@@ -9332,6 +9402,25 @@ async function capture<T>(
         return success(await operation());
     } catch (error) {
         return { ok: false, error: classifyError(error) };
+    }
+}
+
+async function captureDirector<T>(
+    operation: () => Promise<T>,
+): Promise<StudioClientResult<T>> {
+    try {
+        return success(await operation());
+    } catch (error) {
+        return {
+            ok: false,
+            error:
+                error instanceof StudioDirectorDomainError
+                    ? { code: error.code, message: error.message }
+                    : {
+                          code: "internal_error",
+                          message: "Director operation did not complete.",
+                      },
+        };
     }
 }
 

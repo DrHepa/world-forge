@@ -23,6 +23,7 @@ import protocolV2Schema from "../../../../schemas/studio-protocol-v2.schema.json
 import protocolV3Schema from "../../../../schemas/studio-protocol-v3.schema.json";
 import protocolV4Schema from "../../../../schemas/studio-protocol-v4.schema.json";
 import protocolV5Schema from "../../../../schemas/studio-protocol-v5.schema.json";
+import protocolV6Schema from "../../../../schemas/studio-protocol-v6.schema.json";
 import type {
     Error as StudioErrorEnvelope,
     Event as StudioEventEnvelope,
@@ -49,6 +50,12 @@ import type {
     Request as StudioV5RequestEnvelope,
     Response as StudioV5ResponseEnvelope,
 } from "../generated/studio-protocol-v5";
+import type {
+    ErrorEnvelope as StudioV6ErrorEnvelope,
+    Request as StudioV6RequestEnvelope,
+    Response as StudioV6ResponseEnvelope,
+} from "../generated/studio-protocol-v6";
+import { hasOnlyUnicodeScalarValues } from "../shared/unicode";
 import { hasDistinctStudioV12HeadlessAuthorityIdentities } from "../shared/studio-api";
 
 export type StudioEnvelope =
@@ -67,7 +74,10 @@ export type StudioEnvelope =
     | StudioV4ErrorEnvelope
     | StudioV5RequestEnvelope
     | StudioV5ResponseEnvelope
-    | StudioV5ErrorEnvelope;
+    | StudioV5ErrorEnvelope
+    | StudioV6RequestEnvelope
+    | StudioV6ResponseEnvelope
+    | StudioV6ErrorEnvelope;
 
 const WINDOWS_RESERVED_NAMES = new Set([
     "aux",
@@ -92,10 +102,21 @@ ajv.addKeyword({
         !enabled || isPortableRelativePath(value),
 });
 ajv.addKeyword({
+    keyword: "x-worldforge-min-utf8-bytes",
+    type: "string",
+    schemaType: "number",
+    metaSchema: { type: "integer", minimum: 0 },
+    validate: (limit: number, value: string) =>
+        hasOnlyUnicodeScalarValues(value) &&
+        Buffer.byteLength(value, "utf8") >= limit,
+});
+ajv.addKeyword({
     keyword: "x-worldforge-max-utf8-bytes",
     type: "string",
     schemaType: "number",
+    metaSchema: { type: "integer", minimum: 0 },
     validate: (limit: number, value: string) =>
+        hasOnlyUnicodeScalarValues(value) &&
         Buffer.byteLength(value, "utf8") <= limit,
 });
 ajv.addFormat("rpg-world-forge-portable-source-path", {
@@ -135,6 +156,8 @@ const validateV4: ValidateFunction<StudioEnvelope> =
     ajv.compile(protocolV4Schema);
 const validateV5: ValidateFunction<StudioEnvelope> =
     ajv.compile(protocolV5Schema);
+const validateV6: ValidateFunction<StudioEnvelope> =
+    ajv.compile(protocolV6Schema);
 let lastErrors: ErrorObject[] | null | undefined;
 let lastSemanticError: string | null = null;
 const ASSET_PREVIEW_CHUNK_BYTES = 64 * 1024;
@@ -214,8 +237,10 @@ export function validateStudioEnvelope(
 ): value is StudioEnvelope {
     lastSemanticError = null;
     const validator =
-        isRecord(value) && value.protocol_version === 5
-            ? validateV5
+        isRecord(value) && value.protocol_version === 6
+            ? validateV6
+            : isRecord(value) && value.protocol_version === 5
+              ? validateV5
             : isRecord(value) && value.protocol_version === 4
               ? validateV4
               : isRecord(value) && value.protocol_version === 3
@@ -228,6 +253,11 @@ export function validateStudioEnvelope(
         return false;
     }
     lastErrors = null;
+    const directorSemanticError = validateStudioV6DirectorSemantics(value);
+    if (directorSemanticError !== null) {
+        lastSemanticError = directorSemanticError;
+        return false;
+    }
     const semanticError = validateStudioV5HeadlessAuthoritySemantics(value);
     if (semanticError !== null) {
         lastSemanticError = semanticError;
@@ -253,6 +283,163 @@ export function validateStudioEnvelope(
         return false;
     }
     return true;
+}
+
+function validateStudioV6DirectorSemantics(value: unknown): string | null {
+    if (!isRecord(value) || value.protocol_version !== 6) {
+        return null;
+    }
+    if (value.kind === "request" && isRecord(value.params)) {
+        const review = value.params.review;
+        if (
+            isRecord(review) &&
+            directorCandidateIds(review.tool_candidates) === null
+        ) {
+            return "v6 Director review candidate IDs are not unique";
+        }
+        if (
+            (value.method === "director.review.approve" ||
+                value.method === "director.review.deny") &&
+            isRecord(review) &&
+            value.params.expected_review_hash !== review.content_hash
+        ) {
+            return "v6 Director expected review hash does not match the selected review";
+        }
+        if (
+            value.method === "director.review.approve" &&
+            isRecord(review) &&
+            Array.isArray(review.tool_candidates) &&
+            Array.isArray(value.params.approved_tool_ids)
+        ) {
+            if (!isCanonicalDirectorCandidateSubset(
+                review.tool_candidates,
+                value.params.approved_tool_ids,
+            )) {
+                return "v6 Director approved tools are not a canonical candidate subset";
+            }
+        }
+        return null;
+    }
+    if (
+        value.kind !== "response" ||
+        !isRecord(value.result) ||
+        typeof value.method !== "string" ||
+        !value.method.startsWith("director.review.") ||
+        !isRecord(value.result.snapshot)
+    ) {
+        return null;
+    }
+    const snapshot = value.result.snapshot;
+    const review = isRecord(snapshot.prepared_review)
+        ? snapshot.prepared_review
+        : null;
+    const decision = isRecord(snapshot.current_decision)
+        ? snapshot.current_decision
+        : null;
+    const state = snapshot.state;
+    const generation = snapshot.generation;
+    const decisionHash = snapshot.decision_hash;
+    const reviewHash = snapshot.review_hash;
+    if (
+        review !== null &&
+        directorCandidateIds(review.tool_candidates) === null
+    ) {
+        return "v6 Director review candidate IDs are not unique";
+    }
+    if (review !== null && review.content_hash !== reviewHash) {
+        return "v6 Director snapshot review hash is inconsistent";
+    }
+    if (
+        decision !== null &&
+        (review === null ||
+            decision.content_hash !== decisionHash ||
+            decision.review_hash !== reviewHash ||
+            decision.approval_id !== review.approval_id ||
+            decision.execution_id !== review.execution_id)
+    ) {
+        return "v6 Director snapshot decision identity is inconsistent";
+    }
+    if (
+        decision !== null &&
+        (decision.outcome === "denied"
+            ? !Array.isArray(decision.approved_tool_ids) ||
+              decision.approved_tool_ids.length !== 0 ||
+              decision.expires_at_ms !== null
+            : decision.outcome === "approved"
+              ? review === null ||
+                !isCanonicalDirectorCandidateSubset(
+                    review.tool_candidates,
+                    decision.approved_tool_ids,
+                )
+              : true)
+    ) {
+        return "v6 Director snapshot decision authority is inconsistent";
+    }
+    const coherent =
+        (state === "missing" || state === "stale")
+            ? review === null &&
+              decision === null &&
+              generation === 0 &&
+              decisionHash === null
+            : state === "prepared"
+              ? review !== null &&
+                decision === null &&
+                generation === 0 &&
+                decisionHash === null
+              : state === "approved" || state === "denied"
+                ? review !== null &&
+                  decision !== null &&
+                  generation === 1 &&
+                  decision.outcome === state
+                : state === "revoked"
+                  ? review !== null && decision !== null && generation === 2
+                  : false;
+    return coherent ? null : "v6 Director authority snapshot is incoherent";
+}
+
+function isCanonicalDirectorCandidateSubset(
+    candidateValue: unknown,
+    approvedValue: unknown,
+): boolean {
+    if (!Array.isArray(approvedValue)) {
+        return false;
+    }
+    const candidates = directorCandidateIds(candidateValue);
+    if (candidates === null) {
+        return false;
+    }
+    if (approvedValue.some((toolId) => typeof toolId !== "string")) {
+        return false;
+    }
+    const approved = approvedValue as string[];
+    return (
+        approved.length === new Set(approved).size &&
+        approved.every((toolId) => candidates.includes(toolId)) &&
+        approved.every(
+            (toolId, index) =>
+                candidates.filter((candidate) => approved.includes(candidate))[index] === toolId,
+        )
+    );
+}
+
+function directorCandidateIds(candidateValue: unknown): string[] | null {
+    if (!Array.isArray(candidateValue)) {
+        return null;
+    }
+    const candidates: string[] = [];
+    const seen = new Set<string>();
+    for (const candidate of candidateValue) {
+        if (
+            !isRecord(candidate) ||
+            typeof candidate.tool_id !== "string" ||
+            seen.has(candidate.tool_id)
+        ) {
+            return null;
+        }
+        seen.add(candidate.tool_id);
+        candidates.push(candidate.tool_id);
+    }
+    return candidates;
 }
 
 export function decodeCanonicalAssetPreviewBase64(

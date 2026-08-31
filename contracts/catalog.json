@@ -3268,6 +3268,31 @@
     {
       "cli_commands": [],
       "docs": [
+        "README.md",
+        "apps/studio/README.md",
+        "docs/ARCHITECTURE.md",
+        "docs/decisions/0048-studio-director-ceremony.md"
+      ],
+      "fixtures": [],
+      "format": "rpg-world-forge.studio_protocol",
+      "id": "studio-protocol-v6",
+      "kind": "json-schema",
+      "m5_phases": [],
+      "python_symbols": [
+        "worldforge.studio.contracts:validate_studio_protocol_envelope",
+        "worldforge.studio.service:serve"
+      ],
+      "schema": "schemas/studio-protocol-v6.schema.json",
+      "tests": [
+        "tests/test_studio_director_control.py",
+        "tests/test_studio_protocol_v6.py"
+      ],
+      "title": "World Forge Studio Director protocol v6",
+      "version": 6
+    },
+    {
+      "cli_commands": [],
+      "docs": [
         "docs/MULTI_GENRE_ARCHITECTURE.md"
       ],
       "fixtures": [

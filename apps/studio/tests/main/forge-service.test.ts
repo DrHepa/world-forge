@@ -92,6 +92,19 @@ describe("ForgeServiceSupervisor", () => {
     expect(service.status.state).toBe("unavailable");
   });
 
+  it("requires the exact authenticated Director v6 handshake before becoming ready", async () => {
+    const service = new ForgeServiceSupervisor({
+      executable: python,
+      args: [fixture, "incompatible-v6"],
+      cwd: path.dirname(fixture),
+      env: { LANG: "C.UTF-8" },
+    });
+    services.push(service);
+
+    await expect(service.initialize()).rejects.toThrow(/Director handshake/u);
+    expect(service.status.state).toBe("unavailable");
+  });
+
   it("finishes stopped when stop races the startup handshake", async () => {
     const service = new ForgeServiceSupervisor({
       executable: python,

@@ -9,11 +9,14 @@ import type {
     StudioV4ReplyEnvelope,
     StudioV5Method,
     StudioV5ReplyEnvelope,
+    StudioV6Method,
+    StudioV6ReplyEnvelope,
 } from "../shared/studio-api";
 import {
     STUDIO_METHODS,
     STUDIO_V4_METHODS,
     STUDIO_V5_METHODS,
+    STUDIO_V6_METHODS,
 } from "../shared/studio-api";
 import type { Method as StudioV2Method } from "../generated/studio-protocol-v2";
 import type { Method as StudioV3Method } from "../generated/studio-protocol-v3";
@@ -44,13 +47,15 @@ type ForgeServiceMethod =
     | StudioV3Method
     | StudioV4Method
     | StudioV5Method
+    | StudioV6Method
     | "workspace.get";
 type ForgeServiceReplyEnvelope =
     | StudioReplyEnvelope
     | StudioV2ReplyEnvelope
     | StudioV3ReplyEnvelope
     | StudioV4ReplyEnvelope
-    | StudioV5ReplyEnvelope;
+    | StudioV5ReplyEnvelope
+    | StudioV6ReplyEnvelope;
 type RuntimeValidatedTransportRequest = (
     requestId: string,
     method: ForgeServiceMethod,
@@ -264,6 +269,27 @@ export class ForgeServiceSupervisor implements ForgeServiceClient {
                 );
             }
             assertAuthorityInitializationResult(authorityReply.result);
+            let directorReply: StudioV6ReplyEnvelope;
+            try {
+                directorReply = await this.#transport.request(
+                    randomUUID(),
+                    "service.initialize",
+                    {},
+                    10_000,
+                    6,
+                );
+            } catch (error) {
+                throw new Error(
+                    `Forge Studio Director handshake failed: ${describeError(error)}`,
+                    { cause: error },
+                );
+            }
+            if (directorReply.kind === "error") {
+                throw new Error(
+                    `Forge Studio Director handshake failed: ${directorReply.error.message}`,
+                );
+            }
+            assertDirectorInitializationResult(directorReply.result);
             if (this.#stopping || this.#stopped) {
                 throw new Error("Forge Studio service stopped during startup");
             }
@@ -540,6 +566,38 @@ function assertAuthorityInitializationResult(
         capabilities.creation_preview_pre_release !== true
     ) {
         throw new Error("Forge Studio authority handshake is incompatible");
+    }
+}
+
+function assertDirectorInitializationResult(
+    value: unknown,
+): asserts value is InitializationResult {
+    if (!isRecord(value)) {
+        throw new Error("Forge Studio Director handshake is incompatible");
+    }
+    const methods = value.methods;
+    const capabilities = value.capabilities;
+    if (
+        value.service !== "world-forge.studio" ||
+        value.service_version !== 6 ||
+        value.protocol !== "rpg-world-forge.studio_protocol" ||
+        value.protocol_version !== 6 ||
+        !Array.isArray(methods) ||
+        methods.length !== STUDIO_V6_METHODS.size ||
+        ![...STUDIO_V6_METHODS].every((method) => methods.includes(method)) ||
+        !isRecord(capabilities) ||
+        !hasExactKeys(capabilities, [
+            "authenticated_director_decisions",
+            "civil_identity",
+            "harness_hydration",
+            "secure_zeroization",
+        ]) ||
+        capabilities.authenticated_director_decisions !== true ||
+        capabilities.civil_identity !== false ||
+        capabilities.harness_hydration !== false ||
+        capabilities.secure_zeroization !== false
+    ) {
+        throw new Error("Forge Studio Director handshake is incompatible");
     }
 }
 

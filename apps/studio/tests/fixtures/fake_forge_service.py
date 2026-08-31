@@ -88,6 +88,20 @@ V4_METHODS = [
     "creation_event.list",
 ]
 V5_METHODS = sorted([*V4_METHODS, "creation_workspace.create"])
+V6_METHODS = sorted(
+    [
+        "service.initialize",
+        "director.status",
+        "director.enroll",
+        "director.unlock",
+        "director.lock",
+        "director.review.inspect",
+        "director.review.prepare",
+        "director.review.approve",
+        "director.review.deny",
+        "director.review.revoke",
+    ]
+)
 
 if MODE == "backpressure":
     time.sleep(0.25)
@@ -196,6 +210,22 @@ for raw_line in sys.stdin.buffer:
         }
         if MODE == "incompatible-v5":
             initialize_result["capabilities"]["runtime_headless_authority"] = False
+    if response_protocol_version == 6:
+        initialize_result = {
+            "service": "world-forge.studio",
+            "service_version": 6,
+            "protocol": "rpg-world-forge.studio_protocol",
+            "protocol_version": 6,
+            "methods": V6_METHODS,
+            "capabilities": {
+                "authenticated_director_decisions": True,
+                "harness_hydration": False,
+                "civil_identity": False,
+                "secure_zeroization": False,
+            },
+        }
+        if MODE == "incompatible-v6":
+            initialize_result["capabilities"]["harness_hydration"] = True
     response = (
         json.dumps(
             {

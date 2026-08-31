@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 
 import type {
@@ -13,6 +14,11 @@ import {
     type AuthorityReviewReply,
 } from "./creation-authority-actions";
 import type { StudioAuthorityModalClient } from "./ipc";
+import type { StudioDirectorModalClient } from "./director-authority";
+import {
+    validateDirectorCredentialModalReply,
+    validateDirectorDecisionModalReply,
+} from "./authority-modal-contracts";
 import { installWebContentsDenials } from "./security";
 
 const AUTHORITY_MODAL_PAYLOAD_CHANNEL = "studio:authority-modal-payload";
@@ -24,6 +30,53 @@ export function createStudioAuthorityModalClient(
     return {
         requestReview: (parent, payload) =>
             openAuthorityModal(ipcMain, parent, payload),
+    };
+}
+
+export function createStudioDirectorModalClient(
+    ipcMain: IpcMain,
+): StudioDirectorModalClient {
+    return {
+        requestCredential: async (parent, payload) => {
+            const nonce = randomUUID();
+            return await openAuthorityModalWindow(
+                ipcMain,
+                parent,
+                {
+                    kind: "director-credential",
+                    nonce,
+                    credentialId: payload.credentialId,
+                    mode: payload.mode,
+                },
+                (value) =>
+                    validateDirectorCredentialModalReply(value, nonce),
+            );
+        },
+        requestDecision: async (parent, payload) => {
+            const nonce = randomUUID();
+            return await openAuthorityModalWindow(
+                ipcMain,
+                parent,
+                {
+                    kind: "director-decision",
+                    nonce,
+                    credentialId: payload.credentialId,
+                    review: payload.review,
+                    snapshot: payload.snapshot,
+                    limitations: {
+                        civilIdentity: false,
+                        harnessHydration: false,
+                        secureZeroization: false,
+                    },
+                },
+                (value) =>
+                    validateDirectorDecisionModalReply(value, {
+                        expectedNonce: nonce,
+                        review: payload.review,
+                        nowMs: Date.now(),
+                    }),
+            );
+        },
     };
 }
 
@@ -49,6 +102,24 @@ async function openAuthorityModal(
         criteria: readonly string[];
     },
 ): Promise<AuthorityReviewReply> {
+    return await openAuthorityModalWindow(
+        ipcMain,
+        parent,
+        { kind: "creation-review", ...payload },
+        (value) =>
+            validateAuthorityReviewReply(value, {
+                expectedNonce: payload.nonce,
+                expectedDecisionCount: payload.criteria.length,
+            }),
+    );
+}
+
+async function openAuthorityModalWindow<T>(
+    ipcMain: IpcMain,
+    parent: BrowserWindow,
+    payload: Record<string, unknown>,
+    validateReply: (value: unknown) => T,
+): Promise<T> {
     const modal = new ElectronBrowserWindow(
         buildAuthorityReviewModalOptions({
             parent,
@@ -60,9 +131,9 @@ async function openAuthorityModal(
     );
     installWebContentsDenials(modal.webContents);
     let settled = false;
-    let resolveReply!: (reply: AuthorityReviewReply) => void;
+    let resolveReply!: (reply: T) => void;
     let rejectReply!: (error: Error) => void;
-    const replyPromise = new Promise<AuthorityReviewReply>((resolve, reject) => {
+    const replyPromise = new Promise<T>((resolve, reject) => {
         resolveReply = resolve;
         rejectReply = reject;
     });
@@ -74,7 +145,7 @@ async function openAuthorityModal(
         rejectReply(new Error(message));
         if (!modal.isDestroyed()) modal.close();
     };
-    const succeed = (reply: AuthorityReviewReply): void => {
+    const succeed = (reply: T): void => {
         if (settled) {
             fail("Authority modal reply was duplicated");
             return;
@@ -86,16 +157,10 @@ async function openAuthorityModal(
     };
     const onReply = (event: IpcMainEvent, value: unknown): void => {
         if (event.sender !== modal.webContents) {
-            fail("Authority modal reply sender is invalid");
             return;
         }
         try {
-            succeed(
-                validateAuthorityReviewReply(value, {
-                    expectedNonce: payload.nonce,
-                    expectedDecisionCount: payload.criteria.length,
-                }),
-            );
+            succeed(validateReply(value));
         } catch (error) {
             fail(error instanceof Error ? error.message : "Authority modal reply is invalid");
         }
@@ -118,15 +183,7 @@ async function openAuthorityModal(
     );
     modal.webContents.on("destroyed", () => fail("Authority modal was destroyed"));
     await modal.loadFile(path.join(__dirname, "../authority-modal/index.html"));
-    modal.webContents.send(AUTHORITY_MODAL_PAYLOAD_CHANNEL, {
-        nonce: payload.nonce,
-        title: payload.title,
-        preview: {
-            ...payload.preview,
-            data: new Uint8Array(payload.preview.data),
-        },
-        criteria: [...payload.criteria],
-    });
+    modal.webContents.send(AUTHORITY_MODAL_PAYLOAD_CHANNEL, payload);
     modal.show();
     return await replyPromise;
 }

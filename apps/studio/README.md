@@ -63,6 +63,27 @@ composition and bundle publication; materialization-bundle and standalone
 publication; package creation; explicit extraction; and headless evidence
 publication. These are typed controls over main-owned authority, not a generic
 RPC or proof of native, hosted, packaged-shell, or release readiness.
+
+Protocol v6 is a separate closed ten-method lane for the fixed
+`director_local` authenticated decision authority. Python owns credential
+verification, the unlocked authority reference, and durable review
+transitions; every service restart is locked. Electron main serializes one
+exact review ceremony, selects and stable-reads a bounded no-follow regular
+JSON file, and derives generation/hash compare-and-swap requests from the
+selected review and current snapshot. Its isolated nonce-bound modal collects
+enrollment/unlock passphrases and approve/deny choices. The general renderer
+has only eight named argument-free methods, so it cannot supply a passphrase,
+path, review body, reviewer/outcome, tool IDs, expiry, generation, or hash.
+The accessible Director panel exposes the real enrollment, lock, selection,
+prepare, decision, and revoke states and displays exact review/decision
+evidence without friendly tool inventions. Cost ceilings remain exact integer
+minor units with their currency code, without conversion. Ambiguous enrollment
+or unlock confirmation clears evidence and requires an explicit argument-free
+status refresh before actions return. The panel also states that the credential
+is not civil/legal identity, JavaScript strings cannot be securely zeroized,
+and durable decisions do not hydrate or authorize the Harness. This is not
+Slice 4 completion or native/hosted evidence; see ADR-0048.
+
 Electron main alone opens native save dialogs for absent output targets and
 sends paths to private Python requests. The renderer selects main-owned actions
 and grant IDs, never raw filesystem paths. Renderer-visible grants, jobs,

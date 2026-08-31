@@ -11,31 +11,103 @@
     <link rel="stylesheet" href="./style.css" />
   </head>
   <body>
-    <main>
-      <h1 id="title">Authority Review</h1>
-      <dl>
-        <dt>Preview SHA-256</dt>
-        <dd id="sha256">pending</dd>
-        <dt>Preview bytes</dt>
-        <dd id="bytes">pending</dd>
-        <dt>Preview media type</dt>
-        <dd id="media-type">pending</dd>
-        <dt>Artifact</dt>
-        <dd id="artifact">pending</dd>
-      </dl>
-      <section>
-        <h2>Preview</h2>
-        <div id="preview"></div>
+    <main aria-labelledby="title">
+      <h1 id="title">Authority ceremony</h1>
+      <p id="modal-status" class="status" role="status" aria-live="polite"></p>
+
+      <section id="creation-review" hidden>
+        <dl>
+          <dt>Preview SHA-256</dt>
+          <dd id="sha256">pending</dd>
+          <dt>Preview bytes</dt>
+          <dd id="bytes">pending</dd>
+          <dt>Preview media type</dt>
+          <dd id="media-type">pending</dd>
+          <dt>Artifact</dt>
+          <dd id="artifact">pending</dd>
+        </dl>
+        <section>
+          <h2>Preview</h2>
+          <div id="preview"></div>
+        </section>
+        <section>
+          <h2>Criteria</h2>
+          <ol id="criteria"></ol>
+        </section>
+        <div class="actions">
+          <button id="approve" type="button">Approve</button>
+          <button id="reject" type="button">Reject</button>
+          <button id="cancel-creation" type="button">Cancel</button>
+        </div>
       </section>
-      <section>
-        <h2>Criteria</h2>
-        <ol id="criteria"></ol>
+
+      <section id="director-credential" hidden>
+        <p>
+          This passphrase proves possession of the fixed local
+          <code>director_local</code> credential. It is sent directly to the
+          local Python service for this operation and is not saved by the UI.
+        </p>
+        <form id="credential-form" autocomplete="off">
+          <label for="director-passphrase">Director passphrase</label>
+          <input
+            id="director-passphrase"
+            name="director-passphrase"
+            type="password"
+            maxlength="1024"
+            autocomplete="off"
+            required
+            aria-describedby="credential-help"
+          />
+          <p id="credential-help" class="help">
+            Use 16–1024 UTF-8 bytes. The passphrase cannot be recovered.
+          </p>
+          <div class="actions">
+            <button id="credential-submit" type="submit">Continue</button>
+            <button id="cancel-credential" type="button">Cancel</button>
+          </div>
+        </form>
       </section>
-      <div class="actions">
-        <button id="approve" type="button">Approve</button>
-        <button id="reject" type="button">Reject</button>
-        <button id="cancel" type="button">Cancel</button>
-      </div>
+
+      <section id="director-decision" hidden>
+        <p>
+          Review the exact Harness approval envelope. Tool identifiers and
+          descriptor hashes are shown verbatim; World Forge does not invent
+          friendly descriptions for them.
+        </p>
+        <dl class="review-grid">
+          <dt>Approval ID</dt><dd id="director-approval-id"></dd>
+          <dt>Execution ID</dt><dd id="director-execution-id"></dd>
+          <dt>Review SHA-256</dt><dd id="director-review-hash"></dd>
+          <dt>Runtime</dt><dd id="director-runtime"></dd>
+          <dt>Activation SHA-256</dt><dd id="director-activation-hash"></dd>
+          <dt>Grant SHA-256</dt><dd id="director-grant-hash"></dd>
+          <dt>Private input SHA-256</dt><dd id="director-private-input-hash"></dd>
+          <dt>Turn / tool-call / token ceilings</dt><dd id="director-ceilings"></dd>
+          <dt>Max cost (minor units)</dt><dd id="director-cost"></dd>
+          <dt>Duration / deadline (ms)</dt><dd id="director-time"></dd>
+        </dl>
+        <fieldset>
+          <legend>Approved exact tool candidates</legend>
+          <div id="director-tools"></div>
+        </fieldset>
+        <label for="director-expiry">Approval expiry (Unix epoch milliseconds)</label>
+        <input id="director-expiry" type="number" min="0" step="1" />
+        <p class="help">Expiry must be a future safe integer.</p>
+        <div class="actions">
+          <button id="approve-director" type="button">Approve selected tools</button>
+          <button id="deny-director" type="button">Deny review</button>
+          <button id="cancel-director" type="button">Cancel</button>
+        </div>
+      </section>
+
+      <aside id="director-limitations" hidden aria-labelledby="limitations-title">
+        <h2 id="limitations-title">Local authority limitations</h2>
+        <ul>
+          <li>Credential possession is not civil or legal identity.</li>
+          <li>Locking drops live authority references but does not claim secure memory zeroization.</li>
+          <li>This ceremony records decisions; it does not hydrate or start a Harness execution.</li>
+        </ul>
+      </aside>
     </main>
     <script src="./renderer.js"></script>
   </body>

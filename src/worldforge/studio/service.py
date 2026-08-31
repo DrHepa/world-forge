@@ -11,19 +11,23 @@ from worldforge.studio.authoring import AuthoringManager
 from worldforge.studio.changesets import ChangesetManager
 from worldforge.studio.contracts import (
     ASSET_PREVIEW_CHUNK_BYTES,
+    ENTITY_ID_PATTERN,
     METHODS,
     METHODS_V2,
     METHODS_V3,
     METHODS_V4,
     METHODS_V5,
+    METHODS_V6,
     PROTOCOL_FORMAT,
     STUDIO_PROTOCOL_V2,
     STUDIO_PROTOCOL_V3,
     STUDIO_PROTOCOL_V4,
     STUDIO_PROTOCOL_V5,
+    STUDIO_PROTOCOL_V6,
     STUDIO_VERSION,
     validate_studio_protocol_envelope,
 )
+from worldforge.studio.director_control import StudioDirectorControl
 from worldforge.studio.creation_artifacts import CreationArtifactRegistry
 from worldforge.studio.creation_authoring import CreationAuthoringManager
 from worldforge.studio.creation_evidence import CreationEvidenceManager
@@ -81,6 +85,7 @@ class StudioService:
         self.store = store
         self.scheduler = scheduler
         self.creation_scheduler = creation_scheduler
+        self.director = StudioDirectorControl(store)
         self._closed = False
         self._preview_shutdown = False
         self._creation_preview_shutdown = False
@@ -131,6 +136,15 @@ class StudioService:
             self.creation_job_coordinator = CreationJobCoordinator(self.creation_jobs)
             self._methods: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
                 "service.initialize": self._initialize,
+                "director.status": self._director_status,
+                "director.enroll": self._director_enroll,
+                "director.unlock": self._director_unlock,
+                "director.lock": self._director_lock,
+                "director.review.inspect": self._director_review_inspect,
+                "director.review.prepare": self._director_review_prepare,
+                "director.review.approve": self._director_review_approve,
+                "director.review.deny": self._director_review_deny,
+                "director.review.revoke": self._director_review_revoke,
                 "workspace.register": self._workspace_register,
                 "workspace.list": self._workspace_list,
                 "workspace.get": self._workspace_get,
@@ -287,12 +301,19 @@ class StudioService:
     def close(self) -> None:
         self._closed = True
         first_error: BaseException | None = None
+        director = getattr(self, "director", None)
+        if director is not None:
+            try:
+                director.close()
+            except BaseException as exc:
+                first_error = exc
         if not self._preview_shutdown:
             try:
                 self.asset_previews.shutdown()
                 self._preview_shutdown = True
             except BaseException as exc:
-                first_error = exc
+                if first_error is None:
+                    first_error = exc
         if not getattr(self, "_creation_preview_shutdown", False):
             creation_previews = getattr(self, "creation_previews", None)
             if creation_previews is None:
@@ -324,7 +345,23 @@ class StudioService:
             else METHODS_V4
             if protocol_version == STUDIO_PROTOCOL_V4
             else METHODS_V5
+            if protocol_version == STUDIO_PROTOCOL_V5
+            else METHODS_V6
         )
+        if protocol_version == STUDIO_PROTOCOL_V6:
+            return {
+                "service": "world-forge.studio",
+                "service_version": STUDIO_PROTOCOL_V6,
+                "protocol": PROTOCOL_FORMAT,
+                "protocol_version": STUDIO_PROTOCOL_V6,
+                "methods": sorted(METHODS_V6),
+                "capabilities": {
+                    "authenticated_director_decisions": True,
+                    "harness_hydration": False,
+                    "civil_identity": False,
+                    "secure_zeroization": False,
+                },
+            }
         if protocol_version == STUDIO_PROTOCOL_V5:
             return {
                 "service": "world-forge.studio",
@@ -410,6 +447,80 @@ class StudioService:
         if protocol_version == STUDIO_PROTOCOL_V2:
             result["capabilities"]["external_artifact_jobs"] = True
         return result
+
+    def _director_status(self, params: dict[str, Any]) -> dict[str, Any]:
+        _closed_params(params, allowed=set())
+        return {"status": self.director.status()}
+
+    def _director_enroll(self, params: dict[str, Any]) -> dict[str, Any]:
+        _closed_params(params, allowed={"passphrase"}, required={"passphrase"})
+        return {"status": self.director.enroll(passphrase=params["passphrase"])}
+
+    def _director_unlock(self, params: dict[str, Any]) -> dict[str, Any]:
+        _closed_params(params, allowed={"passphrase"}, required={"passphrase"})
+        return {"status": self.director.unlock(passphrase=params["passphrase"])}
+
+    def _director_lock(self, params: dict[str, Any]) -> dict[str, Any]:
+        _closed_params(params, allowed=set())
+        return {"status": self.director.lock()}
+
+    def _director_review_inspect(self, params: dict[str, Any]) -> dict[str, Any]:
+        _closed_params(params, allowed={"review"}, required={"review"})
+        return {"snapshot": self.director.inspect(params["review"])}
+
+    def _director_review_prepare(self, params: dict[str, Any]) -> dict[str, Any]:
+        _closed_params(
+            params,
+            allowed={"review", "expected_generation"},
+            required={"review", "expected_generation"},
+        )
+        return {
+            "snapshot": self.director.prepare(
+                params["review"],
+                expected_generation=params["expected_generation"],
+            )
+        }
+
+    def _director_review_approve(self, params: dict[str, Any]) -> dict[str, Any]:
+        fields = {
+            "review",
+            "expected_generation",
+            "expected_review_hash",
+            "approved_tool_ids",
+            "expires_at_ms",
+        }
+        _closed_params(params, allowed=fields, required=fields)
+        return {
+            "snapshot": self.director.approve(
+                params["review"],
+                expected_generation=params["expected_generation"],
+                expected_review_hash=params["expected_review_hash"],
+                approved_tool_ids=params["approved_tool_ids"],
+                expires_at_ms=params["expires_at_ms"],
+            )
+        }
+
+    def _director_review_deny(self, params: dict[str, Any]) -> dict[str, Any]:
+        fields = {"review", "expected_generation", "expected_review_hash"}
+        _closed_params(params, allowed=fields, required=fields)
+        return {
+            "snapshot": self.director.deny(
+                params["review"],
+                expected_generation=params["expected_generation"],
+                expected_review_hash=params["expected_review_hash"],
+            )
+        }
+
+    def _director_review_revoke(self, params: dict[str, Any]) -> dict[str, Any]:
+        fields = {"review", "expected_generation", "expected_decision_hash"}
+        _closed_params(params, allowed=fields, required=fields)
+        return {
+            "snapshot": self.director.revoke(
+                params["review"],
+                expected_generation=params["expected_generation"],
+                expected_decision_hash=params["expected_decision_hash"],
+            )
+        }
 
     def _workspace_register(self, params: dict[str, Any]) -> dict[str, Any]:
         return {"workspace": self.workspaces.register(params)}
@@ -1241,7 +1352,6 @@ def serve(input_stream: BinaryIO, output_stream: BinaryIO, *, data_dir: str | Pa
                     break
                 request = decode_ndjson_object(line)
                 candidate = request.get("request_id")
-                request_id = candidate if isinstance(candidate, str) and candidate else None
                 version = request.get("protocol_version")
                 if version == STUDIO_PROTOCOL_V2:
                     request_protocol_version = STUDIO_PROTOCOL_V2
@@ -1251,6 +1361,18 @@ def serve(input_stream: BinaryIO, output_stream: BinaryIO, *, data_dir: str | Pa
                     request_protocol_version = STUDIO_PROTOCOL_V4
                 elif version == STUDIO_PROTOCOL_V5:
                     request_protocol_version = STUDIO_PROTOCOL_V5
+                elif version == STUDIO_PROTOCOL_V6:
+                    request_protocol_version = STUDIO_PROTOCOL_V6
+                request_id = (
+                    candidate
+                    if isinstance(candidate, str)
+                    and candidate
+                    and (
+                        request_protocol_version != STUDIO_PROTOCOL_V6
+                        or ENTITY_ID_PATTERN.fullmatch(candidate) is not None
+                    )
+                    else None
+                )
                 response = service.handle(request)
             except StudioError as exc:
                 response = _error_envelope(

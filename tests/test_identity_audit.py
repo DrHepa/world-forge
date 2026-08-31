@@ -482,6 +482,97 @@ class IdentityAuditTests(unittest.TestCase):
             ):
                 refresh_identity_allowlist_evidence(root, reviewed_policy=policy)
 
+    def test_generator_reviewed_policy_refreshes_exact_studio_v6_identity_files(
+        self,
+    ) -> None:
+        from scripts.generate_identity_allowlist import REVIEWED_ADDITIONS
+
+        expected = {
+            "apps/studio/src/generated/studio-protocol-v6.d.ts": (
+                "legacy_contract",
+                4,
+            ),
+            "apps/studio/src/main/director-authority.ts": ("legacy_contract", 1),
+            "apps/studio/tests/main/director-authority.test.ts": (
+                "regression_fixture",
+                2,
+            ),
+            "apps/studio/tests/main/protocol-validator-v6.test.ts": (
+                "regression_fixture",
+                10,
+            ),
+            "schemas/studio-protocol-v6.schema.json": ("legacy_contract", 4),
+            "tests/test_studio_director_control.py": ("regression_fixture", 1),
+            "tests/test_studio_protocol_v6.py": ("regression_fixture", 4),
+        }
+        source_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for relative in expected:
+                target = root / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes((source_root / relative).read_bytes())
+            _write_allowlist(root, [])
+
+            def publish(
+                path: Path,
+                document: dict[str, object],
+                *,
+                durable_parent: bool,
+            ) -> None:
+                self.assertTrue(durable_parent)
+                path.write_bytes(canonical_json_bytes(document))
+
+            with unittest.mock.patch(
+                "worldforge.identity_audit.write_json_cooperative_replace",
+                side_effect=publish,
+            ):
+                result = refresh_identity_allowlist_evidence(
+                    root,
+                    reviewed_policy=REVIEWED_ADDITIONS,
+                )
+
+            document = json.loads(
+                (root / "contracts/legacy-identity-allowlist.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            observed = {
+                entry["path"]: (entry["category"], len(entry["offsets"]))
+                for entry in document["entries"]
+            }
+            self.assertEqual(expected, observed)
+            self.assertEqual(7, result.entries)
+            self.assertEqual(26, result.occurrences)
+
+    def test_generator_reviewed_policy_rejects_studio_v6_neighbor_paths(self) -> None:
+        from scripts.generate_identity_allowlist import REVIEWED_ADDITIONS
+
+        for relative in (
+            "apps/studio/src/generated/studio-protocol-v6-copy.d.ts",
+            "tests/test_studio_protocol_v6_copy.py",
+        ):
+            with self.subTest(relative=relative):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    target = root / relative
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text(
+                        'PROTOCOL = "rpg-world-forge.studio_protocol"\n',
+                        encoding="utf-8",
+                    )
+                    _write_allowlist(root, [])
+
+                    with self.assertRaises(IdentityAuditError) as raised:
+                        refresh_identity_allowlist_evidence(
+                            root,
+                            reviewed_policy=REVIEWED_ADDITIONS,
+                        )
+                    self.assertIn(
+                        f"unallowlisted legacy identity 'rpg-world-forge' in {relative}",
+                        str(raised.exception),
+                    )
+
     def test_generator_reviewed_policy_does_not_restore_deleted_hosted_workflow(self) -> None:
         from scripts.generate_identity_allowlist import REVIEWED_ADDITIONS
 

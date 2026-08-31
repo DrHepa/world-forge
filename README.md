@@ -821,9 +821,17 @@ Identity migration is recorded in
 [legacy-identity allowlist policy](docs/LEGACY_IDENTITY_ALLOWLIST.md), and
 [cutover/rollback runbook](docs/operations/IDENTITY_CUTOVER_AND_ROLLBACK.md).
 ADR-0047 adds a private, backend-only durable Director possession authority for
-exact Harness tool-approval decisions. It is not a Studio UI workflow, identity
-system, nonrepudiation mechanism, or external whole-store rollback detector; see
+exact Harness tool-approval decisions; see
 [ADR-0047](docs/decisions/0047-authenticated-durable-studio-human-decisions.md).
+The additive Studio protocol v6 and Electron ceremony in
+[ADR-0048](docs/decisions/0048-studio-director-ceremony.md) now let a human
+explicitly enroll or unlock the fixed local credential, select and inspect one
+exact review, prepare it, approve or deny it, and revoke its current decision.
+Python remains the cryptographic and storage authority, Electron main owns the
+selected review and compare-and-swap request construction, and the general
+renderer exposes only named argument-free operations. This is not civil or
+legal identity, secure memory zeroization, Harness hydration, external
+whole-store rollback detection, or completion of Slice 4.
 
 ## Public project
 

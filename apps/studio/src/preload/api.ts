@@ -11,7 +11,9 @@ import {
     type StudioAssetReceiptValidateReply,
     type StudioAssetpackVerifyReply,
     type StudioActivityEvent,
+    type StudioClientError,
     type StudioClientResult,
+    type StudioDirectorCeremonyState,
     type StudioChangesetApplyReply,
     type StudioChangesetApproveReply,
     type StudioChangesetCreateReply,
@@ -54,6 +56,52 @@ export function createStudioApi(transport: PreloadTransport): ForgeStudioApi {
         },
         async getServiceStatus() {
             return asClientResult(await transport.invoke(IPC_CHANNELS.status));
+        },
+        async getDirectorStatus() {
+            return asDirectorClientResult(
+                await transport.invoke(IPC_CHANNELS.getDirectorStatus),
+            );
+        },
+        async enrollDirector() {
+            return asDirectorClientResult(
+                await transport.invoke(IPC_CHANNELS.enrollDirector),
+            );
+        },
+        async unlockDirector() {
+            return asDirectorClientResult(
+                await transport.invoke(IPC_CHANNELS.unlockDirector),
+            );
+        },
+        async lockDirector() {
+            return asDirectorClientResult(
+                await transport.invoke(IPC_CHANNELS.lockDirector),
+            );
+        },
+        async selectDirectorReview() {
+            return asDirectorClientResult(
+                await transport.invoke(IPC_CHANNELS.selectDirectorReview),
+            );
+        },
+        async prepareSelectedDirectorReview() {
+            return asDirectorClientResult(
+                await transport.invoke(
+                    IPC_CHANNELS.prepareSelectedDirectorReview,
+                ),
+            );
+        },
+        async requestSelectedDirectorDecision() {
+            return asDirectorClientResult(
+                await transport.invoke(
+                    IPC_CHANNELS.requestSelectedDirectorDecision,
+                ),
+            );
+        },
+        async revokeSelectedDirectorDecision() {
+            return asDirectorClientResult(
+                await transport.invoke(
+                    IPC_CHANNELS.revokeSelectedDirectorDecision,
+                ),
+            );
         },
         async listWorkspaces() {
             return asClientResult<StudioReplyEnvelope>(
@@ -909,6 +957,56 @@ function asClientResult<T>(value: unknown): StudioClientResult<T> {
         };
     }
     return value as StudioClientResult<T>;
+}
+
+const DIRECTOR_ERROR_CODES: ReadonlySet<StudioClientError["code"]> = new Set([
+    "invalid_request",
+    "not_found",
+    "conflict",
+    "invalid_state",
+    "internal_error",
+    "recovery_ambiguous",
+    "recovery_failed",
+    "service_unavailable",
+    "timeout",
+    "cancelled",
+]);
+
+function asDirectorClientResult(
+    value: unknown,
+): StudioClientResult<StudioDirectorCeremonyState> {
+    if (
+        typeof value === "object" &&
+        value !== null &&
+        "ok" in value &&
+        value.ok === false &&
+        "error" in value &&
+        typeof value.error === "object" &&
+        value.error !== null &&
+        "code" in value.error &&
+        typeof value.error.code === "string" &&
+        DIRECTOR_ERROR_CODES.has(value.error.code as StudioClientError["code"]) &&
+        "message" in value.error &&
+        typeof value.error.message === "string" &&
+        Object.keys(value.error).length === 2
+    ) {
+        return value as StudioClientResult<StudioDirectorCeremonyState>;
+    }
+    if (
+        typeof value === "object" &&
+        value !== null &&
+        "ok" in value &&
+        value.ok === true
+    ) {
+        return value as StudioClientResult<StudioDirectorCeremonyState>;
+    }
+    return {
+        ok: false,
+        error: {
+            code: "internal_error",
+            message: "Main process returned an invalid Director result",
+        },
+    };
 }
 
 function isActivityEvent(value: unknown): value is StudioActivityEvent {

@@ -65,6 +65,7 @@ sandboxed React renderer
         | fixed typed preload operations; validated top-frame IPC
         v
 Electron main supervisor -- serves --> rwf-studio://app static artifacts
+        |-- serialized Director selection + isolated credential/decision modal
         |
         | bounded strict NDJSON request/response/error/event envelopes
         | over stdio; shell=false; fixed executable and arguments
@@ -74,6 +75,7 @@ worldforge.studio application service
         |-- workspace boundary inspection
         |-- revision-guarded PNG/WAV preview leases
         |-- SQLite registry, events, and job state
+        |-- service-owned DirectorControl -> authenticated durable authority
         `-- approved, base-hashed source changesets
                 |
                 `-- world lifecycle lock + durable external apply journal
@@ -131,9 +133,35 @@ disables its private authority boundary; a new Store object may audit durable
 state and retry, but the uncertain Store never reconnects.
 A monotonic in-memory event ID/hash anchor detects loss of history already
 observed by that authority, but cannot detect a coherent rollback presented to
-a fresh process before unlock. This is not yet exposed by Electron, the Studio
-service, or Harness hydration, and it makes no identity, hardware-custody,
+a fresh process before unlock. It makes no identity, hardware-custody,
 nonrepudiation, external anti-rollback, or compromised-process claim.
+
+Studio protocol v6 exposes this private authority through a separate closed
+ten-method service lane. A new service process always begins locked, even when
+the credential and decisions are durable. The service owns
+`StudioDirectorControl`; it fixes `director_local` as reviewer, constructs
+approved or denied decisions, maps stale state to conflict, drops its live
+authority reference on lock/close, and does not claim secure memory
+zeroization. The protocol advertises authenticated decisions while explicitly
+advertising no Harness hydration, civil identity, or secure zeroization.
+
+Electron main, not the general renderer, owns one exact selected review and its
+snapshot. It serializes the ceremony, clears selection on lock, close, or
+service loss, projects unknown and clears evidence after an ambiguous
+enrollment or unlock reply, and requires a fresh status/unlock after restart.
+Native review selection accepts one absolute, bounded, single-link regular
+JSON file through stable no-follow reads and the closed v6 validator. Main
+derives prepare, decision, and revoke compare-and-swap fields from the selected
+evidence. A nonce-bound isolated modal collects the local passphrase or exact
+decision;
+the renderer receives only eight named argument-free operations and never a
+passphrase, path, review request body, reviewer/outcome, tool selection,
+expiry, generation, or expected hash. The accessible UI renders exact hashes,
+budgets, raw cost minor units with their currency code, tool IDs, descriptor
+hashes, state, and decision evidence without inventing tool descriptions. It
+visibly states the local identity, zeroization, and Harness limitations. This
+ceremony does not connect the authority to Harness execution or complete Slice
+4; native and hosted evidence remain untested. See ADR-0048.
 
 The service's read-only authoring boundary is manifest-authorized rather than a
 general filesystem browser. `source.list` and `source.read` expose only the

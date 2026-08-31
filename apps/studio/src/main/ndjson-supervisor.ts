@@ -169,6 +169,21 @@ import type {
     OutputGrantRevokeParams as StudioV5OutputGrantRevokeParams,
     Response as StudioV5ResponseEnvelope,
 } from "../generated/studio-protocol-v5";
+import type {
+    ApproveParams as StudioV6ApproveParams,
+    DenyParams as StudioV6DenyParams,
+    EmptyParams as StudioV6EmptyParams,
+    ErrorEnvelope as StudioV6ErrorEnvelope,
+    InitializeResult as StudioV6InitializeResult,
+    Method as StudioV6Method,
+    PassphraseParams as StudioV6PassphraseParams,
+    PrepareParams as StudioV6PrepareParams,
+    Response as StudioV6ResponseEnvelope,
+    ReviewParams as StudioV6ReviewParams,
+    RevokeParams as StudioV6RevokeParams,
+    DirectorReviewResult as StudioV6DirectorReviewResult,
+    DirectorStatusResult as StudioV6DirectorStatusResult,
+} from "../generated/studio-protocol-v6";
 import {
     describeProtocolErrors,
     validateStudioEnvelope,
@@ -185,7 +200,7 @@ export const DEFAULT_KILL_STOP_TIMEOUT_MS = 2_000;
 
 const PROTOCOL = "rpg-world-forge.studio_protocol" as const;
 const PROTOCOL_VERSION = 1 as const;
-export type StudioProtocolVersion = 1 | 2 | 3 | 4 | 5;
+export type StudioProtocolVersion = 1 | 2 | 3 | 4 | 5 | 6;
 
 export interface FixedSpawnSpec {
     executable: string;
@@ -347,7 +362,8 @@ interface PendingRequest {
         | StudioV2Method
         | StudioV3Method
         | StudioV4Method
-        | StudioV5Method;
+        | StudioV5Method
+        | StudioV6Method;
     protocolVersion: StudioProtocolVersion;
     resolve: (
         envelope:
@@ -355,7 +371,8 @@ interface PendingRequest {
             | StudioV2ReplyEnvelope
             | StudioV3ReplyEnvelope
             | StudioV4ReplyEnvelope
-            | StudioV5ReplyEnvelope,
+            | StudioV5ReplyEnvelope
+            | StudioV6ReplyEnvelope,
     ) => void;
     reject: (error: Error) => void;
     timer: NodeJS.Timeout;
@@ -744,6 +761,45 @@ export type StudioV5SuccessForMethod<M extends StudioV5Method> =
     };
 export type StudioV5ReplyForMethod<M extends StudioV5Method> =
     StudioV5SuccessForMethod<M> | StudioV5ErrorEnvelope;
+export type StudioV6ReplyEnvelope =
+    StudioV6ResponseEnvelope | StudioV6ErrorEnvelope;
+export type StudioV6RequestParams<M extends StudioV6Method> =
+    M extends "service.initialize" | "director.status" | "director.lock"
+        ? StudioV6EmptyParams
+        : M extends "director.enroll" | "director.unlock"
+          ? StudioV6PassphraseParams
+          : M extends "director.review.inspect"
+            ? StudioV6ReviewParams
+            : M extends "director.review.prepare"
+              ? StudioV6PrepareParams
+              : M extends "director.review.approve"
+                ? StudioV6ApproveParams
+                : M extends "director.review.deny"
+                  ? StudioV6DenyParams
+                  : M extends "director.review.revoke"
+                    ? StudioV6RevokeParams
+                    : never;
+export type StudioV6ResultForMethod<M extends StudioV6Method> =
+    M extends "service.initialize"
+        ? StudioV6InitializeResult
+        : M extends
+                | "director.status"
+                | "director.enroll"
+                | "director.unlock"
+                | "director.lock"
+          ? StudioV6DirectorStatusResult
+          : StudioV6DirectorReviewResult;
+export type StudioV6SuccessForMethod<M extends StudioV6Method> =
+    StudioV6ResponseEnvelope & {
+        protocol: "rpg-world-forge.studio_protocol";
+        protocol_version: 6;
+        kind: "response";
+        request_id: string;
+        method: M;
+        result: StudioV6ResultForMethod<M>;
+    };
+export type StudioV6ReplyForMethod<M extends StudioV6Method> =
+    StudioV6SuccessForMethod<M> | StudioV6ErrorEnvelope;
 type StudioReplyEnvelope = StudioResponseEnvelope | StudioErrorEnvelope;
 
 export interface NdjsonSupervisorOptions {
@@ -998,6 +1054,13 @@ export class NdjsonSupervisor {
         timeoutMs: number,
         protocolVersion: 5,
     ): Promise<StudioV5ReplyForMethod<M>>;
+    public request<M extends StudioV6Method>(
+        requestId: string,
+        method: M,
+        params: StudioV6RequestParams<M>,
+        timeoutMs: number,
+        protocolVersion: 6,
+    ): Promise<StudioV6ReplyForMethod<M>>;
     public request<M extends StudioV3Method>(
         requestId: string,
         method: M,
@@ -1012,7 +1075,8 @@ export class NdjsonSupervisor {
             | StudioV2Method
             | StudioV3Method
             | StudioV4Method
-            | StudioV5Method,
+            | StudioV5Method
+            | StudioV6Method,
         params: object,
         timeoutMs = this.#defaultTimeoutMs,
         protocolVersion: StudioProtocolVersion = PROTOCOL_VERSION,
@@ -1022,6 +1086,7 @@ export class NdjsonSupervisor {
         | StudioV3ReplyEnvelope
         | StudioV4ReplyEnvelope
         | StudioV5ReplyEnvelope
+        | StudioV6ReplyEnvelope
     > {
         if (this.#state !== "running" || !this.#child) {
             throw new StudioTransportError(
@@ -1050,9 +1115,12 @@ export class NdjsonSupervisor {
             protocolVersion !== 2 &&
             protocolVersion !== 3 &&
             protocolVersion !== 4 &&
-            protocolVersion !== 5
+            protocolVersion !== 5 &&
+            protocolVersion !== 6
         ) {
-            throw new TypeError("protocolVersion must be 1, 2, 3, 4 or 5");
+            throw new TypeError(
+                "protocolVersion must be 1, 2, 3, 4, 5 or 6",
+            );
         }
 
         const envelope = {
@@ -1095,6 +1163,7 @@ export class NdjsonSupervisor {
             | StudioV3ReplyEnvelope
             | StudioV4ReplyEnvelope
             | StudioV5ReplyEnvelope
+            | StudioV6ReplyEnvelope
         >((resolve, reject) => {
             const timer = setTimeout(() => {
                 this.#abandonRequest(

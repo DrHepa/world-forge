@@ -93,6 +93,14 @@ const protocolV5OutputPath = path.resolve(
     appRoot,
     "src/generated/studio-protocol-v5.d.ts",
 );
+const protocolV6SchemaPath = path.resolve(
+    appRoot,
+    "../../schemas/studio-protocol-v6.schema.json",
+);
+const protocolV6OutputPath = path.resolve(
+    appRoot,
+    "src/generated/studio-protocol-v6.d.ts",
+);
 const contractsSchemaRoot = path.resolve(appRoot, "../../schemas");
 const contractsOutputPath = path.resolve(
     appRoot,
@@ -128,6 +136,7 @@ const protocolV2Schema = await readStrictJsonObject(protocolV2SchemaPath);
 const protocolV3Schema = await readStrictJsonObject(protocolV3SchemaPath);
 const protocolV4Schema = await readStrictJsonObject(protocolV4SchemaPath);
 const protocolV5Schema = await readStrictJsonObject(protocolV5SchemaPath);
+const protocolV6Schema = await readStrictJsonObject(protocolV6SchemaPath);
 const creationProfileSchema = await readStrictJsonObject(
     path.resolve(contractsSchemaRoot, "creation-profile.schema.json"),
 );
@@ -294,6 +303,28 @@ const generatedProtocolV5 = generatedProtocolV5Raw
         openCreationOutputGrantV6Declaration,
         "export type WorldForgeStudioCreationOutputGrantV6 = {",
     );
+const generatedProtocolV6Raw = await compile(
+    protocolV6Schema,
+    "WorldForgeStudioDirectorProtocolV6",
+    {
+        bannerComment:
+            "/* AUTO-GENERATED from schemas/studio-protocol-v6.schema.json. Do not edit by hand. */\n" +
+            "/* eslint-disable @typescript-eslint/no-empty-object-type */",
+        additionalProperties: false,
+        cwd: path.dirname(protocolV6SchemaPath),
+        style,
+        unreachableDefinitions: true,
+    },
+);
+if (!generatedProtocolV6Raw.includes(emptyParamsDeclaration)) {
+    throw new Error(
+        "Generated Studio protocol v6 empty params declaration changed",
+    );
+}
+const generatedProtocolV6 = generatedProtocolV6Raw.replace(
+    emptyParamsDeclaration,
+    "export type EmptyParams = Record<string, never>;",
+);
 const contractDefinitions = {
     LegacyIdentityAllowlist: {
         $ref: "legacy-identity-allowlist.schema.json",
@@ -6653,6 +6684,11 @@ await synchronize(
     protocolV5OutputPath,
     generatedProtocolV5,
     "Generated Studio protocol v5 types are stale. Run npm run generate:types.",
+);
+await synchronize(
+    protocolV6OutputPath,
+    generatedProtocolV6,
+    "Generated Studio protocol v6 types are stale. Run npm run generate:types.",
 );
 await synchronize(
     creationContentModesOutputPath,

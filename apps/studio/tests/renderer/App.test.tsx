@@ -54,6 +54,49 @@ afterEach(() => {
 });
 
 describe("Studio World authoring cockpit", () => {
+    it("integrates the argument-free authenticated Director ceremony across Studio routes", async () => {
+        const getDirectorStatus = vi.fn().mockResolvedValue({
+            ok: true,
+            value: {
+                status: {
+                    credentialId: "director_local",
+                    state: "not_enrolled",
+                },
+                selectedReview: null,
+                snapshot: null,
+            },
+        });
+        const enrollDirector = vi.fn().mockResolvedValue({
+            ok: true,
+            value: {
+                status: {
+                    credentialId: "director_local",
+                    state: "unlocked",
+                },
+                selectedReview: null,
+                snapshot: null,
+            },
+        });
+        const { api } = createApi({ getDirectorStatus, enrollDirector });
+        installApi(api);
+
+        render(<App />);
+
+        expect(
+            await screen.findByRole("heading", { name: "Director approval" }),
+        ).toBeInTheDocument();
+        fireEvent.click(
+            await screen.findByRole("button", {
+                name: "Enroll local Director",
+            }),
+        );
+        expect(
+            await screen.findByText("Local Director credential is unlocked."),
+        ).toBeInTheDocument();
+        expect(getDirectorStatus).toHaveBeenCalledWith();
+        expect(enrollDirector).toHaveBeenCalledWith();
+    });
+
     it("routes a registered generic creation workspace without invoking legacy World APIs", async () => {
         const creation = appCreationApi();
         const { api, mocks } = createApi(creation.api);
@@ -1789,6 +1832,24 @@ function createApi(overrides: Partial<ForgeStudioApi> = {}) {
                 pid: 123,
             },
         }),
+        getDirectorStatus: vi.fn().mockResolvedValue({
+            ok: true,
+            value: {
+                status: {
+                    credentialId: "director_local",
+                    state: "locked",
+                },
+                selectedReview: null,
+                snapshot: null,
+            },
+        }),
+        enrollDirector: unavailable,
+        unlockDirector: unavailable,
+        lockDirector: unavailable,
+        selectDirectorReview: unavailable,
+        prepareSelectedDirectorReview: unavailable,
+        requestSelectedDirectorDecision: unavailable,
+        revokeSelectedDirectorDecision: unavailable,
         listWorkspaces: vi
             .fn()
             .mockResolvedValue(

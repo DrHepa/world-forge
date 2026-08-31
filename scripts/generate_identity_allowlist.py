@@ -22,11 +22,14 @@ _LEGACY_CONTRACT_ADDITIONS = (
     "apps/studio/src/generated/studio-protocol-v3.d.ts",
     "apps/studio/src/generated/studio-protocol-v4.d.ts",
     "apps/studio/src/generated/studio-protocol-v5.d.ts",
+    "apps/studio/src/generated/studio-protocol-v6.d.ts",
+    "apps/studio/src/main/director-authority.ts",
     "apps/studio/src/renderer/creation-preview-state.ts",
     "apps/studio/src/renderer/creation-service.ts",
     "schemas/studio-protocol-v3.schema.json",
     "schemas/studio-protocol-v4.schema.json",
     "schemas/studio-protocol-v5.schema.json",
+    "schemas/studio-protocol-v6.schema.json",
 )
 _REGRESSION_FIXTURE_ADDITIONS = (
     "apps/studio/tests/renderer/AppCreationNavigation.test.tsx",
@@ -46,8 +49,10 @@ _REGRESSION_FIXTURE_ADDITIONS = (
     "apps/studio/tests/renderer/creation-preview-state.test.ts",
     "apps/studio/tests/renderer/creation-runtime-pipeline-state.test.ts",
     "apps/studio/tests/renderer/creation-service.test.ts",
+    "apps/studio/tests/main/director-authority.test.ts",
     "apps/studio/tests/types/studio-protocol-v3-types.ts",
     "apps/studio/tests/main/protocol-validator-v5.test.ts",
+    "apps/studio/tests/main/protocol-validator-v6.test.ts",
     "tests/test_creation_scaffold_kinds.py",
     "tests/test_studio_creation_asset_jobs_v4.py",
     "tests/test_studio_creation_asset_release_v11.py",
@@ -62,7 +67,9 @@ _REGRESSION_FIXTURE_ADDITIONS = (
     "tests/test_studio_creation_runtime_headless_v12.py",
     "tests/test_studio_creation_service_v3.py",
     "tests/test_studio_creation_v3.py",
+    "tests/test_studio_director_control.py",
     "tests/test_studio_protocol_v5.py",
+    "tests/test_studio_protocol_v6.py",
 )
 REVIEWED_ADDITIONS: dict[tuple[str, str], ReviewedIdentityPolicy] = {
     (path, _LEGACY_DASHED): ReviewedIdentityPolicy(

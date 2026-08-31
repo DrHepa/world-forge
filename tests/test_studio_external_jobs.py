@@ -406,7 +406,7 @@ class StudioExternalStorageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             data_dir = Path(directory) / "studio"
             with StudioStore(data_dir) as store:
-                self.assertEqual(5, SCHEMA_VERSION)
+                self.assertEqual(6, SCHEMA_VERSION)
                 store.connection.execute(
                     "INSERT INTO workspaces "
                     "(workspace_id, record_json, forge_dev, forge_ino, world_dev, world_ino, "
@@ -430,7 +430,7 @@ class StudioExternalStorageTests(unittest.TestCase):
                     version = reopened.connection.execute(
                         "SELECT value FROM schema_meta WHERE key = 'schema_version'"
                     ).fetchone()[0]
-                    self.assertEqual("5", version)
+                    self.assertEqual("6", version)
                     self.assertEqual(
                         "{}",
                         reopened.connection.execute(

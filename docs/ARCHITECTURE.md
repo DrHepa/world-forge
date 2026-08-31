@@ -96,6 +96,45 @@ The database uses foreign keys, WAL, FULL synchronous writes, and a bounded busy
 timeout. A service restart marks interrupted `running` jobs as `orphaned` and
 records that transition as an event.
 
+StudioStore schema v6 also has a private backend-only authenticated Director
+authority. Its explicit local enrollment stores a fixed-scrypt verifier and
+keeps an HMAC-authenticated, hash-chained projection of existing Harness
+tool-approval review/decision objects. The verifier authenticates a closed,
+canonical credential-v1 envelope containing every persisted credential field
+except the verifier itself. Credential and event timestamps accept only exact
+six-microsecond UTC `Z` form and must parse and round-trip byte-identically.
+Primary migration is atomic; a secondary attachment requires exact v6 and does
+not migrate. Unlock audits the chain and projection from one deferred read
+snapshot before use. Authenticated writes run
+on a Store-owned private SQLite connection under `BEGIN IMMEDIATE`, so ordinary
+Studio managers cannot commit or roll back an authority transaction through the
+Store's public connection. That public connection retains SQLite's default
+thread affinity; only the private authority connection allows lock-serialized
+cross-thread use. The public Store must be closed by its creator thread; a
+foreign-thread close rejects before changing state or detaching resources.
+The v6 private boundary verifies its exact authority-prefixed object census,
+normalized authored DDL, ordered columns, indexes, foreign keys, deferred
+relation, and checks at creation/migration, attachment, private connection open,
+and every authority transaction. Those live transactions also require foreign
+keys enabled and ignored-check mode disabled. Authenticated event-v1 JSON is
+closed to its exact top-level key set in addition to canonical-byte, hash, MAC,
+chain, transition, and projection checks.
+Creator-thread close is terminal and lock-fenced against private connection
+creation and transaction start. Every live read and transition
+re-audits the frozen credential evidence, complete chain, and exact projection
+in its transaction; writes audit again before commit. An ambiguous write commit
+acknowledgement never returns success: the authority accepts only a freshly
+audited exact pre- or post-mutation head, otherwise it poisons that instance.
+If enrollment or unlock has uncertain rollback or commit cleanup before an
+authority can be returned, the Store detaches that connection and permanently
+disables its private authority boundary; a new Store object may audit durable
+state and retry, but the uncertain Store never reconnects.
+A monotonic in-memory event ID/hash anchor detects loss of history already
+observed by that authority, but cannot detect a coherent rollback presented to
+a fresh process before unlock. This is not yet exposed by Electron, the Studio
+service, or Harness hydration, and it makes no identity, hardware-custody,
+nonrepudiation, external anti-rollback, or compromised-process claim.
+
 The service's read-only authoring boundary is manifest-authorized rather than a
 general filesystem browser. `source.list` and `source.read` expose only the
 manifest, world document, and collection documents named by the loaded source

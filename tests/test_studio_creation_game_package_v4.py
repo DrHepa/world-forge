@@ -340,7 +340,7 @@ class StudioGamePackageContractTests(unittest.TestCase):
             for _ in range(2):
                 with StudioStore(data) as migrated:
                     self.assertEqual(
-                        "5",
+                        "6",
                         migrated.connection.execute(
                             "SELECT value FROM schema_meta WHERE key = 'schema_version'"
                         ).fetchone()["value"],

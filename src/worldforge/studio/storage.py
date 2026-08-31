@@ -5,6 +5,7 @@ import math
 import os
 import sqlite3
 import stat
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -25,7 +26,7 @@ from worldforge.studio.creation_process import (
 )
 from worldforge.studio.errors import StudioContractError, StudioError
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 DATABASE_NAME = "studio.sqlite3"
 _CREATION_ARTIFACT_SCOPE_MIGRATION_DATA_STEP_COUNT = 11
 _CREATION_ARTIFACT_SCOPE_MIGRATION_STEP_COUNT = 12
@@ -35,6 +36,274 @@ _CREATION_ARTIFACT_SCOPE_MIGRATION_TABLES = frozenset(
         "creation_artifact_dependencies_workspace_scoped",
     }
 )
+
+_AUTHORITY_SCHEMA_ERROR = "Authenticated decision database schema is invalid"
+_AUTHORITY_CREDENTIALS_TABLE = "studio_authenticated_human_credentials"
+_AUTHORITY_DECISIONS_TABLE = "studio_authenticated_human_decisions"
+_AUTHORITY_EVENTS_TABLE = "studio_authenticated_human_decision_events"
+_AUTHORITY_APPROVAL_INDEX = "studio_authenticated_human_decision_events_approval_idx"
+_AUTHORITY_CREDENTIALS_DDL = f"""CREATE TABLE IF NOT EXISTS {_AUTHORITY_CREDENTIALS_TABLE} (
+    credential_id TEXT PRIMARY KEY NOT NULL
+        CHECK (credential_id = 'director_local'),
+    kdf_name TEXT NOT NULL CHECK (kdf_name = 'scrypt'),
+    kdf_n INTEGER NOT NULL CHECK (kdf_n = 32768),
+    kdf_r INTEGER NOT NULL CHECK (kdf_r = 8),
+    kdf_p INTEGER NOT NULL CHECK (kdf_p = 1),
+    kdf_dklen INTEGER NOT NULL CHECK (kdf_dklen = 32),
+    kdf_maxmem INTEGER NOT NULL CHECK (kdf_maxmem = 67108864),
+    salt BLOB NOT NULL CHECK (length(salt) = 32),
+    verifier BLOB NOT NULL CHECK (length(verifier) = 32),
+    created_at TEXT NOT NULL
+)"""
+_AUTHORITY_DECISIONS_DDL = f"""CREATE TABLE IF NOT EXISTS {_AUTHORITY_DECISIONS_TABLE} (
+    approval_id TEXT PRIMARY KEY NOT NULL,
+    review_hash TEXT NOT NULL,
+    review_json TEXT NOT NULL,
+    decision_hash TEXT,
+    decision_json TEXT,
+    state TEXT NOT NULL CHECK (state IN ('prepared', 'approved', 'denied', 'revoked')),
+    generation INTEGER NOT NULL CHECK (generation IN (0, 1, 2)),
+    last_event_hash TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    CHECK (
+        (generation = 0 AND state = 'prepared'
+            AND decision_hash IS NULL AND decision_json IS NULL)
+        OR (generation = 1 AND state IN ('approved', 'denied')
+            AND decision_hash IS NOT NULL AND decision_json IS NOT NULL)
+        OR (generation = 2 AND state = 'revoked'
+            AND decision_hash IS NOT NULL AND decision_json IS NOT NULL)
+    )
+)"""
+_AUTHORITY_EVENTS_DDL = f"""CREATE TABLE IF NOT EXISTS {_AUTHORITY_EVENTS_TABLE} (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    credential_id TEXT NOT NULL
+        REFERENCES {_AUTHORITY_CREDENTIALS_TABLE}(credential_id),
+    approval_id TEXT NOT NULL
+        REFERENCES {_AUTHORITY_DECISIONS_TABLE}(approval_id)
+        DEFERRABLE INITIALLY DEFERRED,
+    generation INTEGER NOT NULL CHECK (generation IN (0, 1, 2)),
+    event_type TEXT NOT NULL CHECK (event_type IN ('prepared', 'decided', 'revoked')),
+    content_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL UNIQUE,
+    previous_hash TEXT NOT NULL,
+    mac BLOB NOT NULL CHECK (length(mac) = 32),
+    created_at TEXT NOT NULL
+)"""
+_AUTHORITY_APPROVAL_INDEX_DDL = f"""CREATE INDEX IF NOT EXISTS
+    {_AUTHORITY_APPROVAL_INDEX}
+    ON {_AUTHORITY_EVENTS_TABLE}(approval_id, event_id)"""
+_AUTHORITY_V6_DDL = (
+    _AUTHORITY_CREDENTIALS_DDL,
+    _AUTHORITY_DECISIONS_DDL,
+    _AUTHORITY_EVENTS_DDL,
+    _AUTHORITY_APPROVAL_INDEX_DDL,
+)
+_AUTHORITY_TABLE_XINFO = {
+    _AUTHORITY_CREDENTIALS_TABLE: (
+        (0, "credential_id", "TEXT", 1, None, 1, 0),
+        (1, "kdf_name", "TEXT", 1, None, 0, 0),
+        (2, "kdf_n", "INTEGER", 1, None, 0, 0),
+        (3, "kdf_r", "INTEGER", 1, None, 0, 0),
+        (4, "kdf_p", "INTEGER", 1, None, 0, 0),
+        (5, "kdf_dklen", "INTEGER", 1, None, 0, 0),
+        (6, "kdf_maxmem", "INTEGER", 1, None, 0, 0),
+        (7, "salt", "BLOB", 1, None, 0, 0),
+        (8, "verifier", "BLOB", 1, None, 0, 0),
+        (9, "created_at", "TEXT", 1, None, 0, 0),
+    ),
+    _AUTHORITY_DECISIONS_TABLE: (
+        (0, "approval_id", "TEXT", 1, None, 1, 0),
+        (1, "review_hash", "TEXT", 1, None, 0, 0),
+        (2, "review_json", "TEXT", 1, None, 0, 0),
+        (3, "decision_hash", "TEXT", 0, None, 0, 0),
+        (4, "decision_json", "TEXT", 0, None, 0, 0),
+        (5, "state", "TEXT", 1, None, 0, 0),
+        (6, "generation", "INTEGER", 1, None, 0, 0),
+        (7, "last_event_hash", "TEXT", 1, None, 0, 0),
+        (8, "updated_at", "TEXT", 1, None, 0, 0),
+    ),
+    _AUTHORITY_EVENTS_TABLE: (
+        (0, "event_id", "INTEGER", 0, None, 1, 0),
+        (1, "credential_id", "TEXT", 1, None, 0, 0),
+        (2, "approval_id", "TEXT", 1, None, 0, 0),
+        (3, "generation", "INTEGER", 1, None, 0, 0),
+        (4, "event_type", "TEXT", 1, None, 0, 0),
+        (5, "content_json", "TEXT", 1, None, 0, 0),
+        (6, "content_hash", "TEXT", 1, None, 0, 0),
+        (7, "previous_hash", "TEXT", 1, None, 0, 0),
+        (8, "mac", "BLOB", 1, None, 0, 0),
+        (9, "created_at", "TEXT", 1, None, 0, 0),
+    ),
+}
+_AUTHORITY_INDEX_LIST = {
+    _AUTHORITY_CREDENTIALS_TABLE: {
+        (f"sqlite_autoindex_{_AUTHORITY_CREDENTIALS_TABLE}_1", 1, "pk", 0),
+    },
+    _AUTHORITY_DECISIONS_TABLE: {
+        (f"sqlite_autoindex_{_AUTHORITY_DECISIONS_TABLE}_1", 1, "pk", 0),
+    },
+    _AUTHORITY_EVENTS_TABLE: {
+        (_AUTHORITY_APPROVAL_INDEX, 0, "c", 0),
+        (f"sqlite_autoindex_{_AUTHORITY_EVENTS_TABLE}_1", 1, "u", 0),
+    },
+}
+_AUTHORITY_INDEX_INFO = {
+    f"sqlite_autoindex_{_AUTHORITY_CREDENTIALS_TABLE}_1": (
+        (0, 0, "credential_id"),
+    ),
+    f"sqlite_autoindex_{_AUTHORITY_DECISIONS_TABLE}_1": (
+        (0, 0, "approval_id"),
+    ),
+    _AUTHORITY_APPROVAL_INDEX: ((0, 2, "approval_id"), (1, 0, "event_id")),
+    f"sqlite_autoindex_{_AUTHORITY_EVENTS_TABLE}_1": ((0, 6, "content_hash"),),
+}
+_AUTHORITY_FOREIGN_KEYS = {
+    _AUTHORITY_CREDENTIALS_TABLE: set(),
+    _AUTHORITY_DECISIONS_TABLE: set(),
+    _AUTHORITY_EVENTS_TABLE: {
+        (
+            _AUTHORITY_DECISIONS_TABLE,
+            "approval_id",
+            "approval_id",
+            "NO ACTION",
+            "NO ACTION",
+            "NONE",
+        ),
+        (
+            _AUTHORITY_CREDENTIALS_TABLE,
+            "credential_id",
+            "credential_id",
+            "NO ACTION",
+            "NO ACTION",
+            "NONE",
+        ),
+    },
+}
+
+
+def _normalize_schema_sql(value: str) -> str:
+    return " ".join(value.split())
+
+
+def _stored_schema_sql(value: str) -> str:
+    return _normalize_schema_sql(value).replace(" IF NOT EXISTS", "", 1)
+
+
+def _verify_authenticated_human_decision_v6(connection: sqlite3.Connection) -> None:
+    """Verify the exact private authority schema and live constraint PRAGMAs."""
+    try:
+        foreign_keys = connection.execute("PRAGMA foreign_keys").fetchone()
+        ignored_checks = connection.execute(
+            "PRAGMA ignore_check_constraints"
+        ).fetchone()
+        if (
+            foreign_keys is None
+            or foreign_keys[0] != 1
+            or ignored_checks is None
+            or ignored_checks[0] != 0
+        ):
+            raise ValueError("authority pragmas")
+
+        expected_objects: dict[tuple[str, str, str], str | None] = {
+            (
+                "table",
+                _AUTHORITY_CREDENTIALS_TABLE,
+                _AUTHORITY_CREDENTIALS_TABLE,
+            ): _stored_schema_sql(_AUTHORITY_CREDENTIALS_DDL),
+            (
+                "table",
+                _AUTHORITY_DECISIONS_TABLE,
+                _AUTHORITY_DECISIONS_TABLE,
+            ): _stored_schema_sql(_AUTHORITY_DECISIONS_DDL),
+            (
+                "table",
+                _AUTHORITY_EVENTS_TABLE,
+                _AUTHORITY_EVENTS_TABLE,
+            ): _stored_schema_sql(_AUTHORITY_EVENTS_DDL),
+            (
+                "index",
+                _AUTHORITY_APPROVAL_INDEX,
+                _AUTHORITY_EVENTS_TABLE,
+            ): _stored_schema_sql(_AUTHORITY_APPROVAL_INDEX_DDL),
+            (
+                "index",
+                f"sqlite_autoindex_{_AUTHORITY_CREDENTIALS_TABLE}_1",
+                _AUTHORITY_CREDENTIALS_TABLE,
+            ): None,
+            (
+                "index",
+                f"sqlite_autoindex_{_AUTHORITY_DECISIONS_TABLE}_1",
+                _AUTHORITY_DECISIONS_TABLE,
+            ): None,
+            (
+                "index",
+                f"sqlite_autoindex_{_AUTHORITY_EVENTS_TABLE}_1",
+                _AUTHORITY_EVENTS_TABLE,
+            ): None,
+        }
+        rows = connection.execute(
+            "SELECT type, name, tbl_name, sql FROM sqlite_schema"
+        ).fetchall()
+        authority_prefix = "studio_authenticated_human_"
+        authority_tables = {
+            _AUTHORITY_CREDENTIALS_TABLE.casefold(),
+            _AUTHORITY_DECISIONS_TABLE.casefold(),
+            _AUTHORITY_EVENTS_TABLE.casefold(),
+        }
+        observed_objects: dict[tuple[str, str, str], str | None] = {}
+        for row in rows:
+            name = row[1]
+            table = row[2]
+            if type(name) is not str or type(table) is not str:
+                raise ValueError("authority object identity")
+            if not (
+                name.casefold().startswith(authority_prefix)
+                or table.casefold() in authority_tables
+            ):
+                continue
+            sql = row[3]
+            if sql is not None and type(sql) is not str:
+                raise ValueError("authority schema SQL")
+            observed_objects[(row[0], name, table)] = (
+                None if sql is None else _normalize_schema_sql(sql)
+            )
+        if observed_objects != expected_objects:
+            raise ValueError("authority object census")
+
+        for table, expected_xinfo in _AUTHORITY_TABLE_XINFO.items():
+            xinfo = tuple(
+                tuple(row)
+                for row in connection.execute(f'PRAGMA table_xinfo("{table}")')
+            )
+            if xinfo != expected_xinfo:
+                raise ValueError("authority columns")
+
+            indexes = {
+                (row[1], row[2], row[3], row[4])
+                for row in connection.execute(f'PRAGMA index_list("{table}")')
+            }
+            if indexes != _AUTHORITY_INDEX_LIST[table]:
+                raise ValueError("authority indexes")
+
+            foreign_key_rows = connection.execute(
+                f'PRAGMA foreign_key_list("{table}")'
+            )
+            foreign_key_shapes = {
+                (row[2], row[3], row[4], row[5], row[6], row[7])
+                for row in foreign_key_rows
+            }
+            if foreign_key_shapes != _AUTHORITY_FOREIGN_KEYS[table]:
+                raise ValueError("authority foreign keys")
+
+        for index, expected_info in _AUTHORITY_INDEX_INFO.items():
+            info = tuple(
+                tuple(row)
+                for row in connection.execute(f'PRAGMA index_info("{index}")')
+            )
+            if info != expected_info:
+                raise ValueError("authority index columns")
+    except (IndexError, KeyError, sqlite3.Error, TypeError, ValueError) as exc:
+        raise StudioError("invalid_state", _AUTHORITY_SCHEMA_ERROR) from exc
 
 
 def utc_now() -> str:
@@ -141,6 +410,13 @@ class StudioStore:
         if mode not in {"primary", "secondary"}:
             raise ValueError("Studio store mode must be 'primary' or 'secondary'")
         self.mode = mode
+        self._creator_thread_id = threading.get_ident()
+        self._authenticated_human_decision_lock = threading.RLock()
+        self._authenticated_human_decision_connection_instance: (
+            sqlite3.Connection | None
+        ) = None
+        self._authenticated_human_decision_connection_unavailable = False
+        self._closed = False
         self.data_dir = _absolute(data_dir)
         create = mode == "primary"
         _ensure_safe_directory(self.data_dir, create=create)
@@ -193,7 +469,116 @@ class StudioStore:
         self.close()
 
     def close(self) -> None:
-        self.connection.close()
+        if threading.get_ident() != self._creator_thread_id:
+            raise StudioError(
+                "invalid_state", "Studio store close requires its creator thread"
+            )
+        with self._authenticated_human_decision_lock:
+            if self._closed:
+                return
+            self._closed = True
+            authority_connection = self._authenticated_human_decision_connection_instance
+            self._authenticated_human_decision_connection_instance = None
+            try:
+                if authority_connection is not None:
+                    authority_connection.close()
+            finally:
+                self.connection.close()
+
+    def _authenticated_human_decision_connection(self) -> sqlite3.Connection:
+        """Return the Store-owned connection isolated for the private authority."""
+        with self._authenticated_human_decision_lock:
+            if self._closed:
+                raise StudioError("invalid_state", "Studio store is closed")
+            if self._authenticated_human_decision_connection_unavailable:
+                raise StudioError(
+                    "invalid_state", "Authenticated decision authority is unavailable"
+                )
+            existing = self._authenticated_human_decision_connection_instance
+            if existing is not None:
+                return existing
+            before = _safe_database_file(self.database_path)
+            if before is None:
+                raise StudioError(
+                    "invalid_state", "Authenticated decision database is unavailable"
+                )
+            connection: sqlite3.Connection | None = None
+            try:
+                connection = sqlite3.connect(
+                    f"{self.database_path.as_uri()}?mode=rw",
+                    timeout=5.0,
+                    uri=True,
+                    check_same_thread=False,
+                )
+                connection.row_factory = sqlite3.Row
+                after = _safe_database_file(self.database_path)
+                if after != before:
+                    raise StudioError(
+                        "conflict",
+                        "Studio database identity changed while opening authority connection",
+                    )
+                connection.execute("PRAGMA foreign_keys = ON")
+                connection.execute("PRAGMA busy_timeout = 5000")
+                journal_mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
+                connection.execute("PRAGMA synchronous = FULL")
+                if str(journal_mode).casefold() != "wal":
+                    raise StudioError(
+                        "invalid_state",
+                        "Authenticated decision database requires WAL mode",
+                    )
+                row = connection.execute(
+                    "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+                ).fetchone()
+                if row is None or int(row["value"]) != SCHEMA_VERSION:
+                    raise StudioError(
+                        "invalid_state",
+                        f"Authenticated decision database requires schema version {SCHEMA_VERSION}",
+                    )
+                _verify_authenticated_human_decision_v6(connection)
+            except StudioError:
+                if connection is not None:
+                    connection.close()
+                raise
+            except (sqlite3.Error, ValueError) as exc:
+                if connection is not None:
+                    connection.close()
+                raise StudioError(
+                    "invalid_state", "Authenticated decision database is unavailable"
+                ) from exc
+            self._authenticated_human_decision_connection_instance = connection
+            return connection
+
+    def _require_active_authenticated_human_decision_connection(
+        self, connection: sqlite3.Connection
+    ) -> None:
+        """Reject a closed Store or an authority connection detached by close()."""
+        if self._closed:
+            raise StudioError("invalid_state", "Studio store is closed")
+        if self._authenticated_human_decision_connection_unavailable:
+            raise StudioError(
+                "invalid_state", "Authenticated decision authority is unavailable"
+            )
+        if self._authenticated_human_decision_connection_instance is not connection:
+            raise StudioError(
+                "invalid_state", "Authenticated decision authority is unavailable"
+            )
+
+    def _invalidate_authenticated_human_decision_connection(
+        self, connection: sqlite3.Connection
+    ) -> None:
+        """Permanently disable this Store's uncertain private connection."""
+        with self._authenticated_human_decision_lock:
+            cached = self._authenticated_human_decision_connection_instance
+            self._authenticated_human_decision_connection_instance = None
+            self._authenticated_human_decision_connection_unavailable = True
+            targets = (connection,) if cached is connection else (connection, cached)
+            for target in targets:
+                if target is None:
+                    continue
+                try:
+                    target.close()
+                except BaseException:
+                    pass
 
     def blob_path(self, digest: str) -> Path:
         return self.blobs_dir / digest[:2] / digest
@@ -390,6 +775,7 @@ class StudioStore:
                 "Secondary Studio database creation-job projection is unavailable",
             ) from exc
         self._verify_creation_v4_relational_shape()
+        _verify_authenticated_human_decision_v6(self.connection)
 
     def _migrate(self) -> None:
         try:
@@ -435,6 +821,9 @@ class StudioStore:
                 if version < 5:
                     self._create_v5_schema(advance_schema_version=True)
                     version = 5
+                if version < 6:
+                    self._create_v6_schema(advance_schema_version=True)
+                    version = 6
                 if version >= 3:
                     # Protocol v3 is still additive and unpublished. Re-running
                     # its idempotent DDL lets existing development databases
@@ -444,8 +833,10 @@ class StudioStore:
                 if version >= 4:
                     # Protocol v4 follows the same additive development rule.
                     self._create_v4_schema()
-                if version == 5:
+                if version >= 5:
                     self._create_v5_schema()
+                if version == 6:
+                    _verify_authenticated_human_decision_v6(self.connection)
         except StudioError:
             raise
         except (sqlite3.Error, ValueError) as exc:
@@ -823,6 +1214,25 @@ class StudioStore:
                 "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('schema_version', '5')"
             )
         self._verify_creation_v4_relational_shape()
+
+    def _create_v6_schema(self, *, advance_schema_version: bool = False) -> None:
+        """Create the private, additive Studio Director authority projections."""
+        savepoint = "studio_v6_schema"
+        self.connection.execute(f"SAVEPOINT {savepoint}")
+        try:
+            for statement in _AUTHORITY_V6_DDL:
+                self.connection.execute(statement)
+            _verify_authenticated_human_decision_v6(self.connection)
+            if advance_schema_version:
+                self.connection.execute(
+                    "INSERT OR REPLACE INTO schema_meta (key, value) "
+                    "VALUES ('schema_version', '6')"
+                )
+            self.connection.execute(f"RELEASE {savepoint}")
+        except Exception:
+            self.connection.execute(f"ROLLBACK TO {savepoint}")
+            self.connection.execute(f"RELEASE {savepoint}")
+            raise
 
     def _ensure_creation_job_columns(self) -> None:
         columns = {

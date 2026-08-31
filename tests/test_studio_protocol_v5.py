@@ -1026,10 +1026,12 @@ class StudioProtocolV5Tests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "kind is unknown"):
             validate_studio_protocol_envelope({**create, "protocol_version": 4})
 
-    def test_v6_contract_does_not_require_a_storage_migration(self) -> None:
+    def test_public_v6_output_grant_shape_is_unchanged_by_private_store_v6_migration(self) -> None:
         from worldforge.studio.storage import SCHEMA_VERSION, StudioStore
 
-        self.assertEqual(5, SCHEMA_VERSION)
+        # Public output-grant record v6 was additive within Studio protocol v5.
+        # Private Director authority state independently advances StudioStore to v6.
+        self.assertEqual(6, SCHEMA_VERSION)
         with tempfile.TemporaryDirectory(prefix="wf-studio-v6-contract-") as temporary:
             with StudioStore(Path(temporary) / "studio") as store:
                 columns = {

@@ -303,7 +303,7 @@ class StudioCreationV3StorageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             data = Path(temp) / "studio"
             with StudioStore(data) as store:
-                self.assertEqual(5, SCHEMA_VERSION)
+                self.assertEqual(6, SCHEMA_VERSION)
                 store.connection.execute(
                     "UPDATE schema_meta SET value = '2' WHERE key = 'schema_version'"
                 )
@@ -336,7 +336,7 @@ class StudioCreationV3StorageTests(unittest.TestCase):
                 version = migrated.connection.execute(
                     "SELECT value FROM schema_meta WHERE key = 'schema_version'"
                 ).fetchone()[0]
-                self.assertEqual("5", version)
+                self.assertEqual("6", version)
                 tables = {
                     row[0]
                     for row in migrated.connection.execute(
@@ -374,7 +374,7 @@ class StudioCreationV3StorageTests(unittest.TestCase):
             database.execute("UPDATE schema_meta SET value = '2' WHERE key = 'schema_version'")
             database.commit()
             database.close()
-            with self.assertRaisesRegex(StudioError, "schema version 5"):
+            with self.assertRaisesRegex(StudioError, "schema version 6"):
                 StudioStore(data, mode="secondary")
 
 

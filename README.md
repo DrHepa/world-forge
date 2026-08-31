@@ -820,6 +820,10 @@ Identity migration is recorded in
 [world-project v2-to-v3 guide](docs/MIGRATING_WORLD_PROJECT_V2_TO_V3.md),
 [legacy-identity allowlist policy](docs/LEGACY_IDENTITY_ALLOWLIST.md), and
 [cutover/rollback runbook](docs/operations/IDENTITY_CUTOVER_AND_ROLLBACK.md).
+ADR-0047 adds a private, backend-only durable Director possession authority for
+exact Harness tool-approval decisions. It is not a Studio UI workflow, identity
+system, nonrepudiation mechanism, or external whole-store rollback detector; see
+[ADR-0047](docs/decisions/0047-authenticated-durable-studio-human-decisions.md).
 
 ## Public project
 

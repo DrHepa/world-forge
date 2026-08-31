@@ -833,7 +833,7 @@ class StudioCreationJobV4StorageTests(unittest.TestCase):
                         tuple(dependency),
                     )
                     self.assertEqual(
-                        "5",
+                        "6",
                         migrated.connection.execute(
                             "SELECT value FROM schema_meta WHERE key = 'schema_version'"
                         ).fetchone()[0],
@@ -1097,7 +1097,7 @@ class StudioCreationJobV4StorageTests(unittest.TestCase):
     def test_v3_to_v4_migration_is_additive_and_preserves_legacy_bytes(self) -> None:
         from worldforge.studio.storage import SCHEMA_VERSION, StudioStore
 
-        self.assertEqual(5, SCHEMA_VERSION)
+        self.assertEqual(6, SCHEMA_VERSION)
         with tempfile.TemporaryDirectory() as temporary:
             store = StudioStore(Path(temporary))
             legacy_payload = '{"legacy":"bytes-preserved"}'
@@ -1128,7 +1128,7 @@ class StudioCreationJobV4StorageTests(unittest.TestCase):
                 version = migrated.connection.execute(
                     "SELECT value FROM schema_meta WHERE key = 'schema_version'"
                 ).fetchone()["value"]
-                self.assertEqual("5", version)
+                self.assertEqual("6", version)
                 payload = migrated.connection.execute(
                     "SELECT payload_json FROM events WHERE entity_id = 'legacy_01'"
                 ).fetchone()["payload_json"]

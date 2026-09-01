@@ -1056,6 +1056,33 @@ real-provider claim. See
 [ADR-0042](decisions/0042-truthful-private-provider-usage-provenance.md),
 and [ADR-0044](decisions/0044-parent-owned-exact-synthetic-pricing.md).
 
+ADR-0050 adds a pure correction-policy boundary under
+`src/worldforge/provider_evidence/`; it is intentionally outside the Agent
+Harness, catalog, workers, EventLog, public schemas, and `src/isoworld`. The
+boundary validates supplied bytes and JSON-compatible values only. It pins the
+immutable ADR-0046 raw bytes and mechanically isolates its ordered 86-entry
+vocabulary table, so a deliberately forbidden alias in prose is never admitted
+by a whole-document match.
+
+The closed v1 disposition is permanently unavailable and cannot migrate,
+convert, promote, enter a catalog, or authorize provider execution. The closed
+v2 foundation policy requires a dedicated non-login
+`worldforge-ollama-evidence` principal with no name-service supplementary
+groups; copied, byte-manifested, sealed executable/model roots; installed
+systemd socket activation whose `FileDescriptorName=ollama-http` matches
+`StandardInput=fd:ollama-http`; exact `OLLAMA_NO_CLOUD=1`, numeric IPv4
+loopback, no DNS/non-loopback/proxy/environment inheritance; and a CPU-only
+no-accelerator boundary. Its immutable state is still `unavailable`,
+non-production, non-catalog, and non-executable.
+
+This is only the first boundary in the coupled ADR-0050 release train. A real
+controller, Studio Director domain/Store/protocol/UI v7 authority, separately
+authorized host preparation, native observed evidence, and real inference all
+remain absent. The existing synthetic catalog still contains exactly the
+conformance revision-4 and deterministic-probe revision-6 runtimes. Contract
+tests are not native Ollama evidence. See
+[ADR-0050](decisions/0050-studio-director-governed-ollama-evidence-v2.md).
+
 Slice 2B retains the closed, identity/evidence-only plan, observation, and report
 boundary for an optional codebase-memory comparison and adds a pure evaluator
 plus an explicit-input, atomic no-replace CLI. Validators resolve the exact plan

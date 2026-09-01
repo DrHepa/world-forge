@@ -1175,6 +1175,32 @@ freshness claim. See
 [ADR-0042](docs/decisions/0042-truthful-private-provider-usage-provenance.md),
 and [ADR-0044](docs/decisions/0044-parent-owned-exact-synthetic-pricing.md).
 
+### Corrected observed Ollama evidence v2 — contract foundation only
+
+ADR-0050 now makes the ADR-0046 disposition explicit and mechanically
+verifiable without editing its historical bytes. The pure
+`worldforge.provider_evidence.ollama_v2` package pins ADR-0046's raw SHA-256 and
+isolates its exact ordered 86-row vocabulary table, rather than treating a
+forbidden alias in surrounding prose as a registry entry. It validates two
+closed canonical documents: v1 is permanently unavailable with no
+migration/conversion/promotion path, while the v2 policy requires a dedicated
+`worldforge-ollama-evidence` principal, copied sealed release/model custody,
+installed systemd socket activation with matching
+`FileDescriptorName=ollama-http` and `StandardInput=fd:ollama-http`, exact
+cloud-off numeric-loopback/no-proxy constraints, and a CPU-only no-accelerator
+boundary.
+
+This is functional **contract validation only**. The real evidence controller,
+Studio Director/Store/protocol/UI v7 authority, host preparation, native
+evidence, and real inference are absent. Status remains `unavailable` and
+`production_eligible: false`; Ollama is not in the provider catalog and no
+synthetic test is reported as provider PASS evidence. The existing two
+synthetic runtime identities and protected Harness/public bytes remain exact.
+See
+[ADR-0050](docs/decisions/0050-studio-director-governed-ollama-evidence-v2.md)
+and the
+[strict-TDD evidence](docs/evidence/ollama-observed-evidence-v2-contract-tdd.md).
+
 Slice 2B adds a pure deterministic evaluator and explicit-input, atomic
 no-replace CLI for the closed recorded-result plan, observation, and report
 documents. They evaluate supplied evidence only; they do not execute a

@@ -830,8 +830,43 @@ exact review, prepare it, approve or deny it, and revoke its current decision.
 Python remains the cryptographic and storage authority, Electron main owns the
 selected review and compare-and-swap request construction, and the general
 renderer exposes only named argument-free operations. This is not civil or
-legal identity, secure memory zeroization, Harness hydration, external
+legal identity, secure memory zeroization, automatic Studio execution
+hydration, external
 whole-store rollback detection, or completion of Slice 4.
+
+[ADR-0049](docs/decisions/0049-durable-studio-agent-harness-approval-binding.md)
+adds the first private backend composition between that durable authority and
+`AgentExecutionKernel`. The kernel accepts only a weak-registered original
+instance of one of its two exact code-owned approval authorities, captures and
+rechecks its bound method/function/code identity, and rejects copies,
+subclasses, lookalikes, method replacement, or construction-state owner swaps.
+It validates and cross-binds
+exact immutable reviews, snapshots, and checks, then checks the frozen snapshot
+immediately before and again after durable begin. Existing effect-boundary checks and exact-terminal
+replay remain in force. Worker, EventLog, receipt, activation/grant, Studio
+protocol, generated, and runtime bytes are unchanged; this is not a general
+Studio execution service, a standalone receipt proof, or separate-process
+kernel isolation.
+
+Admission identities and primitives, Studio provenance consumption, binding
+construction/identity/validation, and the Studio provisional/completion
+dispatch are captured inside code-owned closures. The kernel constructor does
+not dynamically resolve the imported binder and has no separately assignable
+live validation hook. Studio construction likewise captures exact frame access
+and stores its exact bound-entrypoint factory. Replacing same-named module
+globals cannot admit a copied authority, disable a live custody check, or make
+enroll/unlock return an attacker-substituted authority.
+
+The weak authority registry is synchronized closure-owned state rather than an
+importable mutable mapping. The Studio authority's ordinary constructor is
+closed: successful enroll/unlock auditing and transaction completion must issue
+and immediately consume one exact one-time construction capability bound to the
+Store, credential evidence, event key, and provisional instance before it can
+enter Harness custody; equal but nonidentical credential or event-key objects
+fail that identity check, and failed registration retires the token. This is
+same-process trusted-code hardening against ordinary imported-module rebinding,
+not a claim against arbitrary Python reflection in a fully compromised
+interpreter.
 
 ## Public project
 

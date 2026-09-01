@@ -1,8 +1,12 @@
 """Private durable possession authentication for Studio Director decisions.
 
-This module deliberately exposes no Studio service, IPC, Electron, or Harness
-hydration path.  It authenticates possession of one locally enrolled passphrase
-and stores only a salted verifier plus authenticated decision evidence.
+This module authenticates possession of one locally enrolled passphrase and
+stores only a salted verifier plus authenticated decision evidence. ADR-0049
+permits explicit same-process composition into Agent Harness; automatic Studio
+execution hydration and separate-process isolation remain absent. Direct
+authority construction is closed; successful audited enroll/unlock completion
+owns the one-time private registration provenance and closure-captured
+construction dispatch.
 """
 
 from __future__ import annotations
@@ -13,6 +17,8 @@ import json
 import os
 import re
 import sqlite3
+import sys
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
@@ -23,11 +29,15 @@ from worldforge.agent_harness.approvals import (
     ApprovalAuthoritySnapshot,
     ApprovalCheck,
     ApprovalError,
+    ExecutionApprovalAuthority,
     ExecutionApprovalDecision,
     ExecutionApprovalReview,
     _exact_hash,
     _exact_id,
     _exact_integer,
+    _authority_functions,
+    _configure_studio_execution_approval_authority,
+    _register_studio_execution_approval_authority,
     _validate_authority_snapshot,
     _validate_decision,
     _validate_review,
@@ -322,7 +332,7 @@ def _immediate_interrupted_primary(
     return primary
 
 
-class StudioAuthenticatedHumanDecisionAuthority:
+class StudioAuthenticatedHumanDecisionAuthority(ExecutionApprovalAuthority):
     """One locked/unlocked, transactionally durable Director authority."""
 
     def __init__(
@@ -330,18 +340,18 @@ class StudioAuthenticatedHumanDecisionAuthority:
         store: StudioStore,
         event_key: bytes,
         credential: _CredentialEvidence,
+        provenance: object = None,
     ) -> None:
-        self._store = store
-        self._event_key = event_key
-        self._credential = credential
-        self._anchor = _EMPTY_AUDIT_HEAD
-        self._poisoned = False
-        self._connection = store._authenticated_human_decision_connection()
-        self._lock = store._authenticated_human_decision_lock
+        raise ApprovalError("approval_authority_invalid")
 
     @classmethod
     def enroll(
-        cls, store: StudioStore, *, passphrase: object
+        cls,
+        store: StudioStore,
+        provisional_authority,
+        complete_registration,
+        *,
+        passphrase: object,
     ) -> StudioAuthenticatedHumanDecisionAuthority:
         if store.mode != "primary":
             raise StudioError(
@@ -389,11 +399,22 @@ class StudioAuthenticatedHumanDecisionAuthority:
                         "(?, 'scrypt', ?, ?, ?, ?, ?, ?, ?, ?)",
                         (_CREDENTIAL_ID, *_KDF, salt, verifier, created_at),
                     )
-                    authority = cls(store, event_key, credential)
+                    authority = provisional_authority(
+                        cls,
+                        store,
+                        event_key,
+                        credential,
+                    )
                     head = authority._audit_in_transaction()
                     phase = "commit"
                     connection.commit()
                     authority._advance_anchor(head)
+                    complete_registration(
+                        authority,
+                        store,
+                        event_key,
+                        credential,
+                    )
                     return authority
                 except BaseException as exc:
                     failure = (
@@ -458,7 +479,12 @@ class StudioAuthenticatedHumanDecisionAuthority:
 
     @classmethod
     def unlock(
-        cls, store: StudioStore, *, passphrase: object
+        cls,
+        store: StudioStore,
+        provisional_authority,
+        complete_registration,
+        *,
+        passphrase: object,
     ) -> StudioAuthenticatedHumanDecisionAuthority:
         encoded = _passphrase_bytes(passphrase)
         connection = store._authenticated_human_decision_connection()
@@ -485,15 +511,23 @@ class StudioAuthenticatedHumanDecisionAuthority:
                         _verifier(master, credential), credential.verifier
                     ):
                         raise StudioError("invalid_state", "authentication failed")
-                    authority = cls(
+                    event_key = _subkey(master, _EVENT_KEY_DOMAIN)
+                    authority = provisional_authority(
+                        cls,
                         store,
-                        _subkey(master, _EVENT_KEY_DOMAIN),
+                        event_key,
                         credential,
                     )
                     head = authority._audit_in_transaction()
                     phase = "commit"
                     connection.commit()
                     authority._advance_anchor(head)
+                    complete_registration(
+                        authority,
+                        store,
+                        event_key,
+                        credential,
+                    )
                     return authority
                 except BaseException as exc:
                     if not isinstance(exc, Exception):
@@ -1470,6 +1504,239 @@ def _decision_from_json(
     if type(value) is not str:
         raise ValueError("decision JSON")
     return _decision_from_document(decode_object(value, context="authenticated decision"), review)
+
+
+def _build_studio_authority_construction_capsule(
+    register_studio,
+    _approval_error=ApprovalError,
+    _authority_type=StudioAuthenticatedHumanDecisionAuthority,
+    _base_exception=BaseException,
+    _bytes_type=bytes,
+    _credential_type=_CredentialEvidence,
+    _empty_head=_EMPTY_AUDIT_HEAD,
+    _exception_type=Exception,
+    _frame_getter=sys._getframe,
+    _frozenset_type=frozenset,
+    _id=id,
+    _len=len,
+    _object_factory=object,
+    _object_new=object.__new__,
+    _rlock_factory=threading.RLock,
+    _store_type=StudioStore,
+    _type=type,
+):
+    pending: dict[
+        int,
+        tuple[
+            object,
+            object,
+            StudioStore,
+            bytes,
+            _CredentialEvidence,
+            sqlite3.Connection,
+            object,
+        ],
+    ] = {}
+    lock = _rlock_factory()
+    allowed_codes = _frozenset_type(
+        {
+            _authority_type.enroll.__func__.__code__,
+            _authority_type.unlock.__func__.__code__,
+        }
+    )
+
+    def allowed_path(code: object) -> bool:
+        return code in allowed_codes
+
+    def provisional(
+        authority_type: object,
+        store: StudioStore,
+        event_key: bytes,
+        credential: _CredentialEvidence,
+    ) -> StudioAuthenticatedHumanDecisionAuthority:
+        try:
+            caller_code = _frame_getter(1).f_code
+        except _exception_type:
+            raise _approval_error("approval_authority_invalid") from None
+        if (
+            not allowed_path(caller_code)
+            or authority_type is not _authority_type
+            or _type(store) is not _store_type
+            or _type(event_key) is not _bytes_type
+            or _len(event_key) != 32
+            or _type(credential) is not _credential_type
+        ):
+            raise _approval_error("approval_authority_invalid")
+        authority = _object_new(_authority_type)
+        authority._store = store
+        authority._event_key = event_key
+        authority._credential = credential
+        authority._anchor = _empty_head
+        authority._poisoned = False
+        authority._connection = store._authenticated_human_decision_connection()
+        authority._lock = store._authenticated_human_decision_lock
+        return authority
+
+    def consume(
+        authority: object,
+        token: object,
+    ) -> tuple[tuple[str, object], ...]:
+        token_id = _id(token)
+        with lock:
+            issued = pending.pop(token_id, None)
+        try:
+            valid = (
+                issued is not None
+                and issued[0] is token
+                and issued[1] is authority
+                and issued[2] is authority._store
+                and issued[3] is authority._event_key
+                and issued[4] is authority._credential
+                and issued[5] is authority._connection
+                and issued[6] is authority._lock
+            )
+        except _exception_type:
+            valid = False
+        if not valid:
+            raise _approval_error("approval_authority_invalid")
+        assert issued is not None
+        return (
+            ("_store", issued[2]),
+            ("_event_key", issued[3]),
+            ("_credential", issued[4]),
+            ("_connection", issued[5]),
+            ("_lock", issued[6]),
+        )
+
+    def complete(
+        authority: StudioAuthenticatedHumanDecisionAuthority,
+        store: StudioStore,
+        event_key: bytes,
+        credential: _CredentialEvidence,
+    ) -> None:
+        try:
+            caller_code = _frame_getter(1).f_code
+        except _exception_type:
+            raise _approval_error("approval_authority_invalid") from None
+        if not allowed_path(caller_code):
+            raise _approval_error("approval_authority_invalid")
+        connection = store._authenticated_human_decision_connection()
+        store_lock = store._authenticated_human_decision_lock
+        if (
+            authority._store is not store
+            or authority._event_key is not event_key
+            or authority._credential is not credential
+            or authority._connection is not connection
+            or authority._lock is not store_lock
+        ):
+            raise _approval_error("approval_authority_invalid")
+        token = _object_factory()
+        token_id = _id(token)
+        with lock:
+            pending[token_id] = (
+                token,
+                authority,
+                store,
+                event_key,
+                credential,
+                connection,
+                store_lock,
+            )
+        try:
+            register_studio(authority, token)
+        except _base_exception:
+            with lock:
+                pending.pop(token_id, None)
+            raise
+
+    return provisional, complete, consume
+
+
+(
+    _new_provisional_studio_authority,
+    _complete_studio_authority_registration,
+    _consume_studio_authority_registration_provenance,
+) = _build_studio_authority_construction_capsule(
+    _register_studio_execution_approval_authority
+)
+
+
+class _BoundStudioConstructionEntrypoint:
+    __slots__ = ("_owner", "__func__", "_provisional", "_complete")
+
+    def __init__(
+        self,
+        owner,
+        implementation,
+        provisional,
+        complete,
+        _object_setattr=object.__setattr__,
+    ) -> None:
+        _object_setattr(self, "_owner", owner)
+        _object_setattr(self, "__func__", implementation)
+        _object_setattr(self, "_provisional", provisional)
+        _object_setattr(self, "_complete", complete)
+
+    def __setattr__(self, _name, _value, _approval_error=ApprovalError) -> None:
+        raise _approval_error("approval_authority_invalid")
+
+    def __call__(self, store: StudioStore, *, passphrase: object):
+        return self.__func__(
+            self._owner,
+            store,
+            self._provisional,
+            self._complete,
+            passphrase=passphrase,
+        )
+
+
+class _StudioConstructionEntrypoint:
+    __slots__ = ("_implementation", "_provisional", "_complete", "_bound_factory")
+
+    def __init__(
+        self,
+        implementation,
+        provisional,
+        complete,
+        _bound_factory=_BoundStudioConstructionEntrypoint,
+        _object_setattr=object.__setattr__,
+    ) -> None:
+        _object_setattr(self, "_implementation", implementation)
+        _object_setattr(self, "_provisional", provisional)
+        _object_setattr(self, "_complete", complete)
+        _object_setattr(self, "_bound_factory", _bound_factory)
+
+    def __setattr__(self, _name, _value, _approval_error=ApprovalError) -> None:
+        raise _approval_error("approval_authority_invalid")
+
+    def __get__(self, _instance, owner):
+        return self._bound_factory(
+            owner,
+            self._implementation,
+            self._provisional,
+            self._complete,
+        )
+
+
+StudioAuthenticatedHumanDecisionAuthority.enroll = _StudioConstructionEntrypoint(
+    StudioAuthenticatedHumanDecisionAuthority.enroll.__func__,
+    _new_provisional_studio_authority,
+    _complete_studio_authority_registration,
+)
+StudioAuthenticatedHumanDecisionAuthority.unlock = _StudioConstructionEntrypoint(
+    StudioAuthenticatedHumanDecisionAuthority.unlock.__func__,
+    _new_provisional_studio_authority,
+    _complete_studio_authority_registration,
+)
+
+
+_STUDIO_AUTHORITY_FUNCTIONS = _authority_functions(
+    StudioAuthenticatedHumanDecisionAuthority
+)
+_configure_studio_execution_approval_authority(
+    StudioAuthenticatedHumanDecisionAuthority,
+    _consume_studio_authority_registration_provenance,
+)
 
 
 __all__ = ("StudioAuthenticatedHumanDecisionAuthority",)

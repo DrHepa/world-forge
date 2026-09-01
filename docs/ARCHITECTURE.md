@@ -159,9 +159,45 @@ passphrase, path, review request body, reviewer/outcome, tool selection,
 expiry, generation, or expected hash. The accessible UI renders exact hashes,
 budgets, raw cost minor units with their currency code, tool IDs, descriptor
 hashes, state, and decision evidence without inventing tool descriptions. It
-visibly states the local identity, zeroization, and Harness limitations. This
-ceremony does not connect the authority to Harness execution or complete Slice
-4; native and hosted evidence remain untested. See ADR-0048.
+visibly states the local identity and zeroization limitations. See ADR-0048.
+
+The private backend can now compose an explicitly unlocked
+`StudioAuthenticatedHumanDecisionAuthority` into `AgentExecutionKernel`
+through the narrow code-owned `ExecutionApprovalAuthority` port. The kernel
+accepts only weak-registered original exact code-owned instances, captures and
+rechecks owner-bound method/function/code identity, and rejects copies,
+subclasses, construction-state owner swaps, or method replacement. It freezes and exactly
+cross-binds the minted review, authority snapshot, decision, and authorization
+check for private request fingerprint v3, checks it immediately before durable
+begin, checks the same snapshot again after begin, and retains every existing live effect-boundary
+check. Studio retains all credential, HMAC, Store, decision, and revocation
+operations; none enter worker, EventLog, receipt, activation, or grant bytes.
+A service restart requires a new Store, explicit unlock, and new same-process
+kernel composition. This does not add automatic Studio execution hydration,
+standalone receipt proof, separate-process isolation, or completion of Slice 4;
+native and hosted evidence remain untested. See ADR-0049.
+
+The custody capsule captures constructor/function identities and primitives,
+Studio provenance consumption, and exact registry/binding identity and
+validation. Kernel construction closes over that exact binder rather than a
+mutable imported alias; its frozen approval binding owns the live validation
+closure instead of exposing a separately assignable kernel hook. Studio
+provisional/completion dispatch captures exact frame access and its descriptor
+stores the exact bound-entrypoint factory. Mutable module aliases are not
+consulted as live trust inputs and cannot substitute the authority returned by
+enroll/unlock.
+
+The custody registry is synchronized closure state with no exported mutable
+mapping. Studio's ordinary durable-authority constructor always rejects.
+Enroll/unlock use an exact private provisional instance for their audit, then
+after transaction completion and anchor publication issue and consume a
+one-time closure capability bound to the exact instance, Store, credential, and
+event key before registration. Equal but nonidentical credential or event-key
+objects reject, reuse rejects, and a failed registration retires the token. No
+capability enters object state, worker or EventLog bytes, receipts, logs, or
+serialization. This ordinary imported-module hardening does not defend against
+reflective closure mutation or a fully compromised same-process Python
+interpreter.
 
 The service's read-only authoring boundary is manifest-authorized rather than a
 general filesystem browser. `source.list` and `source.read` expose only the
@@ -751,8 +787,9 @@ private-input hashes, exact runtime and limits, and immutable eligible
 descriptor catalog. Its decision is an approved ordered subset, denial, expiry,
 or later revocation. The kernel fingerprints one atomic detached authority
 snapshot before durable begin and never adopts a decision that arrives during
-that begin. The reviewer ID is only an asserted in-memory label; Studio
-authentication and durable approval evidence are not implemented. The broker
+that begin. The legacy in-memory reviewer ID remains only an asserted label;
+the authenticated durable Studio authority may instead implement the same
+private execution port with its fixed `director_local` decision. The broker
 requires adapter-supplied exact summary/schema metadata and gives the provider
 only approved summary/hash pairs initially. Ordered unique exposure requests
 preserve their first-request order and make full bounded canonical schemas

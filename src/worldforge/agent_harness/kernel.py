@@ -26,8 +26,12 @@ from .approvals import (
     ApprovalAuthoritySnapshot,
     ApprovalCheck,
     ApprovalError,
+    ExecutionApprovalAuthority,
     ExecutionApprovalReview,
-    InMemoryHumanApprovalAuthority,
+    _validate_approval_check_for_snapshot,
+    _validate_authority_snapshot_for_review,
+    _validate_execution_approval_authority,
+    _validate_prepared_review_for_review,
 )
 from .capability_broker import (
     BrokerError,
@@ -95,6 +99,50 @@ class KernelError(ValueError):
     def __init__(self, reason_code: str) -> None:
         self.reason_code = reason_code
         super().__init__(reason_code)
+
+
+def _approval_authority_constructor_custody(
+    capture_binding,
+    _approval_error=ApprovalError,
+    _kernel_error=KernelError,
+):
+    """Close kernel construction over the code-owned authority binder."""
+
+    def decorate(initializer):
+        def construct(
+            self,
+            *,
+            provider: ProviderAdapter,
+            broker: CapabilityBroker,
+            journal: ExecutionJournal,
+            clock: Clock,
+            cancellation: CancellationToken,
+            approval_authority: ExecutionApprovalAuthority | None = None,
+            provider_catalog: ProviderRuntimeCatalog | None = None,
+            provider_governance_authority: InMemoryProviderGovernanceAuthority
+            | None = None,
+        ) -> None:
+            approval_binding = None
+            if approval_authority is not None:
+                try:
+                    approval_binding = capture_binding(approval_authority)
+                except _approval_error:
+                    raise _kernel_error("approval_authority_invalid") from None
+            initializer(
+                self,
+                provider=provider,
+                broker=broker,
+                journal=journal,
+                clock=clock,
+                cancellation=cancellation,
+                approval_authority=approval_binding,
+                provider_catalog=provider_catalog,
+                provider_governance_authority=provider_governance_authority,
+            )
+
+        return construct
+
+    return decorate
 
 
 @dataclass(frozen=True, slots=True)
@@ -844,6 +892,8 @@ class BudgetLedger:
 
 class AgentExecutionKernel:
     def __setattr__(self, name: str, value: object) -> None:
+        if name == "_approval_authority_validate":
+            raise AttributeError("kernel approval authority is capsule-owned")
         if name in {
             "_provider_authority",
             "_approval_authority",
@@ -859,6 +909,8 @@ class AgentExecutionKernel:
         object.__setattr__(self, name, value)
 
     def __delattr__(self, name: str) -> None:
+        if name == "_approval_authority_validate":
+            raise AttributeError("kernel approval authority is capsule-owned")
         if name in {
             "_provider_authority",
             "_approval_authority",
@@ -868,6 +920,7 @@ class AgentExecutionKernel:
             raise AttributeError("kernel authority is immutable")
         object.__delattr__(self, name)
 
+    @_approval_authority_constructor_custody(_validate_execution_approval_authority)
     def __init__(
         self,
         *,
@@ -876,16 +929,11 @@ class AgentExecutionKernel:
         journal: ExecutionJournal,
         clock: Clock,
         cancellation: CancellationToken,
-        approval_authority: InMemoryHumanApprovalAuthority | None = None,
+        approval_authority: object = None,
         provider_catalog: ProviderRuntimeCatalog | None = None,
         provider_governance_authority: InMemoryProviderGovernanceAuthority | None = None,
     ) -> None:
         provider_authority = _snapshot_provider_authority(provider)
-        if (
-            approval_authority is not None
-            and type(approval_authority) is not InMemoryHumanApprovalAuthority
-        ):
-            raise KernelError("approval_authority_invalid")
         self._approval_authority = approval_authority
         if provider_catalog is not None and type(provider_catalog) is not ProviderRuntimeCatalog:
             raise KernelError("provider_catalog_invalid")
@@ -993,9 +1041,17 @@ class AgentExecutionKernel:
         if review is None or self._approval_authority is None:
             raise KernelError("approval_required")
         try:
-            return self._approval_authority.prepare(review, expected_generation=0)
+            self._approval_authority._validate_captured()
+        except ApprovalError:
+            raise KernelError("approval_authority_invalid") from None
+        try:
+            prepared = self._approval_authority.prepare(review, expected_generation=0)
         except ApprovalError as exc:
             raise KernelError(exc.reason_code) from None
+        try:
+            return _validate_prepared_review_for_review(prepared, review)
+        except ApprovalError:
+            raise KernelError("approval_check_failed") from None
 
     def prepare_provider_governance_review(
         self,
@@ -1095,18 +1151,32 @@ class AgentExecutionKernel:
         if review is None or self._approval_authority is None or expected_snapshot is None:
             return None, "approval_required"
         try:
-            return (
-                self._approval_authority.check_snapshot(
-                    review,
-                    expected_snapshot,
-                    now_ms=self._safe_now(),
-                ),
-                None,
+            self._approval_authority._validate_captured()
+        except ApprovalError:
+            raise KernelError("approval_authority_invalid") from None
+        now = self._safe_now()
+        try:
+            check = self._approval_authority.check_snapshot(
+                review,
+                expected_snapshot,
+                now_ms=now,
             )
         except ApprovalError as exc:
             return None, exc.reason_code
         except Exception:
             return None, "approval_check_failed"
+        try:
+            return (
+                _validate_approval_check_for_snapshot(
+                    check,
+                    review,
+                    expected_snapshot,
+                    now_ms=now,
+                ),
+                None,
+            )
+        except ApprovalError:
+            raise KernelError("approval_check_failed") from None
 
     def _approval_boundary_reason(
         self,
@@ -1168,13 +1238,25 @@ class AgentExecutionKernel:
                     approval_snapshot = None
                 else:
                     try:
-                        approval_snapshot = self._approval_authority.snapshot(approval_review)
-                        approval_review_hash = approval_snapshot.review_hash
-                        approval_decision_hash = approval_snapshot.decision_hash
+                        self._approval_authority._validate_captured()
+                    except ApprovalError:
+                        raise KernelError("approval_authority_invalid") from None
+                    try:
+                        authority_snapshot = self._approval_authority.snapshot(approval_review)
                     except ApprovalError:
                         approval_snapshot = None
                         approval_review_hash = approval_review.content_hash
                         approval_decision_hash = None
+                    else:
+                        try:
+                            approval_snapshot = _validate_authority_snapshot_for_review(
+                                authority_snapshot,
+                                approval_review,
+                            )
+                        except ApprovalError:
+                            raise KernelError("approval_check_failed") from None
+                        approval_review_hash = approval_snapshot.review_hash
+                        approval_decision_hash = approval_snapshot.decision_hash
                 provider_catalog_hash = (
                     None if self._provider_catalog is None else self._provider_catalog.catalog_hash
                 )
@@ -1294,6 +1376,14 @@ class AgentExecutionKernel:
                     raise KernelError("provider_usage_policy_invalid") from None
                 if not callable(priced_begin):
                     raise KernelError("provider_usage_policy_invalid")
+            approval_check: ApprovalCheck | None = None
+            approval_reason: str | None = None
+            if initial_reason is None and provider_runtime_matches and provider_reason is None:
+                approval_check, approval_reason = self._approval_state(
+                    approval_review,
+                    tool_catalog,
+                    approval_snapshot,
+                )
             try:
                 begun = (
                     self.journal.begin_execution(
@@ -1348,15 +1438,18 @@ class AgentExecutionKernel:
             after_begin_reason = self._cancellation_reason(request.limits, start_ms)
             if initial_reason is None:
                 initial_reason = after_begin_reason
-            approval_check: ApprovalCheck | None = None
-            approval_reason: str | None = None
             if initial_reason is None and provider_runtime_matches:
                 if provider_reason is None:
                     _provider_check, provider_reason = self._provider_governance_state(
                         provider_review,
                         provider_snapshot,
                     )
-            if initial_reason is None and provider_runtime_matches and provider_reason is None:
+            if (
+                initial_reason is None
+                and provider_runtime_matches
+                and provider_reason is None
+                and approval_reason is None
+            ):
                 approval_check, approval_reason = self._approval_state(
                     approval_review,
                     tool_catalog,

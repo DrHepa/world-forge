@@ -22,7 +22,7 @@
     },
     {
       "category": "migration",
-      "file_sha256": "3895dd5c477ea4ca013a5bd69574d1caf8e93caff171b384fef3b104e898ee33",
+      "file_sha256": "2a577461c05911d327dff4632f10081606b27b6639a25c3095a4e01039111b01",
       "justification": "The compatibility bridge retains this old public location until the authorized cutover.",
       "offsets": [
         4147,
@@ -1003,11 +1003,11 @@
     },
     {
       "category": "legacy_contract",
-      "file_sha256": "d5e5f8437b9448a41fdebb539622bb59a3ae0cc0b0f7f0a5634d3cf94dd82d75",
+      "file_sha256": "12cad3a6ce7006ef6c4c747780c7d0d17a42e076c2244f850413f9fae4a6aa10",
       "justification": "Published legacy format, schema, protocol, or storage identity remains immutable.",
       "offsets": [
-        11586,
-        20052
+        13995,
+        22461
       ],
       "path": "docs/ARCHITECTURE.md",
       "pattern": "rpg-world-forge"

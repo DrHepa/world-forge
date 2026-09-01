@@ -1,7 +1,11 @@
-"""Private, in-memory human approval authority for one host process.
+"""Private execution-approval values and code-owned authority custody.
 
-The reviewer identity in this module is an asserted audit label.  Authentication
-and durable reviewer evidence belong to the future Studio control plane.
+The in-memory authority retains an asserted reviewer label. The authenticated
+durable Studio authority implements the same narrow execution port and may be
+composed explicitly into a same-process kernel under ADR-0049. Automatic Studio
+execution hydration and separate-process authority isolation remain absent.
+Authority identity and live trust operations are held only by synchronized
+closure-owned weak custody.
 """
 
 from __future__ import annotations
@@ -9,8 +13,12 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import sys
 import threading
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, replace
+from types import FunctionType, MethodType
+from weakref import ReferenceType, ref
 
 from worldforge.agent_harness_contracts import MAX_SAFE_INTEGER
 
@@ -23,6 +31,7 @@ _DECISION_FORMAT = "world-forge.private.execution_approval_decision"
 _FORMAT_VERSION = 1
 _MAX_TOOL_CANDIDATES = 128
 _MAX_TOOL_ID_CHARACTERS = 1024
+_RLOCK_TYPE = type(threading.RLock())
 
 
 class ApprovalError(ValueError):
@@ -358,6 +367,43 @@ class ApprovalAuthoritySnapshot:
     state: str
 
 
+class ExecutionApprovalAuthority(ABC):
+    """Narrow host-owned approval port consumed by the execution kernel."""
+
+    @abstractmethod
+    def prepare(
+        self,
+        review: object,
+        *,
+        expected_generation: object,
+    ) -> ExecutionApprovalReview: ...
+
+    @abstractmethod
+    def snapshot(self, review: object) -> ApprovalAuthoritySnapshot: ...
+
+    @abstractmethod
+    def check_snapshot(
+        self,
+        review: object,
+        expected: object,
+        *,
+        now_ms: object,
+    ) -> ApprovalCheck: ...
+
+
+@dataclass(frozen=True, slots=True)
+class _ExecutionApprovalAuthorityBinding:
+    owner: ExecutionApprovalAuthority
+    prepare: object
+    snapshot: object
+    check_snapshot: object
+    _validate_owner: FunctionType
+    _validate_captured: FunctionType
+
+    def validate(self) -> None:
+        self._validate_owner(self.owner)
+
+
 @dataclass(slots=True)
 class _ApprovalRecord:
     review: ExecutionApprovalReview
@@ -369,12 +415,13 @@ class _ApprovalRecord:
         return 2 if self.revoked else 1 if self.decision is not None else 0
 
 
-class InMemoryHumanApprovalAuthority:
+class InMemoryHumanApprovalAuthority(ExecutionApprovalAuthority):
     """Instance-scoped CAS store; it authenticates no reviewer identities."""
 
     def __init__(self) -> None:
         self._records: dict[str, _ApprovalRecord] = {}
         self._lock = threading.RLock()
+        _register_in_memory_execution_approval_authority(self)
 
     def prepare(
         self,
@@ -595,6 +642,11 @@ def _validate_authority_snapshot(value: object) -> ApprovalAuthoritySnapshot:
         or decision.execution_id != review.execution_id
     ):
         raise ApprovalError(reason)
+    candidates = tuple(tool_id for tool_id, _descriptor_hash in review.tool_candidates)
+    if decision.approved_tool_ids != tuple(
+        tool_id for tool_id in candidates if tool_id in decision.approved_tool_ids
+    ):
+        raise ApprovalError(reason)
     if value.state == "revoked":
         if generation != 2:
             raise ApprovalError(reason)
@@ -609,10 +661,345 @@ def _validate_authority_snapshot(value: object) -> ApprovalAuthoritySnapshot:
     )
 
 
+def _validate_approval_check(value: object) -> ApprovalCheck:
+    reason = "approval_check_failed"
+    if type(value) is not ApprovalCheck:
+        raise ApprovalError(reason)
+    return replace(
+        value,
+        review_hash=_exact_hash(value.review_hash, reason),
+        decision_hash=_exact_hash(value.decision_hash, reason),
+        approved_tool_ids=_tool_ids(value.approved_tool_ids, reason),
+    )
+
+
+def _validate_authority_snapshot_for_review(
+    value: object,
+    review: object,
+) -> ApprovalAuthoritySnapshot:
+    review = _validate_review(review)
+    snapshot = _validate_authority_snapshot(value)
+    if snapshot.review_hash != review.content_hash or (
+        snapshot.prepared_review is not None and snapshot.prepared_review != review
+    ):
+        raise ApprovalError("approval_check_failed")
+    return snapshot
+
+
+def _validate_prepared_review_for_review(
+    value: object,
+    review: object,
+) -> ExecutionApprovalReview:
+    review = _validate_review(review)
+    prepared = _validate_review(value)
+    if prepared != review:
+        raise ApprovalError("approval_check_failed")
+    return prepared
+
+
+def _validate_approval_check_for_snapshot(
+    value: object,
+    review: object,
+    snapshot: object,
+    *,
+    now_ms: object,
+) -> ApprovalCheck:
+    review = _validate_review(review)
+    snapshot = _validate_authority_snapshot_for_review(snapshot, review)
+    check = _validate_approval_check(value)
+    now = _exact_integer(now_ms, "approval_check_failed")
+    decision = snapshot.current_decision
+    if (
+        snapshot.state != "approved"
+        or decision is None
+        or decision.outcome != "approved"
+        or decision.expires_at_ms is None
+        or now >= decision.expires_at_ms
+        or check.review_hash != review.content_hash
+        or check.decision_hash != snapshot.decision_hash
+        or check.approved_tool_ids != decision.approved_tool_ids
+    ):
+        raise ApprovalError("approval_check_failed")
+    return check
+
+
+def _authority_functions(
+    authority_type: type[object],
+    _approval_error=ApprovalError,
+    _function_type=FunctionType,
+    _list_type=list,
+    _tuple_type=tuple,
+    _type=type,
+    _vars=vars,
+) -> tuple[tuple[str, FunctionType, object], ...]:
+    result: list[tuple[str, FunctionType, object]] = _list_type()
+    authority_values = _vars(authority_type)
+    port_names = ("prepare", "snapshot", "check_snapshot")
+    for name in port_names:
+        value = authority_values.get(name)
+        if _type(value) is not _function_type:
+            raise _approval_error("approval_authority_invalid")
+        result.append((name, value, value.__code__))
+    for name, value in authority_values.items():
+        if name not in port_names and _type(value) is _function_type:
+            result.append((name, value, value.__code__))
+    return _tuple_type(result)
+
+
+_IN_MEMORY_AUTHORITY_FUNCTIONS = _authority_functions(InMemoryHumanApprovalAuthority)
+_IN_MEMORY_AUTHORITY_CONSTRUCTOR_CODE = InMemoryHumanApprovalAuthority.__init__.__code__
+
+
+def _build_execution_approval_authority_capsule(
+    _all=all,
+    _any=any,
+    _approval_error=ApprovalError,
+    _authority_base=ExecutionApprovalAuthority,
+    _authority_functions_impl=_authority_functions,
+    _binding_type=_ExecutionApprovalAuthorityBinding,
+    _dict_type=dict,
+    _exception_type=Exception,
+    _frame_getter=sys._getframe,
+    _function_type=FunctionType,
+    _id=id,
+    _in_memory_type=InMemoryHumanApprovalAuthority,
+    _method_type=MethodType,
+    _modules=sys.modules,
+    _object_getattribute=object.__getattribute__,
+    _ref=ref,
+    _rlock_factory=threading.RLock,
+    _rlock_type=_RLOCK_TYPE,
+    _type=type,
+    _vars=vars,
+):
+    authority_functions = _authority_functions_impl
+    authority_metaclass = _type(_authority_base)
+    in_memory_type = _in_memory_type
+    in_memory_functions = authority_functions(in_memory_type)
+    in_memory_constructor_code = in_memory_type.__init__.__code__
+    binding_validate_function = _binding_type.validate
+    registry: dict[
+        int,
+        tuple[
+            ReferenceType[object],
+            type[object],
+            tuple[tuple[str, FunctionType, object], ...],
+            tuple[tuple[str, object], ...],
+        ],
+    ] = {}
+    lock = _rlock_factory()
+    studio_trust: tuple[
+        type[object],
+        tuple[tuple[str, FunctionType, object], ...],
+        FunctionType,
+    ] | None = None
+
+    def register(
+        value: object,
+        authority_type: type[object],
+        functions: tuple[tuple[str, FunctionType, object], ...],
+        sealed_values: tuple[tuple[str, object], ...],
+    ) -> None:
+        identity = _id(value)
+
+        def retire(registered_ref: ReferenceType[object]) -> None:
+            with lock:
+                registered = registry.get(identity)
+                if registered is not None and registered[0] is registered_ref:
+                    del registry[identity]
+
+        with lock:
+            registry[identity] = (
+                _ref(value, retire),
+                authority_type,
+                functions,
+                sealed_values,
+            )
+
+    def register_in_memory(value: object) -> None:
+        try:
+            caller_code = _frame_getter(1).f_code
+        except _exception_type:
+            raise _approval_error("approval_authority_invalid") from None
+        if (
+            _type(value) is not in_memory_type
+            or caller_code is not in_memory_constructor_code
+            or _type(value._records) is not _dict_type
+            or _type(value._lock) is not _rlock_type
+            or authority_functions(_type(value)) != in_memory_functions
+        ):
+            raise _approval_error("approval_authority_invalid")
+        register(
+            value,
+            in_memory_type,
+            in_memory_functions,
+            (("_records", value._records), ("_lock", value._lock)),
+        )
+
+    def configure_studio(
+        authority_type: object,
+        provenance_consumer: object,
+    ) -> None:
+        nonlocal studio_trust
+        try:
+            caller = _frame_getter(1)
+            caller_globals = caller.f_globals
+            module = _modules["worldforge.studio.authenticated_human_decisions"]
+        except _exception_type:
+            raise _approval_error("approval_authority_invalid") from None
+        if (
+            studio_trust is not None
+            or _type(authority_type) is not authority_metaclass
+            or authority_type.__module__
+            != "worldforge.studio.authenticated_human_decisions"
+            or authority_type.__name__
+            != "StudioAuthenticatedHumanDecisionAuthority"
+            or caller_globals is not _vars(module)
+            or caller_globals.get("StudioAuthenticatedHumanDecisionAuthority")
+            is not authority_type
+            or _type(provenance_consumer) is not _function_type
+        ):
+            raise _approval_error("approval_authority_invalid")
+        studio_trust = (
+            authority_type,
+            authority_functions(authority_type),
+            provenance_consumer,
+        )
+
+    def register_studio(value: object, provenance: object) -> None:
+        trust = studio_trust
+        if trust is None:
+            raise _approval_error("approval_authority_invalid")
+        studio_type, studio_functions, provenance_consumer = trust
+        sealed_values = provenance_consumer(
+            value,
+            provenance,
+        )
+        if (
+            _type(value) is not studio_type
+            or authority_functions(_type(value)) != studio_functions
+        ):
+            raise _approval_error("approval_authority_invalid")
+        try:
+            if not _all(
+                _object_getattribute(value, name) is expected
+                for name, expected in sealed_values
+            ):
+                raise _approval_error("approval_authority_invalid")
+        except _approval_error:
+            raise
+        except _exception_type:
+            raise _approval_error("approval_authority_invalid") from None
+        register(
+            value,
+            studio_type,
+            studio_functions,
+            sealed_values,
+        )
+
+    def validate(value: object) -> tuple[tuple[str, FunctionType, object], ...]:
+        with lock:
+            registered = registry.get(_id(value))
+            if registered is None or registered[0]() is not value:
+                raise _approval_error("approval_authority_invalid")
+            try:
+                valid = (
+                    _type(value) is registered[1]
+                    and authority_functions(_type(value)) == registered[2]
+                    and _all(
+                        _object_getattribute(value, name) is expected
+                        for name, expected in registered[3]
+                    )
+                )
+            except _exception_type:
+                valid = False
+            if not valid:
+                raise _approval_error("approval_authority_invalid")
+            functions = registered[2]
+        instance_values = _object_getattribute(value, "__dict__")
+        if _any(name in instance_values for name, _function, _code in functions):
+            raise _approval_error("approval_authority_invalid")
+        return functions
+
+    def contains(value: object) -> bool:
+        with lock:
+            registered = registry.get(_id(value))
+            return registered is not None and registered[0]() is value
+
+    def bind(value: object) -> _ExecutionApprovalAuthorityBinding:
+        functions = validate(value)
+        bound: list[MethodType] = []
+        for name, function, code in functions:
+            try:
+                method = _object_getattribute(value, name)
+            except _exception_type:
+                raise _approval_error("approval_authority_invalid") from None
+            if (
+                _type(method) is not _method_type
+                or method.__self__ is not value
+                or method.__func__ is not function
+                or method.__func__.__code__ is not code
+            ):
+                raise _approval_error("approval_authority_invalid")
+            if name in ("prepare", "snapshot", "check_snapshot"):
+                bound.append(method)
+        binding = None
+        binding_identity = None
+
+        def validate_captured() -> None:
+            if (
+                binding is None
+                or binding_identity is None
+                or _id(binding) != binding_identity
+            ):
+                raise _approval_error("approval_authority_invalid")
+            validate(value)
+
+        binding = _binding_type(
+            value,
+            *bound,
+            validate,
+            validate_captured,
+        )
+        binding_identity = _id(binding)
+        try:
+            binding_validate = _object_getattribute(binding, "validate")
+        except _exception_type:
+            raise _approval_error("approval_authority_invalid") from None
+        if (
+            _type(binding_validate) is not _method_type
+            or binding_validate.__self__ is not binding
+            or binding_validate.__func__ is not binding_validate_function
+            or binding_validate.__func__.__code__ is not binding_validate_function.__code__
+        ):
+            raise _approval_error("approval_authority_invalid")
+        return binding
+
+    return (
+        register_in_memory,
+        configure_studio,
+        register_studio,
+        validate,
+        contains,
+        bind,
+    )
+
+
+(
+    _register_in_memory_execution_approval_authority,
+    _configure_studio_execution_approval_authority,
+    _register_studio_execution_approval_authority,
+    _validate_registered_execution_approval_authority,
+    _execution_approval_authority_registered,
+    _validate_execution_approval_authority,
+) = _build_execution_approval_authority_capsule()
+
+
 __all__ = (
     "ApprovalAuthoritySnapshot",
     "ApprovalError",
     "ExecutionApprovalDecision",
+    "ExecutionApprovalAuthority",
     "ExecutionApprovalReview",
     "InMemoryHumanApprovalAuthority",
 )

@@ -2721,7 +2721,7 @@ class LocalServiceCompatibilityPinsTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         expected = {
             "src/worldforge/agent_harness/kernel.py": (
-                "621514a6853adff3dac4ead8ba396e532ad2c565bf1d25234a87a85508b42b6f"
+                "121335a16266608edab9b3c4c0c10771882b281d01e27d8872d86acab17422d7"
             ),
             "src/worldforge/agent_harness/ports.py": (
                 "c36fae5d9493ef667614d5a6ac740df5c2fe27a97ec27cd9f210d159fe1d65c6"

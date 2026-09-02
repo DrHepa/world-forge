@@ -1175,7 +1175,7 @@ freshness claim. See
 [ADR-0042](docs/decisions/0042-truthful-private-provider-usage-provenance.md),
 and [ADR-0044](docs/decisions/0044-parent-owned-exact-synthetic-pricing.md).
 
-### Corrected observed Ollama evidence v2 — contract foundation only
+### Corrected observed Ollama evidence v2 — foundation and controller core
 
 ADR-0050 now makes the ADR-0046 disposition explicit and mechanically
 verifiable without editing its historical bytes. The pure
@@ -1190,16 +1190,37 @@ installed systemd socket activation with matching
 cloud-off numeric-loopback/no-proxy constraints, and a CPU-only no-accelerator
 boundary.
 
-This is functional **contract validation only**. The real evidence controller,
-Studio Director/Store/protocol/UI v7 authority, host preparation, native
-evidence, and real inference are absent. Status remains `unavailable` and
-`production_eligible: false`; Ollama is not in the provider catalog and no
-synthetic test is reported as provider PASS evidence. The existing two
-synthetic runtime identities and protected Harness/public bytes remain exact.
+The second boundary adds a deterministic private controller core. Frozen exact
+contracts bind the policy vector, fixed UID/GID, bounded sealed tree manifests,
+independent UID/GID-owner censuses, principal/unit/host observations, closed
+effects, one-use authorizations, operation-specific ownership tokens,
+operations, and reverse rollback. A separate exact-schema SQLite store uses
+`BEGIN IMMEDIATE`, generation/sequence/head/state CAS, canonical documents,
+event hash chaining, unique authorization/effect-attempt identities, and one
+exclusive fixed-host-scope lease. Every mutation reports which caller
+atomically committed it, and semantic reopen/replay requires an exact bijection
+between transition events, authorization consumptions, attempts, host
+projections, and ownership. Closed captured ports expose only
+`inspect`/`observe`, `consume`/`resolve`, and one named method per effect; there
+is no shell, argv, generic command, or generic RPC surface. Every possible
+effect verifies the complete host projection before and after dispatch. Drift
+in any prior or cleaned resource fails closed before another authorization or
+effect, and rollback is explicit. The scope lease is released only by exact
+`rolled_back_clean` proof.
+
+This is functional **non-native transaction logic** only. Apply terminates at
+`prepared_unverified`, never at observed/available/PASS/production-ready. The
+concrete host interpreter/broker, Studio Director/Store/protocol/UI v7
+authority, host preparation, native evidence, and real inference are absent.
+Status remains `unavailable` and `production_eligible: false`; Ollama is not in
+the provider catalog and no test-local fake is reported as provider or systemd
+PASS evidence. The existing two synthetic runtime identities and protected
+Harness/public bytes remain exact.
 See
 [ADR-0050](docs/decisions/0050-studio-director-governed-ollama-evidence-v2.md)
-and the
-[strict-TDD evidence](docs/evidence/ollama-observed-evidence-v2-contract-tdd.md).
+and the strict-TDD evidence for the
+[foundation](docs/evidence/ollama-observed-evidence-v2-contract-tdd.md) and
+[controller core](docs/evidence/ollama-observed-evidence-v2-controller-tdd.md).
 
 Slice 2B adds a pure deterministic evaluator and explicit-input, atomic
 no-replace CLI for the closed recorded-result plan, observation, and report

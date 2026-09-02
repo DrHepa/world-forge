@@ -93,7 +93,7 @@ non-JSON values, validate the outer content hash, and then require byte identity
 with the applicable canonical document. The v1 and v2 formats never
 cross-accept.
 
-### This release is deliberately pure and contract-only
+### The foundation release is deliberately pure and contract-only
 
 `worldforge.provider_evidence.ollama_v2` accepts supplied bytes or JSON values
 and performs deterministic validation only. It imports no Harness, provider
@@ -106,15 +106,119 @@ The existing synthetic catalog therefore remains exactly two entries:
 `worldforge_deterministic_probe_provider` revision 6, both protocol version 3
 and non-production. Ollama is not a third entry.
 
+### The controller core is real transaction logic but still non-native
+
+The second release boundary adds three private modules under
+`worldforge.provider_evidence` without changing the pure `ollama_v2.py`
+foundation:
+
+- `ollama_v2_controller_contracts.py` owns frozen, slotted, exact
+  JSON-compatible contracts for the interpreter binding, bounded tree
+  manifests, principal/unit/host observations, effects, plans, one-use
+  authorizations, operations, and rollback. It binds policy content hash
+  `c4fbf98a52896901bb46732935a7fbef462b7369105dab5bffcff381a3968f73`
+  and serialized SHA-256
+  `030f2a3432efc21d3f9915cd39575e334c47b24b58770935c5105e8f5d5c1322`,
+  fixed numeric UID/GID `9731`, code-owned roots, the unit directory, and
+  exact interpreter-contract and unit bytes. Tree inputs are bounded and
+  reject malformed paths, Unicode/case-fold collisions, overlaps, links, and
+  writable final entries. UID-owner and GID-owner censuses are independent, so
+  either numeric collision is observable and rejected without inventing the
+  other or adopting either identity.
+- `ollama_v2_controller_store.py` is a private exact-schema SQLite store. It is
+  independent of Studio Store and Agent Harness EventLog, uses
+  `BEGIN IMMEDIATE`, foreign keys, generation/sequence/head/state CAS,
+  canonical stored documents, an event hash chain, unique authorization and
+  effect-attempt identities, and one durable lease for the fixed host scope.
+  Every plan, effect, authorization, owned resource, attempt, and lease carries
+  the operation-specific ownership token. Every mutation returns whether that
+  caller completed a direct, exception-free commit. An exact duplicate returns
+  non-owner, and an exact post-state found after any commit exception also
+  returns non-owner: adjacent state equivalence proves durability but cannot
+  prove which concurrent caller committed it. Only a direct commit owner may
+  consume authorization or dispatch. Event payloads bind exact request,
+  consumption, attempt, projection, ownership, and rollback hashes. A
+  zero-effect cleanup event additionally binds the complete observed clean
+  snapshot. Reopen
+  semantically replays every transition and requires a bijection with every
+  authorization and attempt row, rejecting orphan, missing, extra, rewritten,
+  or misclassified auxiliary evidence. A commit exception accepts only an exact
+  complete pre-state or exact complete immediate post-state; any third state
+  poisons the operation and requires recovery. This does not protect against a
+  coherent database rollback by the same OS principal.
+- `ollama_v2_controller.py` captures every inspector, authorization, store,
+  and host-effect call target at construction. Its ports are closed:
+  inspection has only `inspect`/`observe`, authorization has only
+  `consume`/`resolve`, and each effect has one named method. There is no shell,
+  argv, generic command, generic RPC, or provider execution surface.
+
+The deterministic apply plan has this exact order and no caller-selected
+command/unit/environment payload:
+
+1. `managed_root.create`
+2. `principal.create_exact`
+3. `release.stage`
+4. `release.publish`
+5. `model.stage`
+6. `model.publish`
+7. `socket.install`
+8. `service.install`
+9. `manager.reload`
+
+Before every host call, the controller verifies the complete exact host
+projection for the applied/remaining prefix, durably records an exact pending
+authorization, atomically claims that pending request, resolves or consumes it
+once, durably records consumption, observes the complete precondition again,
+and durably marks the attempt dispatching. Only a caller whose relevant
+transition returned direct exception-free commit ownership may perform the
+corresponding external action. An exception-reconciled exact post-state returns
+the durable snapshot but never execution ownership. It always observes the
+complete projection after a possible host call, including a raised call, and
+classifies the result as exact precondition, exact postcondition, or foreign.
+Drift in any prior, current, remaining, cleaned, or retained resource therefore
+stops dispatch before a later resource can hide it. An unresolved dispatch is
+observed rather than retried. A no-effect result can retry only with a new
+authorization identity. `reconcile` is read-only.
+
+Rollback is explicit, never automatic. It derives reverse compensations only
+from the exact prefix of effects proven applied, requires a fresh one-use
+authorization per compensation, and observes ownership/preconditions before
+dispatch. It neither adopts nor deletes pre-existing or foreign resources.
+Existing drift remains recorded, and cleanup that cannot be proven exact ends
+in `recovery_required` rather than a clean claim. The fixed-scope lease remains
+held through prepared and recovery states. Rollback manager reload clears the
+operation ownership marker while advancing its generation monotonically. A
+terminal transition may clear the active recovery reason and release the lease
+only after one complete reusable-host projection proves that all resources
+match the initial clean projection, no manager ownership marker remains, and
+the manager generation has not moved backwards. Historical recovery events
+remain in the hash chain. `rolled_back_clean` is immutable: it cannot re-enter
+apply, rollback, or recovery after releasing the lease. Live transitions reject
+that source state before mutation, and semantic replay rejects a canonical
+recovery event appended after the terminal even if a forged lease is restored.
+A second operation cannot credit or delete the first operation's resources.
+
+This controller has no concrete host interpreter. Its terminal apply state is
+only `prepared_unverified`; that state is not observed evidence, availability,
+PASS, provider readiness, or production readiness. Test-local effect fakes
+prove controller behavior only and are not systemd, account, socket, model, or
+native evidence.
+
 ### ADR-0050 is one coupled release train, not one oversized commit
 
-This decision reserves four independently verified release boundaries:
+The exact implementation-stage matrix is:
 
-1. **v2 correction-policy foundation** — implemented by this commit;
-2. **real evidence controller** — absent;
-3. **Studio Director domain, Store, protocol, and UI v7 authority** — absent;
-4. **separately authorized host preparation and native observed evidence** —
-   absent.
+| Stage | State | Authority gained |
+|---|---|---|
+| A — v2 correction-policy foundation | **COMPLETE** | Pure canonical policy validation only |
+| B — deterministic controller contracts/store/state machine | **COMPLETE** | Private non-native transaction logic ending at `prepared_unverified` |
+| C — concrete closed host interpreter/broker | **ABSENT** | None; the binding says `native_implementation_state: absent` |
+| D — Studio Director domain, Store, protocol, and UI v7 | **ABSENT** | None |
+| E — separately authorized host preparation | **ABSENT** | None |
+| F — native observed evidence and bounded real inference | **ABSENT** | None |
+
+The overall ADR-0050 implementation therefore remains **PARTIAL**,
+`availability: unavailable`, and `production_eligible: false`.
 
 The later Studio authority must bind an authenticated Director decision to an
 exact controller plan without putting Ollama into the Harness catalog. Host
@@ -127,8 +231,10 @@ None of those later requirements is satisfied by the existence of this policy.
 ## Consequences
 
 - ADR-0046 stays byte-for-byte unchanged and is permanently unavailable.
-- The correction policy is functional and deterministic, but it cannot launch,
-  observe, authorize, replay, price, or promote a provider turn.
+- The correction policy and controller transaction core are functional and
+  deterministic. They still cannot launch a host interpreter, establish
+  systemd/native observations, run inference, replay or price a provider turn,
+  or promote availability.
 - No synthetic fixture or contract test is native Ollama PASS evidence.
 - ADR-0050 remains **PARTIAL**, with `availability: unavailable` and
   `production_eligible: false`, until every later boundary ships and receives
@@ -145,3 +251,11 @@ adversarial drift, package isolation, the unchanged two-entry synthetic
 registry, and protected Harness/public bytes. It contains no service start,
 process/socket/model execution, host mutation, network access, installation, or
 synthetic native PASS claim.
+
+The controller-core strict-TDD record is
+[`ollama-observed-evidence-v2-controller-tdd.md`](../evidence/ollama-observed-evidence-v2-controller-tdd.md).
+It covers exact contracts and hostile inputs, deterministic planning, every
+durable transition and ambiguous-commit state, reopen/replay corruption,
+one-use authorization, closed captured dispatch, mandatory observation,
+read-only reconciliation, and explicit rollback. It performs no live
+filesystem/systemd/account/service/socket/network/model/provider operation.

@@ -1075,12 +1075,55 @@ loopback, no DNS/non-loopback/proxy/environment inheritance; and a CPU-only
 no-accelerator boundary. Its immutable state is still `unavailable`,
 non-production, non-catalog, and non-executable.
 
-This is only the first boundary in the coupled ADR-0050 release train. A real
-controller, Studio Director domain/Store/protocol/UI v7 authority, separately
-authorized host preparation, native observed evidence, and real inference all
-remain absent. The existing synthetic catalog still contains exactly the
-conformance revision-4 and deterministic-probe revision-6 runtimes. Contract
-tests are not native Ollama evidence. See
+The second ADR-0050 boundary is a project-private controller core in
+`ollama_v2_controller_contracts.py`, `ollama_v2_controller_store.py`, and
+`ollama_v2_controller.py`. It remains outside Studio, Harness, ProviderAdapter,
+the catalog, workers, EventLog, public receipts/schemas, and `src/isoworld`.
+The deterministic planner binds the exact foundation-policy vector, fixed
+numeric identity, code-owned destinations, exact unit/interpreter-contract
+bytes, independent UID/GID-owner censuses, bounded tree manifests,
+operation-specific ownership tokens, and nine closed apply effects. No
+arbitrary command, argv, unit, or environment payload can enter the plan.
+
+The controller store is a separate exact-schema SQLite database with
+`BEGIN IMMEDIATE`, foreign keys, complete generation/sequence/head/state CAS,
+canonical documents, event hash chaining, and unique authorization/effect
+attempts. One transactionally acquired lease excludes every distinct operation
+from the fixed host scope while owned, prepared, or recovery state remains.
+Every transition reports atomic ownership to suppress duplicate authorization
+and dispatch. Event payloads bind exact requests, decision provenance,
+attempt documents, whole-host projections, operation ownership, and rollback;
+reopen semantically replays the complete history and requires a bijection with
+all auxiliary rows. Ambiguous commit handling accepts only an exact complete
+adjacent pre-state or immediate post-state; a third state is poisoned and
+requires recovery. This does not claim protection from a coherent database
+rollback by the same OS principal.
+
+The controller captures every call target at construction. Its inspector port
+has only `inspect` and `observe`; its authorization port only `consume` and
+`resolve`; its effects port has one method per closed effect and no generic
+execution surface. Authorization pending, consumption, and dispatch are each
+durable before a host call, with an intervening atomic authorization claim so
+only the committing controller can consume or dispatch. Complete host
+projection equality is required before and after every effect, so drift in any
+prior, remaining, cleaned, or retained resource fails closed. Every possible
+call receives a post-call observation, including raised calls; retries require
+an observation and a new authorization. Reconciliation is read-only. Rollback
+is explicit, reverse, authorization-bound, and limited to effects proven
+applied; drift is preserved as `recovery_required` when exact cleanup cannot be
+established. The exclusive scope lease is released only at exact
+`rolled_back_clean` and prevents another operation from crediting or deleting
+the first operation's resources.
+
+This core has no concrete host interpreter. Apply terminates only at
+`prepared_unverified`, which grants no native evidence, availability, PASS, or
+production authority. The current ADR-0050 stage matrix is: A foundation
+complete; B controller core complete; concrete interpreter absent; Studio v7
+absent; host preparation absent; native evidence and inference absent. Overall
+status remains PARTIAL, unavailable, and non-production. The existing synthetic
+catalog still contains exactly the conformance revision-4 and
+deterministic-probe revision-6 runtimes. Contract/controller tests are not
+native Ollama evidence. See
 [ADR-0050](decisions/0050-studio-director-governed-ollama-evidence-v2.md).
 
 Slice 2B retains the closed, identity/evidence-only plan, observation, and report

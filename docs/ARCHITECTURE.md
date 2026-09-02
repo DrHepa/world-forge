@@ -98,16 +98,23 @@ The database uses foreign keys, WAL, FULL synchronous writes, and a bounded busy
 timeout. A service restart marks interrupted `running` jobs as `orphaned` and
 records that transition as an event.
 
-StudioStore schema v6 also has a private backend-only authenticated Director
-authority. Its explicit local enrollment stores a fixed-scrypt verifier and
+StudioStore schema v6 introduced a private backend-only authenticated Director
+authority; schema v7 preserved that v6 sub-schema and its event/document bytes
+exactly while adding the separately prefixed Ollama mandate projections. Schema
+v8 retains those boundaries and adds the exclusive consumed-or-rejected
+settlement ledger, authenticated rejected events, and durable expired state. Its
+explicit local enrollment stores a fixed-scrypt verifier and
 keeps an HMAC-authenticated, hash-chained projection of existing Harness
 tool-approval review/decision objects. The verifier authenticates a closed,
 canonical credential-v1 envelope containing every persisted credential field
 except the verifier itself. Credential and event timestamps accept only exact
 six-microsecond UTC `Z` form and must parse and round-trip byte-identically.
-Primary migration is atomic; a secondary attachment requires exact v6 and does
-not migrate. Unlock audits the chain and projection from one deferred read
-snapshot before use. Authenticated writes run
+Primary migration is atomic. In particular, v7-to-v8 rebuilds the mandate
+domain under one savepoint, backfills every legacy consumption into the outcome
+ledger, verifies the exact consumed projection bijection, and rolls back on
+`Exception` or `BaseException`. A secondary attachment requires exact Store
+schema v8 and does not migrate. Unlock audits the v6 chain and projection from
+one deferred read snapshot before use. Authenticated writes run
 on a Store-owned private SQLite connection under `BEGIN IMMEDIATE`, so ordinary
 Studio managers cannot commit or roll back an authority transaction through the
 Store's public connection. That public connection retains SQLite's default
@@ -1102,11 +1109,20 @@ rollback by the same OS principal.
 The controller captures every call target at construction. Its inspector port
 has only `inspect` and `observe`; its authorization port only `consume` and
 `resolve`; its effects port has one method per closed effect and no generic
-execution surface. Authorization pending, consumption, and dispatch are each
-durable before a host call, with an intervening atomic authorization claim so
-only the committing controller can consume or dispatch. Complete host
-projection equality is required before and after every effect, so drift in any
-prior, remaining, cleaned, or retained resource fails closed. Every possible
+execution surface. Authorization pending and claimed are durable before
+settlement. Claimed is a monotonic settlement fence: the controller first
+resolves or consumes one exact canonical `AuthorizationOutcome`, then records
+either `authorization.consumed` or `authorization.rejected`. A live generic
+`record_recovery` cannot clear a claimed request, while semantic replay still
+accepts the earlier canonical claimed-to-recovery history for compatibility.
+Pending or unavailable settlement leaves the exact claim unchanged. No host
+preflight observation or effect happens before settlement. Rejection enters
+`recovery_required` without an attempt or host call; consumption must be durable
+before preflight and dispatch.
+
+Only a direct commit owner can dispatch. Complete host-projection equality is
+required after consumed settlement and after every possible effect, so drift in
+any prior, remaining, cleaned, or retained resource fails closed. Every possible
 call receives a post-call observation, including raised calls; retries require
 an observation and a new authorization. Reconciliation is read-only. Rollback
 is explicit, reverse, authorization-bound, and limited to effects proven
@@ -1115,11 +1131,121 @@ established. The exclusive scope lease is released only at exact
 `rolled_back_clean` and prevents another operation from crediting or deleting
 the first operation's resources.
 
-This core has no concrete host interpreter. Apply terminates only at
+StudioStore schema v8 now owns the private backend-only
+`studio_ollama_v2_authorization_*` mandate, event, consumption, and terminal
+outcome domain. It reuses the exact unlocked `director_local` credential, Store
+connection and `RLock`, verifier evidence, event key, and construction epoch; it
+does not create another signing root or independently unlockable authority.
+Canonical finite mandates bind one exact remaining apply or rollback scope, the
+plan and optional rollback documents, starting `OperationSnapshot`, ordered
+effect identities and full hashes, ownership/policy/interpreter hashes, derived
+manifest/resource/data/permission impact, prohibited egress, and
+`pricing_applicability: not_applicable`. The impact includes the controller's
+exact document, tree-entry, entry-byte, tree-byte, and effect-count ceilings as
+well as the selected manifests' actual counts and sizes.
+
+Approved mandates have one durable nonrefundable slot per effect. The exclusive
+outcome ledger records exactly one consumed or rejected result per mandate slot
+and controller request. Every consumed outcome has exactly one legacy
+consumption-projection row and every rejected outcome has none; authenticated
+replay reconstructs and verifies both projections. Revoked or expired claimed
+requests create an authenticated `rejected` event and a canonical
+`AuthorizationRejection`, with durable revoked/expired mandate state and no
+consumed-count advance. Denied mandates never bind and create no controller
+claim or outcome. The concrete controller authorization port exposes only
+`consume` and `resolve`; both return only an exact durable outcome. Apply does
+not authorize rollback, and a no-effect retry requires a new mandate at the new
+controller snapshot.
+
+Port construction is additionally bound to the exact already-open
+`OllamaV2ControllerStore` object and exact mandate operation ID. Studio never
+opens or substitutes a controller connection. Construction captures the
+store's exact read/status targets, connection, path, poison set, method census,
+and operation identity; every call revalidates that custody and reads the
+controller in a completed controller-only transaction before Studio begins its
+own transaction.
+
+Binding derives the current mandate slot from the exact phase cursor minus the
+mandate's starting cursor. It does not trust Studio `consumed_count` to select a
+Controller effect. The only continuable states are phase pending,
+authorization-pending, authorization-claimed, authorization-consumed, and
+dispatching. Generation, sequence, event count, and cursor must equal the
+derived slot ordinal times one exact five-transition cycle plus the current
+state offset. Every earlier slot must prove the contiguous
+`authorization.pending`, `authorization.claimed`, `authorization.consumed`,
+`effect.dispatching`, and `effect.observed` sequence; its canonical request,
+consumption, attempt, bindings, before/after snapshots, and effect hash must
+match both the Controller projections and the exact Studio consumed outcome.
+The current slot must prove exactly the prefix appropriate to its state, with no
+rows beyond that prefix. A claimed current slot may already have the one exact
+Studio outcome after a lost settlement reply.
+
+The Controller constructor completes a private attachment handshake before the
+port becomes usable. That callback rereads the complete Controller snapshot,
+plan, rollback plan, current request/outcome, and attachment proof and requires
+exact equality with the bind-time read. Consumption still requires the exact
+phase-specific claimed request document/hash in every field, never an
+inequality or counter heuristic. Resolution permits only the exact durable
+lineage. Pending, authorization-pending, claimed, and consumed states resume
+normally; any exception-reconciled non-owner stops at the exact durable
+post-state. A resumed dispatching state performs the mandatory observation only
+and cannot redispatch the effect.
+
+Schema-v7 primary databases migrate under one savepoint: the three mandate
+tables are rebuilt to their exact v8 shapes, every legacy consumed row is
+backfilled into the outcome ledger through its exact authenticated event, the
+complete schema and projection bijection are re-audited, and only then is schema
+version 8 published. Any ordinary or asynchronous migration failure restores
+the exact data-bearing v7 database. Secondary attachments refuse v7 and never
+migrate.
+
+Recovery evidence has two distinct levels. Same-process tests gracefully close
+and reopen real Store objects. The stronger stdlib-only saga gate uses one
+abrupt-exit child, a fresh recovery child, and a fresh read-only audit child for
+each of eight APPLY/ROLLBACK cutpoints, plus a denied control. It brackets the
+boundary immediately before Studio `COMMIT`, committed-before-return, the
+controller claim commit, and the controller outcome-acknowledgement commit.
+Before the ladder addition, three complete runs of that nine-test selection
+proved one exact terminal outcome, controller/Studio outcome equality,
+at-most-once test-local effect, replay, and released SQLite locks after OS
+process exit. That 27/27 result is historical pre-ladder evidence; the current
+11-test module retains those cases. Neither version interrupts inside SQLite
+`COMMIT`, emulates power loss, or exercises native Ollama, a service, systemd,
+host mutation, or inference.
+
+Two full finite-plan ladders add end-to-end restartability evidence. The APPLY
+ladder begins at `apply_pending`; the ROLLBACK ladder begins from a prepared
+nine-effect rollback plan. For each of nine mandate slots, separate interpreter
+processes bind and resume from phase pending, authorization-pending, claimed,
+consumed, and dispatching. Controller transition children inject a
+committed-before-return reply loss. The dispatch child records one test-local
+effect marker and exits abruptly while the durable state is dispatching; the
+next child only observes that effect and advances the cursor. Final independent
+audit proves nine exact Studio/Controller outcome pairs, nine postcondition
+attempts, one marker and one complete five-event cycle per effect, released
+SQLite transaction locks, `prepared_unverified` for APPLY, and
+`rolled_back_clean` with the host-scope lease removed for ROLLBACK. This remains
+test-local SQLite/controller evidence, not mid-`COMMIT`, power-loss, native
+Ollama, service, host, provider, or inference evidence.
+
+Authenticated replay checks exact built-in JSON scalar/container types and
+safe-integer bounds before every event, transition, projection-row,
+consumption-row, or outcome-row comparison; a correctly rehashed and re-MACed
+boolean or integral float can never stand in for an integer. Exact rehydrated
+`apply_pending` snapshots at the terminal apply cursor and `rollback_pending`
+snapshots with an empty rollback plan reach the explicit empty-scope rejection
+and mint no mandate. Revoke uses the exact consumed-slot cursor as additional
+compare-and-swap state, so concurrent consume versus revoke has one transition
+owner. Director lock and close invalidate the epoch while holding the same
+private authority `RLock`, and independent Store connections rely on
+`BEGIN IMMEDIATE` plus the slot and outcome uniqueness constraints.
+
+This core still has no concrete host interpreter. Apply terminates only at
 `prepared_unverified`, which grants no native evidence, availability, PASS, or
 production authority. The current ADR-0050 stage matrix is: A foundation
-complete; B controller core complete; concrete interpreter absent; Studio v7
-absent; host preparation absent; native evidence and inference absent. Overall
+complete; B controller core complete; C backend Studio plan authorization
+complete; D concrete interpreter absent; E Studio protocol/Electron/UI absent;
+F host preparation absent; G native evidence and inference absent. Overall
 status remains PARTIAL, unavailable, and non-production. The existing synthetic
 catalog still contains exactly the conformance revision-4 and
 deterministic-probe revision-6 runtimes. Contract/controller tests are not

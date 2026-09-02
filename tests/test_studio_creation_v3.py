@@ -303,7 +303,14 @@ class StudioCreationV3StorageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             data = Path(temp) / "studio"
             with StudioStore(data) as store:
-                self.assertEqual(6, SCHEMA_VERSION)
+                self.assertEqual(8, SCHEMA_VERSION)
+                for table in (
+                    "studio_ollama_v2_authorization_outcomes",
+                    "studio_ollama_v2_authorization_consumptions",
+                    "studio_ollama_v2_authorization_events",
+                    "studio_ollama_v2_authorization_decisions",
+                ):
+                    store.connection.execute(f"DROP TABLE {table}")
                 store.connection.execute(
                     "UPDATE schema_meta SET value = '2' WHERE key = 'schema_version'"
                 )
@@ -336,7 +343,7 @@ class StudioCreationV3StorageTests(unittest.TestCase):
                 version = migrated.connection.execute(
                     "SELECT value FROM schema_meta WHERE key = 'schema_version'"
                 ).fetchone()[0]
-                self.assertEqual("6", version)
+                self.assertEqual("8", version)
                 tables = {
                     row[0]
                     for row in migrated.connection.execute(
@@ -374,7 +381,7 @@ class StudioCreationV3StorageTests(unittest.TestCase):
             database.execute("UPDATE schema_meta SET value = '2' WHERE key = 'schema_version'")
             database.commit()
             database.close()
-            with self.assertRaisesRegex(StudioError, "schema version 6"):
+            with self.assertRaisesRegex(StudioError, "schema version 8"):
                 StudioStore(data, mode="secondary")
 
 

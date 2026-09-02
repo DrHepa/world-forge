@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import copy
 import dataclasses
 import hashlib
 import sqlite3
@@ -10,8 +11,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import worldforge.provider_evidence.ollama_v2_controller as controller_module
 from worldforge.provider_evidence.ollama_v2_controller import (
     ControllerAuthorizationError,
+    ControllerConstructionError,
     OllamaV2Authorization,
     OllamaV2Controller,
     OllamaV2HostEffects,
@@ -27,6 +30,7 @@ from worldforge.provider_evidence.ollama_v2_controller_contracts import (
     SERVICE_UNIT_BYTES,
     SOCKET_UNIT_BYTES,
     AuthorizationConsumption,
+    AuthorizationRejection,
     AuthorizationRequest,
     BoundedTreeManifest,
     ControllerPlan,
@@ -79,6 +83,26 @@ def _manifests() -> tuple[BoundedTreeManifest, BoundedTreeManifest]:
             sealed=True,
             entries=(_entry("model.gguf", b"model"),),
         ),
+    )
+
+
+def _rejection(
+    request: AuthorizationRequest,
+    effect: HostEffect,
+    *,
+    reason: str,
+    settlement_event_id: int = 1,
+) -> AuthorizationRejection:
+    return AuthorizationRejection.create(
+        request,
+        authority_id="studio-director-ollama-v2",
+        mandate_id=f"mandate-{request.operation_id}-{request.phase}",
+        decision_id=f"decision-{request.operation_id}-{request.phase}",
+        slot_ordinal=0,
+        effect_hash=effect.content_hash,
+        reason=reason,
+        settlement_event_id=settlement_event_id,
+        settlement_event_hash=f"{settlement_event_id:x}" * 64,
     )
 
 
@@ -387,7 +411,7 @@ class ControllerStateMachineTests(unittest.TestCase):
         self.assertEqual("host_state_foreign", recovered.recovery_reason)
         self.assertEqual([], self.effects.calls)
 
-    def test_apply_rejects_drift_in_an_already_applied_resource_before_authorization(
+    def test_apply_rejects_drift_after_monotonic_authorization_before_dispatch(
         self,
     ) -> None:
         operation = self.controller.advance_apply(self.operation)
@@ -404,7 +428,7 @@ class ControllerStateMachineTests(unittest.TestCase):
 
         self.assertEqual("recovery_required", recovered.state)
         self.assertEqual("host_state_foreign", recovered.recovery_reason)
-        self.assertEqual(authorization_count, len(self.authorization.consume_calls))
+        self.assertEqual(authorization_count + 1, len(self.authorization.consume_calls))
         self.assertEqual(effect_count, len(self.effects.calls))
         before = self.controller.status(operation.operation_id)
         result = self.controller.reconcile(before)
@@ -415,7 +439,7 @@ class ControllerStateMachineTests(unittest.TestCase):
         class _RaiseOnSecondObserve(_Inspector):
             def observe(self, operation_id: str, plan_hash: str) -> HostSnapshot:
                 result = super().observe(operation_id, plan_hash)
-                if len(self.observe_calls) == 3:
+                if len(self.observe_calls) == 2:
                     raise RuntimeError("post-call observation unavailable")
                 return result
 
@@ -825,11 +849,321 @@ class ControllerStateMachineTests(unittest.TestCase):
 
         self.assertEqual("recovery_required", recovered.state)
         self.assertEqual("host_state_foreign", recovered.recovery_reason)
-        self.assertEqual(authorization_count, len(self.authorization.consume_calls))
+        self.assertEqual(authorization_count + 1, len(self.authorization.consume_calls))
         self.assertEqual(effect_count, len(self.effects.calls))
         self.assertIsNotNone(self.inspector.snapshot.managed_root)
 
-    def test_authorization_denial_leaves_durable_pending_without_host_call(self) -> None:
+    def test_claimed_apply_and_rollback_settle_before_host_preflight(self) -> None:
+        trace: list[str] = []
+
+        class TraceInspector(_Inspector):
+            def observe(self, operation_id: str, plan_hash: str) -> HostSnapshot:
+                trace.append("observe")
+                return super().observe(operation_id, plan_hash)
+
+        class TraceAuthorization(_Authorization):
+            def consume(self, request: AuthorizationRequest) -> AuthorizationConsumption:
+                trace.append("consume")
+                return super().consume(request)
+
+            def resolve(self, request: AuthorizationRequest) -> AuthorizationConsumption | None:
+                trace.append("resolve")
+                return super().resolve(request)
+
+        inspector = TraceInspector()
+        authorization = TraceAuthorization()
+        effects = _Effects(inspector)
+        effects.plan = self.plan
+        controller = OllamaV2Controller(self.store, inspector, authorization, effects)
+        effect = self.plan.effects[0]
+        request = AuthorizationRequest.create(
+            operation_id=self.operation.operation_id,
+            plan_hash=self.operation.plan_hash,
+            effect_id=effect.effect_id,
+            phase="apply",
+            attempt=self.operation.next_attempt,
+            expected_generation=self.operation.generation,
+            expected_sequence=self.operation.sequence,
+            expected_head_hash=self.operation.event_head_hash,
+            ownership_token=self.operation.ownership_token,
+        )
+        pending = self.store.record_authorization_pending(self.operation, request).snapshot
+        claimed = self.store.record_authorization_claimed(pending, request).snapshot
+
+        applied = controller.advance_apply(claimed)
+
+        self.assertEqual(1, applied.apply_cursor)
+        self.assertEqual("apply_pending", applied.state)
+        self.assertEqual(["resolve", "consume", "resolve"], trace[:3])
+        self.assertIn("observe", trace[3:])
+
+        rollback_pending = controller.prepare_rollback(applied)
+        rollback = self.store.load_rollback_plan(applied.operation_id)
+        self.assertIsNotNone(rollback)
+        rollback_effect = rollback.effects[0]
+        rollback_request = AuthorizationRequest.create(
+            operation_id=rollback_pending.operation_id,
+            plan_hash=rollback_pending.plan_hash,
+            effect_id=rollback_effect.effect_id,
+            phase="rollback",
+            attempt=rollback_pending.next_attempt,
+            expected_generation=rollback_pending.generation,
+            expected_sequence=rollback_pending.sequence,
+            expected_head_hash=rollback_pending.event_head_hash,
+            ownership_token=rollback_pending.ownership_token,
+        )
+        pending = self.store.record_authorization_pending(
+            rollback_pending,
+            rollback_request,
+        ).snapshot
+        claimed = self.store.record_authorization_claimed(pending, rollback_request).snapshot
+        trace.clear()
+
+        cleaned = controller.advance_rollback(claimed)
+
+        self.assertEqual("rolled_back_clean", cleaned.state)
+        self.assertEqual(["resolve", "consume", "resolve"], trace[:3])
+        self.assertIn("observe", trace[3:])
+
+    def test_claimed_settlement_pending_and_unavailable_are_exactly_immutable(self) -> None:
+        class UnsettledAuthorization:
+            def __init__(self) -> None:
+                self.resolve_calls: list[AuthorizationRequest] = []
+                self.consume_calls: list[AuthorizationRequest] = []
+                self.unavailable = False
+
+            def consume(self, request: AuthorizationRequest):
+                self.consume_calls.append(request)
+                return None
+
+            def resolve(self, request: AuthorizationRequest):
+                self.resolve_calls.append(request)
+                if self.unavailable:
+                    raise RuntimeError("settlement service unavailable")
+                return None
+
+        authorization = UnsettledAuthorization()
+        controller = OllamaV2Controller(
+            self.store,
+            self.inspector,
+            authorization,
+            self.effects,
+        )
+        effect = self.plan.effects[0]
+        request = AuthorizationRequest.create(
+            operation_id=self.operation.operation_id,
+            plan_hash=self.operation.plan_hash,
+            effect_id=effect.effect_id,
+            phase="apply",
+            attempt=self.operation.next_attempt,
+            expected_generation=self.operation.generation,
+            expected_sequence=self.operation.sequence,
+            expected_head_hash=self.operation.event_head_hash,
+            ownership_token=self.operation.ownership_token,
+        )
+        pending = self.store.record_authorization_pending(self.operation, request).snapshot
+        claimed = self.store.record_authorization_claimed(pending, request).snapshot
+        before_events = self.store.event_documents(claimed.operation_id)
+        before_row = tuple(
+            self.store._connection.execute(
+                "SELECT * FROM controller_authorizations WHERE authorization_id=?",
+                (request.authorization_id,),
+            ).fetchone()
+        )
+
+        with self.assertRaisesRegex(
+            ControllerAuthorizationError,
+            "authorization_settlement_pending",
+        ):
+            controller.advance_apply(claimed)
+
+        self.assertEqual(claimed, self.store.load_operation(claimed.operation_id))
+        self.assertEqual(before_events, self.store.event_documents(claimed.operation_id))
+        self.assertEqual(
+            before_row,
+            tuple(
+                self.store._connection.execute(
+                    "SELECT * FROM controller_authorizations WHERE authorization_id=?",
+                    (request.authorization_id,),
+                ).fetchone()
+            ),
+        )
+        self.assertEqual([request], authorization.consume_calls)
+        self.assertEqual([], self.inspector.observe_calls)
+        self.assertEqual([], self.effects.calls)
+
+        authorization.unavailable = True
+        with self.assertRaisesRegex(
+            ControllerAuthorizationError,
+            "authorization_settlement_unavailable",
+        ):
+            controller.advance_apply(claimed)
+        self.assertEqual(claimed, self.store.load_operation(claimed.operation_id))
+        self.assertEqual(before_events, self.store.event_documents(claimed.operation_id))
+        self.assertEqual([request], authorization.consume_calls)
+        self.assertEqual([], self.inspector.observe_calls)
+
+    def test_lost_consume_reply_is_reconciled_from_exact_resolution(self) -> None:
+        class LostReplyAuthorization(_Authorization):
+            def consume(self, request: AuthorizationRequest) -> AuthorizationConsumption:
+                consumption = super().consume(request)
+                raise RuntimeError("consume reply lost after durable settlement")
+
+        authorization = LostReplyAuthorization()
+        controller = OllamaV2Controller(
+            self.store,
+            self.inspector,
+            authorization,
+            self.effects,
+        )
+        effect = self.plan.effects[0]
+        request = AuthorizationRequest.create(
+            operation_id=self.operation.operation_id,
+            plan_hash=self.operation.plan_hash,
+            effect_id=effect.effect_id,
+            phase="apply",
+            attempt=self.operation.next_attempt,
+            expected_generation=self.operation.generation,
+            expected_sequence=self.operation.sequence,
+            expected_head_hash=self.operation.event_head_hash,
+            ownership_token=self.operation.ownership_token,
+        )
+        pending = self.store.record_authorization_pending(self.operation, request).snapshot
+        claimed = self.store.record_authorization_claimed(pending, request).snapshot
+
+        applied = controller.advance_apply(claimed)
+
+        self.assertEqual(1, applied.apply_cursor)
+        self.assertEqual([request], authorization.consume_calls)
+        self.assertGreaterEqual(authorization.resolve_calls.count(request), 2)
+        self.assertEqual([(effect.kind, effect.effect_id)], self.effects.calls)
+
+    def test_rejected_apply_is_durable_without_preflight_and_uses_captured_calls(self) -> None:
+        class RejectionAuthorization:
+            def __init__(self) -> None:
+                self.outcome: AuthorizationRejection | None = None
+                self.consume_calls: list[AuthorizationRequest] = []
+                self.resolve_calls: list[AuthorizationRequest] = []
+
+            def consume(self, request: AuthorizationRequest) -> AuthorizationRejection:
+                self.consume_calls.append(request)
+                if self.outcome is None:
+                    raise AssertionError("test rejection was not configured")
+                return self.outcome
+
+            def resolve(self, request: AuthorizationRequest):
+                self.resolve_calls.append(request)
+                return self.outcome
+
+        authorization = RejectionAuthorization()
+        controller = OllamaV2Controller(
+            self.store,
+            self.inspector,
+            authorization,
+            self.effects,
+        )
+        effect = self.plan.effects[0]
+        request = AuthorizationRequest.create(
+            operation_id=self.operation.operation_id,
+            plan_hash=self.operation.plan_hash,
+            effect_id=effect.effect_id,
+            phase="apply",
+            attempt=self.operation.next_attempt,
+            expected_generation=self.operation.generation,
+            expected_sequence=self.operation.sequence,
+            expected_head_hash=self.operation.event_head_hash,
+            ownership_token=self.operation.ownership_token,
+        )
+        authorization.outcome = _rejection(request, effect, reason="denied")
+        pending = self.store.record_authorization_pending(self.operation, request).snapshot
+        claimed = self.store.record_authorization_claimed(pending, request).snapshot
+
+        def trap(*_args: object, **_kwargs: object):
+            raise AssertionError("late replacement was invoked")
+
+        original_port_consume = RejectionAuthorization.consume
+        original_port_resolve = RejectionAuthorization.resolve
+        original_store_rejected = OllamaV2ControllerStore.record_authorization_rejected
+        authorization.consume = trap  # type: ignore[method-assign]
+        authorization.resolve = trap  # type: ignore[method-assign]
+        RejectionAuthorization.consume = trap  # type: ignore[method-assign]
+        RejectionAuthorization.resolve = trap  # type: ignore[method-assign]
+        OllamaV2ControllerStore.record_authorization_rejected = trap  # type: ignore[method-assign]
+        try:
+            rejected = controller.advance_apply(claimed)
+        finally:
+            RejectionAuthorization.consume = original_port_consume  # type: ignore[method-assign]
+            RejectionAuthorization.resolve = original_port_resolve  # type: ignore[method-assign]
+            OllamaV2ControllerStore.record_authorization_rejected = (  # type: ignore[method-assign]
+                original_store_rejected
+            )
+
+        self.assertEqual("recovery_required", rejected.state)
+        self.assertEqual("authorization_denied", rejected.recovery_reason)
+        self.assertEqual([], self.inspector.observe_calls)
+        self.assertEqual([], self.effects.calls)
+        self.assertEqual("authorization.rejected", self.store.event_documents(
+            rejected.operation_id
+        )[-1]["event_kind"])
+        with OllamaV2ControllerStore(Path(self.temp_dir.name) / "controller.sqlite3") as reopened:
+            self.assertEqual(rejected, reopened.load_operation(rejected.operation_id))
+
+    def test_rejected_rollback_never_observes_or_dispatches(self) -> None:
+        applied = self.controller.advance_apply(self.operation)
+        rollback_pending = self.controller.prepare_rollback(applied)
+        rollback = self.store.load_rollback_plan(applied.operation_id)
+        self.assertIsNotNone(rollback)
+        effect = rollback.effects[0]
+        request = AuthorizationRequest.create(
+            operation_id=rollback_pending.operation_id,
+            plan_hash=rollback_pending.plan_hash,
+            effect_id=effect.effect_id,
+            phase="rollback",
+            attempt=rollback_pending.next_attempt,
+            expected_generation=rollback_pending.generation,
+            expected_sequence=rollback_pending.sequence,
+            expected_head_hash=rollback_pending.event_head_hash,
+            ownership_token=rollback_pending.ownership_token,
+        )
+        pending = self.store.record_authorization_pending(rollback_pending, request).snapshot
+        claimed = self.store.record_authorization_claimed(pending, request).snapshot
+
+        class RejectionAuthorization:
+            def __init__(self, outcome: AuthorizationRejection) -> None:
+                self.outcome = outcome
+
+            def consume(self, _request: AuthorizationRequest) -> AuthorizationRejection:
+                return self.outcome
+
+            def resolve(self, _request: AuthorizationRequest):
+                return None if not hasattr(self, "consumed") else self.outcome
+
+        authorization = RejectionAuthorization(
+            _rejection(request, effect, reason="expired", settlement_event_id=2)
+        )
+
+        def consume(candidate: AuthorizationRequest) -> AuthorizationRejection:
+            authorization.consumed = True
+            return authorization.outcome
+
+        authorization.consume = consume  # type: ignore[method-assign]
+        controller = OllamaV2Controller(
+            self.store,
+            self.inspector,
+            authorization,
+            self.effects,
+        )
+        observe_count = len(self.inspector.observe_calls)
+        effect_count = len(self.effects.calls)
+
+        rejected = controller.advance_rollback(claimed)
+
+        self.assertEqual("recovery_required", rejected.state)
+        self.assertEqual("authorization_expired", rejected.recovery_reason)
+        self.assertEqual(observe_count, len(self.inspector.observe_calls))
+        self.assertEqual(effect_count, len(self.effects.calls))
+
+    def test_unsettled_consume_failure_leaves_claimed_and_retry_converges(self) -> None:
         self.authorization.reject = True
         with self.assertRaises(ControllerAuthorizationError):
             self.controller.advance_apply(self.operation)
@@ -840,14 +1174,12 @@ class ControllerStateMachineTests(unittest.TestCase):
         consume_count = len(self.authorization.consume_calls)
         self.authorization.reject = False
 
-        recovered = self.controller.advance_apply(pending)
+        applied = self.controller.advance_apply(pending)
 
-        self.assertEqual("recovery_required", recovered.state)
-        self.assertEqual(
-            "authorization_outcome_indeterminate",
-            recovered.recovery_reason,
-        )
-        self.assertEqual(consume_count, len(self.authorization.consume_calls))
+        self.assertEqual("apply_pending", applied.state)
+        self.assertEqual(1, applied.apply_cursor)
+        self.assertEqual(consume_count + 1, len(self.authorization.consume_calls))
+        self.assertEqual(1, len(self.effects.calls))
 
     def test_synchronized_controllers_dispatch_same_operation_exactly_once(self) -> None:
         pending_barrier = threading.Barrier(2)
@@ -1218,16 +1550,11 @@ class ControllerStateMachineTests(unittest.TestCase):
                         self.assertEqual("apply_authorization_claimed", nonowner.state)
                         self.assertEqual(0, len(authorization.consume_calls))
                         self.assertEqual(0, len(effects.calls))
-                        recovery = controller.advance_apply(nonowner)
-                        self.assertEqual("recovery_required", recovery.state)
-                        self.assertEqual(
-                            "authorization_outcome_indeterminate",
-                            recovery.recovery_reason,
-                        )
-                        self.assertEqual(0, len(authorization.consume_calls))
-                        self.assertEqual(0, len(effects.calls))
-                        clean = controller.prepare_rollback(recovery)
-                        self.assertEqual("rolled_back_clean", clean.state)
+                        resumed = controller.advance_apply(nonowner)
+                        self.assertEqual("apply_pending", resumed.state)
+                        self.assertEqual(1, resumed.apply_cursor)
+                        self.assertEqual(1, len(authorization.consume_calls))
+                        self.assertEqual(1, len(effects.calls))
                     elif target_event == "authorization.consumed":
                         self.assertEqual("apply_authorization_consumed", nonowner.state)
                         self.assertEqual(1, len(authorization.consume_calls))
@@ -1259,7 +1586,7 @@ class ControllerStateMachineTests(unittest.TestCase):
                         self.assertEqual(2, len(effects.calls))
                     elif target_event == "operation.recovery_required":
                         self.assertEqual("recovery_required", nonowner.state)
-                        self.assertEqual(0, len(authorization.consume_calls))
+                        self.assertEqual(1, len(authorization.consume_calls))
                         self.assertEqual(0, len(effects.calls))
                         self.assertEqual(
                             "foreign",
@@ -1550,6 +1877,111 @@ class ControllerStateMachineTests(unittest.TestCase):
         durable = self.controller.status(self.operation.operation_id)
         self.assertEqual(1, durable.apply_cursor)
 
+    def test_concurrent_claimed_resumes_use_one_idempotent_outcome_and_one_host_effect(
+        self,
+    ) -> None:
+        effect = self.plan.effects[0]
+        request = AuthorizationRequest.create(
+            operation_id=self.operation.operation_id,
+            plan_hash=self.operation.plan_hash,
+            effect_id=effect.effect_id,
+            phase="apply",
+            attempt=self.operation.next_attempt,
+            expected_generation=self.operation.generation,
+            expected_sequence=self.operation.sequence,
+            expected_head_hash=self.operation.event_head_hash,
+            ownership_token=self.operation.ownership_token,
+        )
+        pending = self.store.record_authorization_pending(self.operation, request).snapshot
+        claimed = self.store.record_authorization_claimed(pending, request).snapshot
+        initial_resolve_barrier = threading.Barrier(2)
+        consumed_store_barrier = threading.Barrier(2)
+        start_barrier = threading.Barrier(2)
+        result_lock = threading.Lock()
+
+        class BarrierStore(OllamaV2ControllerStore):
+            def record_authorization_consumed(self, expected, candidate, consumption):
+                result = super().record_authorization_consumed(
+                    expected,
+                    candidate,
+                    consumption,
+                )
+                consumed_store_barrier.wait(timeout=2)
+                return result
+
+        class IdempotentAuthorization(_Authorization):
+            def __init__(self) -> None:
+                super().__init__()
+                self.lock = threading.Lock()
+
+            def resolve(self, candidate: AuthorizationRequest):
+                with self.lock:
+                    self.resolve_calls.append(candidate)
+                    existing = self.consumed.get(candidate.authorization_id)
+                if existing is None:
+                    initial_resolve_barrier.wait(timeout=2)
+                return existing
+
+            def consume(self, candidate: AuthorizationRequest):
+                with self.lock:
+                    self.consume_calls.append(candidate)
+                    existing = self.consumed.get(candidate.authorization_id)
+                    if existing is None:
+                        existing = AuthorizationConsumption.create(
+                            candidate,
+                            authority_id="director-authority",
+                            decision_id="decision-claimed-concurrent",
+                        )
+                        self.consumed[candidate.authorization_id] = existing
+                    return existing
+
+        authorization = IdempotentAuthorization()
+        inspector = _Inspector()
+        effects = _Effects(inspector)
+        effects.plan = self.plan
+        results = []
+        errors = []
+
+        def worker() -> None:
+            try:
+                with BarrierStore(
+                    Path(self.temp_dir.name) / "controller.sqlite3"
+                ) as thread_store:
+                    controller = OllamaV2Controller(
+                        thread_store,
+                        inspector,
+                        authorization,
+                        effects,
+                    )
+                    start_barrier.wait(timeout=2)
+                    result = controller.advance_apply(claimed)
+                    with result_lock:
+                        results.append(result)
+            except BaseException as exc:
+                with result_lock:
+                    errors.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=5)
+
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertEqual([], errors)
+        self.assertEqual(2, len(results))
+        self.assertEqual(2, len(authorization.consume_calls))
+        self.assertEqual({request}, set(authorization.consume_calls))
+        self.assertEqual(1, len(authorization.consumed))
+        self.assertEqual(1, len(effects.calls))
+        self.assertEqual(
+            {"apply_authorization_consumed", "apply_pending"},
+            {result.state for result in results},
+        )
+        durable = self.controller.status(self.operation.operation_id)
+        self.assertEqual("apply_pending", durable.state)
+        self.assertEqual(1, durable.apply_cursor)
+
     def test_construction_captures_all_call_targets_against_late_replacement(self) -> None:
         original_inspect = self.inspector.inspect
         original_observe = self.inspector.observe
@@ -1596,8 +2028,258 @@ class ControllerStateMachineTests(unittest.TestCase):
         self.assertEqual(1, advanced.apply_cursor)
         self.assertEqual("managed_root.create", self.effects.calls[0][0])
 
+    def test_consumed_resume_requires_exact_typed_resolution_from_captured_call(
+        self,
+    ) -> None:
+        class _ConsumptionSubclass(AuthorizationConsumption):
+            pass
+
+        cases = (
+            ("exact_copy", None),
+            ("foreign_authority", "authorization_resolution_mismatch"),
+            ("foreign_decision", "authorization_resolution_mismatch"),
+            ("subclass", "authorization_resolution_invalid"),
+        )
+        for suffix, expected_error in cases:
+            with (
+                self.subTest(suffix=suffix),
+                OllamaV2ControllerStore(
+                    Path(self.temp_dir.name) / f"resolve-{suffix}.sqlite3"
+                ) as store,
+            ):
+                inspector = _Inspector()
+                authorization = _Authorization()
+                effects = _Effects(inspector)
+                controller = OllamaV2Controller(
+                    store,
+                    inspector,
+                    authorization,
+                    effects,
+                )
+                release, model = _manifests()
+                plan = controller.build_plan(
+                    controller.inspect(),
+                    release,
+                    model,
+                    operation_id=f"op-resolve-{suffix}",
+                )
+                effects.plan = plan
+                operation = controller.create_operation(
+                    plan,
+                    operation_id=plan.operation_id,
+                    idempotency_key=f"create-resolve-{suffix}",
+                )
+                effect = plan.effects[0]
+                request = AuthorizationRequest.create(
+                    operation_id=operation.operation_id,
+                    plan_hash=operation.plan_hash,
+                    effect_id=effect.effect_id,
+                    phase="apply",
+                    attempt=operation.next_attempt,
+                    expected_generation=operation.generation,
+                    expected_sequence=operation.sequence,
+                    expected_head_hash=operation.event_head_hash,
+                    ownership_token=operation.ownership_token,
+                )
+                pending = store.record_authorization_pending(operation, request).snapshot
+                claimed = store.record_authorization_claimed(pending, request).snapshot
+                durable = AuthorizationConsumption.create(
+                    request,
+                    authority_id="durable-authority",
+                    decision_id="durable-decision",
+                )
+                consumed = store.record_authorization_consumed(
+                    claimed,
+                    request,
+                    durable,
+                ).snapshot
+                if suffix == "exact_copy":
+                    resolved = AuthorizationConsumption.from_document(
+                        durable.to_document()
+                    )
+                    self.assertIsNot(durable, resolved)
+                elif suffix == "foreign_authority":
+                    resolved = AuthorizationConsumption.create(
+                        request,
+                        authority_id="foreign-authority",
+                        decision_id=durable.decision_id,
+                    )
+                elif suffix == "foreign_decision":
+                    resolved = AuthorizationConsumption.create(
+                        request,
+                        authority_id=durable.authority_id,
+                        decision_id="foreign-decision",
+                    )
+                else:
+                    resolved = _ConsumptionSubclass(
+                        consumption_id=durable.consumption_id,
+                        authorization_id=durable.authorization_id,
+                        request_hash=durable.request_hash,
+                        authority_id=durable.authority_id,
+                        decision_id=durable.decision_id,
+                        decision=durable.decision,
+                        single_use=durable.single_use,
+                    )
+                authorization.consumed[request.authorization_id] = resolved
+                event_count = store._connection.execute(
+                    "SELECT count(*) FROM controller_events WHERE operation_id=?",
+                    (operation.operation_id,),
+                ).fetchone()[0]
+                attempt_count = store._connection.execute(
+                    "SELECT count(*) FROM controller_effect_attempts WHERE operation_id=?",
+                    (operation.operation_id,),
+                ).fetchone()[0]
+                effect_calls = tuple(effects.calls)
+
+                original_class_resolve = _Authorization.resolve
+                original_instance_resolve = authorization.resolve
+
+                def trap(*_args: object, **_kwargs: object) -> object:
+                    raise AssertionError("late resolver replacement was invoked")
+
+                authorization.resolve = trap  # type: ignore[method-assign]
+                _Authorization.resolve = trap  # type: ignore[method-assign]
+                try:
+                    if expected_error is None:
+                        advanced = controller.advance_apply(consumed)
+                    else:
+                        with self.assertRaisesRegex(
+                            ControllerAuthorizationError,
+                            expected_error,
+                        ):
+                            controller.advance_apply(consumed)
+                finally:
+                    _Authorization.resolve = original_class_resolve  # type: ignore[method-assign]
+                    authorization.resolve = original_instance_resolve  # type: ignore[method-assign]
+
+                self.assertEqual([request], authorization.resolve_calls)
+                if expected_error is None:
+                    self.assertEqual("apply_pending", advanced.state)
+                    self.assertEqual(1, advanced.apply_cursor)
+                    self.assertEqual(
+                        ((effect.kind, effect.effect_id),),
+                        tuple(effects.calls),
+                    )
+                    self.assertEqual(
+                        event_count + 2,
+                        store._connection.execute(
+                            "SELECT count(*) FROM controller_events WHERE operation_id=?",
+                            (operation.operation_id,),
+                        ).fetchone()[0],
+                    )
+                    self.assertEqual(
+                        attempt_count + 1,
+                        store._connection.execute(
+                            "SELECT count(*) FROM controller_effect_attempts "
+                            "WHERE operation_id=?",
+                            (operation.operation_id,),
+                        ).fetchone()[0],
+                    )
+                else:
+                    self.assertEqual(
+                        consumed,
+                        store.load_operation(operation.operation_id),
+                    )
+                    self.assertEqual(effect_calls, tuple(effects.calls))
+                    self.assertEqual(
+                        event_count,
+                        store._connection.execute(
+                            "SELECT count(*) FROM controller_events WHERE operation_id=?",
+                            (operation.operation_id,),
+                        ).fetchone()[0],
+                    )
+                    self.assertEqual(
+                        attempt_count,
+                        store._connection.execute(
+                            "SELECT count(*) FROM controller_effect_attempts "
+                            "WHERE operation_id=?",
+                            (operation.operation_id,),
+                        ).fetchone()[0],
+                    )
+
 
 class ControllerSurfaceTests(unittest.TestCase):
+    def test_private_studio_attachment_is_exact_one_use_and_construction_captured(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "controller.sqlite3"
+            first_store = OllamaV2ControllerStore(path)
+            self.addCleanup(first_store.close)
+            second_store = OllamaV2ControllerStore(path)
+            self.addCleanup(second_store.close)
+            inspector = _Inspector()
+            effects = _Effects(inspector)
+            attached: list[tuple[object, object]] = []
+            authorization = _Authorization()
+            controller_module._register_studio_authorization_port(
+                authorization,
+                first_store,
+                lambda exact_port, exact_store: attached.append(
+                    (exact_port, exact_store)
+                ),
+            )
+
+            with self.assertRaisesRegex(
+                ControllerConstructionError,
+                "controller_authorization_store_mismatch",
+            ):
+                OllamaV2Controller(
+                    second_store,
+                    inspector,
+                    authorization,
+                    effects,
+                )
+            self.assertEqual([], attached)
+            with self.assertRaisesRegex(
+                ControllerConstructionError,
+                "controller_authorization_attachment_invalid",
+            ):
+                OllamaV2Controller(
+                    first_store,
+                    inspector,
+                    authorization,
+                    effects,
+                )
+
+            copied = copy.copy(authorization)
+            with self.assertRaisesRegex(
+                ControllerConstructionError,
+                "controller_authorization_attachment_invalid",
+            ):
+                OllamaV2Controller(first_store, inspector, copied, effects)
+
+            exact = _Authorization()
+            controller_module._register_studio_authorization_port(
+                exact,
+                first_store,
+                lambda exact_port, exact_store: attached.append(
+                    (exact_port, exact_store)
+                ),
+            )
+            original_consume = (
+                controller_module._consume_studio_authorization_port_registration
+            )
+            with mock.patch.object(
+                controller_module,
+                "_consume_studio_authorization_port_registration",
+                side_effect=AssertionError("late handshake replacement invoked"),
+            ):
+                controller = OllamaV2Controller(
+                    first_store,
+                    inspector,
+                    exact,
+                    effects,
+                )
+            self.assertIsInstance(controller, OllamaV2Controller)
+            self.assertIsNotNone(original_consume)
+            self.assertEqual([(exact, first_store)], attached)
+            with self.assertRaisesRegex(
+                ControllerConstructionError,
+                "controller_authorization_attachment_invalid",
+            ):
+                OllamaV2Controller(first_store, inspector, exact, effects)
+
     def test_protocol_surfaces_are_closed_and_controller_has_no_generic_execution(self) -> None:
         inspector_methods = {
             name

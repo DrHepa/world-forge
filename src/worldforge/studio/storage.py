@@ -26,7 +26,7 @@ from worldforge.studio.creation_process import (
 )
 from worldforge.studio.errors import StudioContractError, StudioError
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 8
 DATABASE_NAME = "studio.sqlite3"
 _CREATION_ARTIFACT_SCOPE_MIGRATION_DATA_STEP_COUNT = 11
 _CREATION_ARTIFACT_SCOPE_MIGRATION_STEP_COUNT = 12
@@ -179,6 +179,615 @@ _AUTHORITY_FOREIGN_KEYS = {
         ),
     },
 }
+
+_OLLAMA_AUTH_SCHEMA_ERROR = "Ollama v2 authorization database schema is invalid"
+_OLLAMA_AUTH_DECISIONS_TABLE = "studio_ollama_v2_authorization_decisions"
+_OLLAMA_AUTH_CONSUMPTIONS_TABLE = "studio_ollama_v2_authorization_consumptions"
+_OLLAMA_AUTH_EVENTS_TABLE = "studio_ollama_v2_authorization_events"
+_OLLAMA_AUTH_OUTCOMES_TABLE = "studio_ollama_v2_authorization_outcomes"
+_OLLAMA_AUTH_MANDATE_INDEX = "studio_ollama_v2_authorization_events_mandate_idx"
+_OLLAMA_AUTH_DECISIONS_DDL = f"""CREATE TABLE IF NOT EXISTS {_OLLAMA_AUTH_DECISIONS_TABLE} (
+    mandate_id TEXT PRIMARY KEY NOT NULL,
+    credential_id TEXT NOT NULL
+        REFERENCES {_AUTHORITY_CREDENTIALS_TABLE}(credential_id),
+    operation_id TEXT NOT NULL,
+    phase TEXT NOT NULL CHECK (phase IN ('apply', 'rollback')),
+    plan_hash TEXT NOT NULL,
+    rollback_plan_hash TEXT,
+    starting_snapshot_hash TEXT NOT NULL,
+    review_hash TEXT NOT NULL,
+    review_json TEXT NOT NULL,
+    decision_hash TEXT,
+    decision_json TEXT,
+    state TEXT NOT NULL CHECK (state IN ('prepared', 'approved', 'denied', 'revoked')),
+    generation INTEGER NOT NULL CHECK (generation IN (0, 1, 2)),
+    slot_count INTEGER NOT NULL CHECK (slot_count BETWEEN 1 AND 32),
+    consumed_count INTEGER NOT NULL CHECK (
+        consumed_count BETWEEN 0 AND slot_count
+    ),
+    last_event_hash TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    CHECK (
+        (generation = 0 AND state = 'prepared'
+            AND decision_hash IS NULL AND decision_json IS NULL)
+        OR (generation = 1 AND state IN ('approved', 'denied')
+            AND decision_hash IS NOT NULL AND decision_json IS NOT NULL)
+        OR (generation = 2 AND state = 'revoked'
+            AND decision_hash IS NOT NULL AND decision_json IS NOT NULL)
+    ),
+    CHECK (
+        (phase = 'apply' AND rollback_plan_hash IS NULL)
+        OR (phase = 'rollback' AND rollback_plan_hash IS NOT NULL)
+    )
+)"""
+_OLLAMA_AUTH_CONSUMPTIONS_DDL = f"""CREATE TABLE IF NOT EXISTS {_OLLAMA_AUTH_CONSUMPTIONS_TABLE} (
+    consumption_id TEXT PRIMARY KEY NOT NULL,
+    mandate_id TEXT NOT NULL
+        REFERENCES {_OLLAMA_AUTH_DECISIONS_TABLE}(mandate_id),
+    slot_ordinal INTEGER NOT NULL CHECK (slot_ordinal BETWEEN 0 AND 31),
+    effect_id TEXT NOT NULL,
+    effect_hash TEXT NOT NULL,
+    authorization_id TEXT NOT NULL UNIQUE,
+    request_hash TEXT NOT NULL UNIQUE,
+    request_json TEXT NOT NULL,
+    consumption_hash TEXT NOT NULL UNIQUE,
+    consumption_json TEXT NOT NULL,
+    event_hash TEXT NOT NULL UNIQUE,
+    consumed_at TEXT NOT NULL,
+    UNIQUE (mandate_id, slot_ordinal),
+    UNIQUE (mandate_id, effect_id)
+)"""
+_OLLAMA_AUTH_EVENTS_DDL = f"""CREATE TABLE IF NOT EXISTS {_OLLAMA_AUTH_EVENTS_TABLE} (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    credential_id TEXT NOT NULL
+        REFERENCES {_AUTHORITY_CREDENTIALS_TABLE}(credential_id),
+    mandate_id TEXT NOT NULL
+        REFERENCES {_OLLAMA_AUTH_DECISIONS_TABLE}(mandate_id)
+        DEFERRABLE INITIALLY DEFERRED,
+    generation INTEGER NOT NULL CHECK (generation IN (0, 1, 2)),
+    event_type TEXT NOT NULL
+        CHECK (event_type IN ('prepared', 'decided', 'revoked', 'consumed')),
+    slot_ordinal INTEGER CHECK (
+        (event_type = 'consumed' AND slot_ordinal BETWEEN 0 AND 31)
+        OR (event_type <> 'consumed' AND slot_ordinal IS NULL)
+    ),
+    content_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL UNIQUE,
+    previous_hash TEXT NOT NULL,
+    mac BLOB NOT NULL CHECK (length(mac) = 32),
+    created_at TEXT NOT NULL
+)"""
+_OLLAMA_AUTH_MANDATE_INDEX_DDL = f"""CREATE INDEX IF NOT EXISTS
+    {_OLLAMA_AUTH_MANDATE_INDEX}
+    ON {_OLLAMA_AUTH_EVENTS_TABLE}(mandate_id, event_id)"""
+_OLLAMA_AUTH_V7_DDL = (
+    _OLLAMA_AUTH_DECISIONS_DDL,
+    _OLLAMA_AUTH_CONSUMPTIONS_DDL,
+    _OLLAMA_AUTH_EVENTS_DDL,
+    _OLLAMA_AUTH_MANDATE_INDEX_DDL,
+)
+_OLLAMA_AUTH_TABLE_XINFO = {
+    _OLLAMA_AUTH_DECISIONS_TABLE: (
+        (0, "mandate_id", "TEXT", 1, None, 1, 0),
+        (1, "credential_id", "TEXT", 1, None, 0, 0),
+        (2, "operation_id", "TEXT", 1, None, 0, 0),
+        (3, "phase", "TEXT", 1, None, 0, 0),
+        (4, "plan_hash", "TEXT", 1, None, 0, 0),
+        (5, "rollback_plan_hash", "TEXT", 0, None, 0, 0),
+        (6, "starting_snapshot_hash", "TEXT", 1, None, 0, 0),
+        (7, "review_hash", "TEXT", 1, None, 0, 0),
+        (8, "review_json", "TEXT", 1, None, 0, 0),
+        (9, "decision_hash", "TEXT", 0, None, 0, 0),
+        (10, "decision_json", "TEXT", 0, None, 0, 0),
+        (11, "state", "TEXT", 1, None, 0, 0),
+        (12, "generation", "INTEGER", 1, None, 0, 0),
+        (13, "slot_count", "INTEGER", 1, None, 0, 0),
+        (14, "consumed_count", "INTEGER", 1, None, 0, 0),
+        (15, "last_event_hash", "TEXT", 1, None, 0, 0),
+        (16, "updated_at", "TEXT", 1, None, 0, 0),
+    ),
+    _OLLAMA_AUTH_CONSUMPTIONS_TABLE: (
+        (0, "consumption_id", "TEXT", 1, None, 1, 0),
+        (1, "mandate_id", "TEXT", 1, None, 0, 0),
+        (2, "slot_ordinal", "INTEGER", 1, None, 0, 0),
+        (3, "effect_id", "TEXT", 1, None, 0, 0),
+        (4, "effect_hash", "TEXT", 1, None, 0, 0),
+        (5, "authorization_id", "TEXT", 1, None, 0, 0),
+        (6, "request_hash", "TEXT", 1, None, 0, 0),
+        (7, "request_json", "TEXT", 1, None, 0, 0),
+        (8, "consumption_hash", "TEXT", 1, None, 0, 0),
+        (9, "consumption_json", "TEXT", 1, None, 0, 0),
+        (10, "event_hash", "TEXT", 1, None, 0, 0),
+        (11, "consumed_at", "TEXT", 1, None, 0, 0),
+    ),
+    _OLLAMA_AUTH_EVENTS_TABLE: (
+        (0, "event_id", "INTEGER", 0, None, 1, 0),
+        (1, "credential_id", "TEXT", 1, None, 0, 0),
+        (2, "mandate_id", "TEXT", 1, None, 0, 0),
+        (3, "generation", "INTEGER", 1, None, 0, 0),
+        (4, "event_type", "TEXT", 1, None, 0, 0),
+        (5, "slot_ordinal", "INTEGER", 0, None, 0, 0),
+        (6, "content_json", "TEXT", 1, None, 0, 0),
+        (7, "content_hash", "TEXT", 1, None, 0, 0),
+        (8, "previous_hash", "TEXT", 1, None, 0, 0),
+        (9, "mac", "BLOB", 1, None, 0, 0),
+        (10, "created_at", "TEXT", 1, None, 0, 0),
+    ),
+}
+_OLLAMA_AUTH_INDEX_LIST = {
+    _OLLAMA_AUTH_DECISIONS_TABLE: {
+        (f"sqlite_autoindex_{_OLLAMA_AUTH_DECISIONS_TABLE}_1", 1, "pk", 0),
+    },
+    _OLLAMA_AUTH_CONSUMPTIONS_TABLE: {
+        (f"sqlite_autoindex_{_OLLAMA_AUTH_CONSUMPTIONS_TABLE}_1", 1, "pk", 0),
+        (f"sqlite_autoindex_{_OLLAMA_AUTH_CONSUMPTIONS_TABLE}_2", 1, "u", 0),
+        (f"sqlite_autoindex_{_OLLAMA_AUTH_CONSUMPTIONS_TABLE}_3", 1, "u", 0),
+        (f"sqlite_autoindex_{_OLLAMA_AUTH_CONSUMPTIONS_TABLE}_4", 1, "u", 0),
+        (f"sqlite_autoindex_{_OLLAMA_AUTH_CONSUMPTIONS_TABLE}_5", 1, "u", 0),
+        (f"sqlite_autoindex_{_OLLAMA_AUTH_CONSUMPTIONS_TABLE}_6", 1, "u", 0),
+        (f"sqlite_autoindex_{_OLLAMA_AUTH_CONSUMPTIONS_TABLE}_7", 1, "u", 0),
+    },
+    _OLLAMA_AUTH_EVENTS_TABLE: {
+        (_OLLAMA_AUTH_MANDATE_INDEX, 0, "c", 0),
+        (f"sqlite_autoindex_{_OLLAMA_AUTH_EVENTS_TABLE}_1", 1, "u", 0),
+    },
+}
+_OLLAMA_AUTH_INDEX_INFO = {
+    f"sqlite_autoindex_{_OLLAMA_AUTH_DECISIONS_TABLE}_1": (
+        (0, 0, "mandate_id"),
+    ),
+    f"sqlite_autoindex_{_OLLAMA_AUTH_CONSUMPTIONS_TABLE}_1": (
+        (0, 0, "consumption_id"),
+    ),
+    f"sqlite_autoindex_{_OLLAMA_AUTH_CONSUMPTIONS_TABLE}_2": (
+        (0, 5, "authorization_id"),
+    ),
+    f"sqlite_autoindex_{_OLLAMA_AUTH_CONSUMPTIONS_TABLE}_3": (
+        (0, 6, "request_hash"),
+    ),
+    f"sqlite_autoindex_{_OLLAMA_AUTH_CONSUMPTIONS_TABLE}_4": (
+        (0, 8, "consumption_hash"),
+    ),
+    f"sqlite_autoindex_{_OLLAMA_AUTH_CONSUMPTIONS_TABLE}_5": (
+        (0, 10, "event_hash"),
+    ),
+    f"sqlite_autoindex_{_OLLAMA_AUTH_CONSUMPTIONS_TABLE}_6": (
+        (0, 1, "mandate_id"),
+        (1, 2, "slot_ordinal"),
+    ),
+    f"sqlite_autoindex_{_OLLAMA_AUTH_CONSUMPTIONS_TABLE}_7": (
+        (0, 1, "mandate_id"),
+        (1, 3, "effect_id"),
+    ),
+    _OLLAMA_AUTH_MANDATE_INDEX: (
+        (0, 2, "mandate_id"),
+        (1, 0, "event_id"),
+    ),
+    f"sqlite_autoindex_{_OLLAMA_AUTH_EVENTS_TABLE}_1": (
+        (0, 7, "content_hash"),
+    ),
+}
+
+_OLLAMA_AUTH_V8_DECISIONS_DDL = f"""CREATE TABLE IF NOT EXISTS {_OLLAMA_AUTH_DECISIONS_TABLE} (
+    mandate_id TEXT PRIMARY KEY NOT NULL,
+    credential_id TEXT NOT NULL
+        REFERENCES {_AUTHORITY_CREDENTIALS_TABLE}(credential_id),
+    operation_id TEXT NOT NULL,
+    phase TEXT NOT NULL CHECK (phase IN ('apply', 'rollback')),
+    plan_hash TEXT NOT NULL,
+    rollback_plan_hash TEXT,
+    starting_snapshot_hash TEXT NOT NULL,
+    review_hash TEXT NOT NULL,
+    review_json TEXT NOT NULL,
+    decision_hash TEXT,
+    decision_json TEXT,
+    state TEXT NOT NULL
+        CHECK (state IN ('prepared', 'approved', 'denied', 'revoked', 'expired')),
+    generation INTEGER NOT NULL CHECK (generation IN (0, 1, 2)),
+    slot_count INTEGER NOT NULL CHECK (slot_count BETWEEN 1 AND 32),
+    consumed_count INTEGER NOT NULL CHECK (
+        consumed_count BETWEEN 0 AND slot_count
+    ),
+    last_event_hash TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    CHECK (
+        (generation = 0 AND state = 'prepared'
+            AND decision_hash IS NULL AND decision_json IS NULL)
+        OR (generation = 1 AND state IN ('approved', 'denied')
+            AND decision_hash IS NOT NULL AND decision_json IS NOT NULL)
+        OR (generation = 2 AND state IN ('revoked', 'expired')
+            AND decision_hash IS NOT NULL AND decision_json IS NOT NULL)
+    ),
+    CHECK (
+        (phase = 'apply' AND rollback_plan_hash IS NULL)
+        OR (phase = 'rollback' AND rollback_plan_hash IS NOT NULL)
+    )
+)"""
+_OLLAMA_AUTH_V8_EVENTS_DDL = f"""CREATE TABLE IF NOT EXISTS {_OLLAMA_AUTH_EVENTS_TABLE} (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    credential_id TEXT NOT NULL
+        REFERENCES {_AUTHORITY_CREDENTIALS_TABLE}(credential_id),
+    mandate_id TEXT NOT NULL
+        REFERENCES {_OLLAMA_AUTH_DECISIONS_TABLE}(mandate_id)
+        DEFERRABLE INITIALLY DEFERRED,
+    generation INTEGER NOT NULL CHECK (generation IN (0, 1, 2)),
+    event_type TEXT NOT NULL
+        CHECK (event_type IN ('prepared', 'decided', 'revoked', 'consumed', 'rejected')),
+    slot_ordinal INTEGER CHECK (
+        (event_type IN ('consumed', 'rejected')
+            AND slot_ordinal IS NOT NULL AND slot_ordinal BETWEEN 0 AND 31)
+        OR (event_type NOT IN ('consumed', 'rejected') AND slot_ordinal IS NULL)
+    ),
+    content_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL UNIQUE,
+    previous_hash TEXT NOT NULL,
+    mac BLOB NOT NULL CHECK (length(mac) = 32),
+    created_at TEXT NOT NULL
+)"""
+_OLLAMA_AUTH_OUTCOMES_DDL = f"""CREATE TABLE IF NOT EXISTS {_OLLAMA_AUTH_OUTCOMES_TABLE} (
+    outcome_id TEXT PRIMARY KEY NOT NULL,
+    mandate_id TEXT NOT NULL
+        REFERENCES {_OLLAMA_AUTH_DECISIONS_TABLE}(mandate_id),
+    outcome_kind TEXT NOT NULL CHECK (outcome_kind IN ('consumed', 'rejected')),
+    slot_ordinal INTEGER NOT NULL CHECK (slot_ordinal BETWEEN 0 AND 31),
+    effect_id TEXT NOT NULL,
+    effect_hash TEXT NOT NULL,
+    authorization_id TEXT NOT NULL UNIQUE,
+    request_hash TEXT NOT NULL UNIQUE,
+    request_json TEXT NOT NULL,
+    outcome_hash TEXT NOT NULL UNIQUE,
+    outcome_json TEXT NOT NULL,
+    event_id INTEGER NOT NULL UNIQUE
+        REFERENCES {_OLLAMA_AUTH_EVENTS_TABLE}(event_id),
+    event_hash TEXT NOT NULL UNIQUE,
+    consumption_id TEXT UNIQUE
+        REFERENCES {_OLLAMA_AUTH_CONSUMPTIONS_TABLE}(consumption_id),
+    settled_at TEXT NOT NULL,
+    CHECK (
+        (outcome_kind = 'consumed' AND consumption_id IS NOT NULL
+            AND outcome_id = consumption_id)
+        OR (outcome_kind = 'rejected' AND consumption_id IS NULL)
+    ),
+    UNIQUE (mandate_id, slot_ordinal),
+    UNIQUE (mandate_id, effect_id)
+)"""
+_OLLAMA_AUTH_V8_DDL = (
+    _OLLAMA_AUTH_V8_DECISIONS_DDL,
+    _OLLAMA_AUTH_CONSUMPTIONS_DDL,
+    _OLLAMA_AUTH_V8_EVENTS_DDL,
+    _OLLAMA_AUTH_MANDATE_INDEX_DDL,
+    _OLLAMA_AUTH_OUTCOMES_DDL,
+)
+_OLLAMA_AUTH_V8_TABLE_XINFO = {
+    **_OLLAMA_AUTH_TABLE_XINFO,
+    _OLLAMA_AUTH_OUTCOMES_TABLE: (
+        (0, "outcome_id", "TEXT", 1, None, 1, 0),
+        (1, "mandate_id", "TEXT", 1, None, 0, 0),
+        (2, "outcome_kind", "TEXT", 1, None, 0, 0),
+        (3, "slot_ordinal", "INTEGER", 1, None, 0, 0),
+        (4, "effect_id", "TEXT", 1, None, 0, 0),
+        (5, "effect_hash", "TEXT", 1, None, 0, 0),
+        (6, "authorization_id", "TEXT", 1, None, 0, 0),
+        (7, "request_hash", "TEXT", 1, None, 0, 0),
+        (8, "request_json", "TEXT", 1, None, 0, 0),
+        (9, "outcome_hash", "TEXT", 1, None, 0, 0),
+        (10, "outcome_json", "TEXT", 1, None, 0, 0),
+        (11, "event_id", "INTEGER", 1, None, 0, 0),
+        (12, "event_hash", "TEXT", 1, None, 0, 0),
+        (13, "consumption_id", "TEXT", 0, None, 0, 0),
+        (14, "settled_at", "TEXT", 1, None, 0, 0),
+    ),
+}
+_OLLAMA_AUTH_V8_INDEX_LIST = {
+    **_OLLAMA_AUTH_INDEX_LIST,
+    _OLLAMA_AUTH_OUTCOMES_TABLE: {
+        *{
+            (f"sqlite_autoindex_{_OLLAMA_AUTH_OUTCOMES_TABLE}_{ordinal}", 1, kind, 0)
+            for ordinal, kind in (
+                (1, "pk"),
+                (2, "u"),
+                (3, "u"),
+                (4, "u"),
+                (5, "u"),
+                (6, "u"),
+                (7, "u"),
+                (8, "u"),
+                (9, "u"),
+            )
+        }
+    },
+}
+_OLLAMA_AUTH_V8_INDEX_INFO = {
+    **_OLLAMA_AUTH_INDEX_INFO,
+    f"sqlite_autoindex_{_OLLAMA_AUTH_OUTCOMES_TABLE}_1": ((0, 0, "outcome_id"),),
+    f"sqlite_autoindex_{_OLLAMA_AUTH_OUTCOMES_TABLE}_2": ((0, 6, "authorization_id"),),
+    f"sqlite_autoindex_{_OLLAMA_AUTH_OUTCOMES_TABLE}_3": ((0, 7, "request_hash"),),
+    f"sqlite_autoindex_{_OLLAMA_AUTH_OUTCOMES_TABLE}_4": ((0, 9, "outcome_hash"),),
+    f"sqlite_autoindex_{_OLLAMA_AUTH_OUTCOMES_TABLE}_5": ((0, 11, "event_id"),),
+    f"sqlite_autoindex_{_OLLAMA_AUTH_OUTCOMES_TABLE}_6": ((0, 12, "event_hash"),),
+    f"sqlite_autoindex_{_OLLAMA_AUTH_OUTCOMES_TABLE}_7": ((0, 13, "consumption_id"),),
+    f"sqlite_autoindex_{_OLLAMA_AUTH_OUTCOMES_TABLE}_8": (
+        (0, 1, "mandate_id"),
+        (1, 3, "slot_ordinal"),
+    ),
+    f"sqlite_autoindex_{_OLLAMA_AUTH_OUTCOMES_TABLE}_9": (
+        (0, 1, "mandate_id"),
+        (1, 4, "effect_id"),
+    ),
+}
+
+
+def _verify_ollama_v2_authorization_v7(connection: sqlite3.Connection) -> None:
+    """Verify the exact additive Studio schema-v7 authorization objects."""
+    try:
+        foreign_keys = connection.execute("PRAGMA foreign_keys").fetchone()
+        ignored_checks = connection.execute(
+            "PRAGMA ignore_check_constraints"
+        ).fetchone()
+        if (
+            foreign_keys is None
+            or foreign_keys[0] != 1
+            or ignored_checks is None
+            or ignored_checks[0] != 0
+        ):
+            raise ValueError("authorization pragmas")
+        expected_sql = {
+            ("table", _OLLAMA_AUTH_DECISIONS_TABLE, _OLLAMA_AUTH_DECISIONS_TABLE):
+                _stored_schema_sql(_OLLAMA_AUTH_DECISIONS_DDL),
+            ("table", _OLLAMA_AUTH_CONSUMPTIONS_TABLE, _OLLAMA_AUTH_CONSUMPTIONS_TABLE):
+                _stored_schema_sql(_OLLAMA_AUTH_CONSUMPTIONS_DDL),
+            ("table", _OLLAMA_AUTH_EVENTS_TABLE, _OLLAMA_AUTH_EVENTS_TABLE):
+                _stored_schema_sql(_OLLAMA_AUTH_EVENTS_DDL),
+            ("index", _OLLAMA_AUTH_MANDATE_INDEX, _OLLAMA_AUTH_EVENTS_TABLE):
+                _stored_schema_sql(_OLLAMA_AUTH_MANDATE_INDEX_DDL),
+        }
+        tables = {
+            _OLLAMA_AUTH_DECISIONS_TABLE,
+            _OLLAMA_AUTH_CONSUMPTIONS_TABLE,
+            _OLLAMA_AUTH_EVENTS_TABLE,
+        }
+        observed: dict[tuple[str, str, str], str | None] = {}
+        for row in connection.execute(
+            "SELECT type, name, tbl_name, sql FROM sqlite_schema"
+        ):
+            kind, name, table, sql = tuple(row)
+            if type(name) is not str or type(table) is not str:
+                raise ValueError("authorization object identity")
+            if not (
+                name.casefold().startswith("studio_ollama_v2_authorization_")
+                or table.casefold() in {item.casefold() for item in tables}
+            ):
+                continue
+            observed[(kind, name, table)] = (
+                None if sql is None else _normalize_schema_sql(sql)
+            )
+        for table in tables:
+            for row in connection.execute(f'PRAGMA index_list("{table}")'):
+                name = row[1]
+                if str(name).startswith("sqlite_autoindex_"):
+                    expected_sql[("index", name, table)] = None
+        if observed != expected_sql:
+            raise ValueError("authorization object census")
+
+        expected_foreign_keys = {
+            _OLLAMA_AUTH_DECISIONS_TABLE: {
+                (
+                    _AUTHORITY_CREDENTIALS_TABLE,
+                    "credential_id",
+                    "credential_id",
+                    "NO ACTION",
+                    "NO ACTION",
+                    "NONE",
+                ),
+            },
+            _OLLAMA_AUTH_CONSUMPTIONS_TABLE: {
+                (
+                    _OLLAMA_AUTH_DECISIONS_TABLE,
+                    "mandate_id",
+                    "mandate_id",
+                    "NO ACTION",
+                    "NO ACTION",
+                    "NONE",
+                ),
+            },
+            _OLLAMA_AUTH_EVENTS_TABLE: {
+                (
+                    _OLLAMA_AUTH_DECISIONS_TABLE,
+                    "mandate_id",
+                    "mandate_id",
+                    "NO ACTION",
+                    "NO ACTION",
+                    "NONE",
+                ),
+                (
+                    _AUTHORITY_CREDENTIALS_TABLE,
+                    "credential_id",
+                    "credential_id",
+                    "NO ACTION",
+                    "NO ACTION",
+                    "NONE",
+                ),
+            },
+        }
+        for table, expected_xinfo in _OLLAMA_AUTH_TABLE_XINFO.items():
+            xinfo = tuple(
+                tuple(row)
+                for row in connection.execute(f'PRAGMA table_xinfo("{table}")')
+            )
+            if xinfo != expected_xinfo:
+                raise ValueError("authorization columns")
+            fks = {
+                (row[2], row[3], row[4], row[5], row[6], row[7])
+                for row in connection.execute(f'PRAGMA foreign_key_list("{table}")')
+            }
+            if fks != expected_foreign_keys[table]:
+                raise ValueError("authorization foreign keys")
+            indexes = {
+                (row[1], row[2], row[3], row[4])
+                for row in connection.execute(f'PRAGMA index_list("{table}")')
+            }
+            if indexes != _OLLAMA_AUTH_INDEX_LIST[table]:
+                raise ValueError("authorization indexes")
+        for index, expected_info in _OLLAMA_AUTH_INDEX_INFO.items():
+            info = tuple(
+                tuple(row)
+                for row in connection.execute(f'PRAGMA index_info("{index}")')
+            )
+            if info != expected_info:
+                raise ValueError("authorization index columns")
+    except (IndexError, KeyError, sqlite3.Error, TypeError, ValueError) as exc:
+        raise StudioError("invalid_state", _OLLAMA_AUTH_SCHEMA_ERROR) from exc
+
+
+def _verify_ollama_v2_authorization_v8(connection: sqlite3.Connection) -> None:
+    """Verify the exact Studio schema-v8 terminal-outcome authority."""
+    try:
+        foreign_keys = connection.execute("PRAGMA foreign_keys").fetchone()
+        ignored_checks = connection.execute(
+            "PRAGMA ignore_check_constraints"
+        ).fetchone()
+        if (
+            foreign_keys is None
+            or foreign_keys[0] != 1
+            or ignored_checks is None
+            or ignored_checks[0] != 0
+        ):
+            raise ValueError("authorization pragmas")
+        expected_sql = {
+            ("table", _OLLAMA_AUTH_DECISIONS_TABLE, _OLLAMA_AUTH_DECISIONS_TABLE):
+                _stored_schema_sql(_OLLAMA_AUTH_V8_DECISIONS_DDL),
+            ("table", _OLLAMA_AUTH_CONSUMPTIONS_TABLE, _OLLAMA_AUTH_CONSUMPTIONS_TABLE):
+                _stored_schema_sql(_OLLAMA_AUTH_CONSUMPTIONS_DDL),
+            ("table", _OLLAMA_AUTH_EVENTS_TABLE, _OLLAMA_AUTH_EVENTS_TABLE):
+                _stored_schema_sql(_OLLAMA_AUTH_V8_EVENTS_DDL),
+            ("index", _OLLAMA_AUTH_MANDATE_INDEX, _OLLAMA_AUTH_EVENTS_TABLE):
+                _stored_schema_sql(_OLLAMA_AUTH_MANDATE_INDEX_DDL),
+            ("table", _OLLAMA_AUTH_OUTCOMES_TABLE, _OLLAMA_AUTH_OUTCOMES_TABLE):
+                _stored_schema_sql(_OLLAMA_AUTH_OUTCOMES_DDL),
+        }
+        tables = {
+            _OLLAMA_AUTH_DECISIONS_TABLE,
+            _OLLAMA_AUTH_CONSUMPTIONS_TABLE,
+            _OLLAMA_AUTH_EVENTS_TABLE,
+            _OLLAMA_AUTH_OUTCOMES_TABLE,
+        }
+        observed: dict[tuple[str, str, str], str | None] = {}
+        for row in connection.execute(
+            "SELECT type, name, tbl_name, sql FROM sqlite_schema"
+        ):
+            kind, name, table, sql = tuple(row)
+            if type(name) is not str or type(table) is not str:
+                raise ValueError("authorization object identity")
+            if not (
+                name.casefold().startswith("studio_ollama_v2_authorization_")
+                or table.casefold() in {item.casefold() for item in tables}
+            ):
+                continue
+            observed[(kind, name, table)] = (
+                None if sql is None else _normalize_schema_sql(sql)
+            )
+        for table in tables:
+            for row in connection.execute(f'PRAGMA index_list("{table}")'):
+                name = row[1]
+                if str(name).startswith("sqlite_autoindex_"):
+                    expected_sql[("index", name, table)] = None
+        if observed != expected_sql:
+            raise ValueError("authorization object census")
+
+        expected_foreign_keys = {
+            _OLLAMA_AUTH_DECISIONS_TABLE: {
+                (
+                    _AUTHORITY_CREDENTIALS_TABLE,
+                    "credential_id",
+                    "credential_id",
+                    "NO ACTION",
+                    "NO ACTION",
+                    "NONE",
+                ),
+            },
+            _OLLAMA_AUTH_CONSUMPTIONS_TABLE: {
+                (
+                    _OLLAMA_AUTH_DECISIONS_TABLE,
+                    "mandate_id",
+                    "mandate_id",
+                    "NO ACTION",
+                    "NO ACTION",
+                    "NONE",
+                ),
+            },
+            _OLLAMA_AUTH_EVENTS_TABLE: {
+                (
+                    _OLLAMA_AUTH_DECISIONS_TABLE,
+                    "mandate_id",
+                    "mandate_id",
+                    "NO ACTION",
+                    "NO ACTION",
+                    "NONE",
+                ),
+                (
+                    _AUTHORITY_CREDENTIALS_TABLE,
+                    "credential_id",
+                    "credential_id",
+                    "NO ACTION",
+                    "NO ACTION",
+                    "NONE",
+                ),
+            },
+            _OLLAMA_AUTH_OUTCOMES_TABLE: {
+                (
+                    _OLLAMA_AUTH_CONSUMPTIONS_TABLE,
+                    "consumption_id",
+                    "consumption_id",
+                    "NO ACTION",
+                    "NO ACTION",
+                    "NONE",
+                ),
+                (
+                    _OLLAMA_AUTH_EVENTS_TABLE,
+                    "event_id",
+                    "event_id",
+                    "NO ACTION",
+                    "NO ACTION",
+                    "NONE",
+                ),
+                (
+                    _OLLAMA_AUTH_DECISIONS_TABLE,
+                    "mandate_id",
+                    "mandate_id",
+                    "NO ACTION",
+                    "NO ACTION",
+                    "NONE",
+                ),
+            },
+        }
+        for table, expected_xinfo in _OLLAMA_AUTH_V8_TABLE_XINFO.items():
+            xinfo = tuple(
+                tuple(row)
+                for row in connection.execute(f'PRAGMA table_xinfo("{table}")')
+            )
+            if xinfo != expected_xinfo:
+                raise ValueError("authorization columns")
+            fks = {
+                (row[2], row[3], row[4], row[5], row[6], row[7])
+                for row in connection.execute(f'PRAGMA foreign_key_list("{table}")')
+            }
+            if fks != expected_foreign_keys[table]:
+                raise ValueError("authorization foreign keys")
+            indexes = {
+                (row[1], row[2], row[3], row[4])
+                for row in connection.execute(f'PRAGMA index_list("{table}")')
+            }
+            if indexes != _OLLAMA_AUTH_V8_INDEX_LIST[table]:
+                raise ValueError("authorization indexes")
+        for index, expected_info in _OLLAMA_AUTH_V8_INDEX_INFO.items():
+            info = tuple(
+                tuple(row)
+                for row in connection.execute(f'PRAGMA index_info("{index}")')
+            )
+            if info != expected_info:
+                raise ValueError("authorization index columns")
+    except (IndexError, KeyError, sqlite3.Error, TypeError, ValueError) as exc:
+        raise StudioError("invalid_state", _OLLAMA_AUTH_SCHEMA_ERROR) from exc
 
 
 def _normalize_schema_sql(value: str) -> str:
@@ -535,6 +1144,7 @@ class StudioStore:
                         f"Authenticated decision database requires schema version {SCHEMA_VERSION}",
                     )
                 _verify_authenticated_human_decision_v6(connection)
+                _verify_ollama_v2_authorization_v8(connection)
             except StudioError:
                 if connection is not None:
                     connection.close()
@@ -776,6 +1386,7 @@ class StudioStore:
             ) from exc
         self._verify_creation_v4_relational_shape()
         _verify_authenticated_human_decision_v6(self.connection)
+        _verify_ollama_v2_authorization_v8(self.connection)
 
     def _migrate(self) -> None:
         try:
@@ -824,6 +1435,12 @@ class StudioStore:
                 if version < 6:
                     self._create_v6_schema(advance_schema_version=True)
                     version = 6
+                if version < 7:
+                    self._create_v7_schema(advance_schema_version=True)
+                    version = 7
+                if version < 8:
+                    self._create_v8_schema(advance_schema_version=True)
+                    version = 8
                 if version >= 3:
                     # Protocol v3 is still additive and unpublished. Re-running
                     # its idempotent DDL lets existing development databases
@@ -835,8 +1452,10 @@ class StudioStore:
                     self._create_v4_schema()
                 if version >= 5:
                     self._create_v5_schema()
-                if version == 6:
+                if version >= 6:
                     _verify_authenticated_human_decision_v6(self.connection)
+                if version == 8:
+                    _verify_ollama_v2_authorization_v8(self.connection)
         except StudioError:
             raise
         except (sqlite3.Error, ValueError) as exc:
@@ -1232,6 +1851,115 @@ class StudioStore:
         except Exception:
             self.connection.execute(f"ROLLBACK TO {savepoint}")
             self.connection.execute(f"RELEASE {savepoint}")
+            raise
+
+    def _create_v7_schema(self, *, advance_schema_version: bool = False) -> None:
+        """Create the private additive Ollama-v2 Director authorization schema."""
+        savepoint = "studio_v7_ollama_authorization_schema"
+        self.connection.execute(f"SAVEPOINT {savepoint}")
+        try:
+            _verify_authenticated_human_decision_v6(self.connection)
+            for statement in _OLLAMA_AUTH_V7_DDL:
+                self.connection.execute(statement)
+            _verify_ollama_v2_authorization_v7(self.connection)
+            if advance_schema_version:
+                self.connection.execute(
+                    "INSERT OR REPLACE INTO schema_meta (key, value) "
+                    "VALUES ('schema_version', '7')"
+                )
+            self.connection.execute(f"RELEASE {savepoint}")
+        except BaseException:
+            try:
+                self.connection.execute(f"ROLLBACK TO {savepoint}")
+            finally:
+                self.connection.execute(f"RELEASE {savepoint}")
+            raise
+
+    def _create_v8_schema(self, *, advance_schema_version: bool = False) -> None:
+        """Atomically rebuild the v7 authorization domain with terminal outcomes."""
+        savepoint = "studio_v8_ollama_authorization_schema"
+        old_decisions = "studio_ollama_v2_authorization_v7_decisions"
+        old_consumptions = "studio_ollama_v2_authorization_v7_consumptions"
+        old_events = "studio_ollama_v2_authorization_v7_events"
+        self.connection.execute(f"SAVEPOINT {savepoint}")
+        try:
+            _verify_authenticated_human_decision_v6(self.connection)
+            _verify_ollama_v2_authorization_v7(self.connection)
+            self.connection.execute(
+                f"ALTER TABLE {_OLLAMA_AUTH_EVENTS_TABLE} RENAME TO {old_events}"
+            )
+            self.connection.execute(f"DROP INDEX {_OLLAMA_AUTH_MANDATE_INDEX}")
+            self.connection.execute(
+                f"ALTER TABLE {_OLLAMA_AUTH_CONSUMPTIONS_TABLE} "
+                f"RENAME TO {old_consumptions}"
+            )
+            self.connection.execute(
+                f"ALTER TABLE {_OLLAMA_AUTH_DECISIONS_TABLE} RENAME TO {old_decisions}"
+            )
+            for statement in _OLLAMA_AUTH_V8_DDL:
+                self.connection.execute(statement)
+            self.connection.execute(
+                f"INSERT INTO {_OLLAMA_AUTH_DECISIONS_TABLE} "
+                "(mandate_id, credential_id, operation_id, phase, plan_hash, "
+                "rollback_plan_hash, starting_snapshot_hash, review_hash, review_json, "
+                "decision_hash, decision_json, state, generation, slot_count, "
+                "consumed_count, last_event_hash, updated_at) "
+                f"SELECT mandate_id, credential_id, operation_id, phase, plan_hash, "
+                "rollback_plan_hash, starting_snapshot_hash, review_hash, review_json, "
+                "decision_hash, decision_json, state, generation, slot_count, "
+                f"consumed_count, last_event_hash, updated_at FROM {old_decisions}"
+            )
+            self.connection.execute(
+                f"INSERT INTO {_OLLAMA_AUTH_EVENTS_TABLE} "
+                "(event_id, credential_id, mandate_id, generation, event_type, "
+                "slot_ordinal, content_json, content_hash, previous_hash, mac, created_at) "
+                f"SELECT event_id, credential_id, mandate_id, generation, event_type, "
+                "slot_ordinal, content_json, content_hash, previous_hash, mac, created_at "
+                f"FROM {old_events} ORDER BY event_id"
+            )
+            self.connection.execute(
+                f"INSERT INTO {_OLLAMA_AUTH_CONSUMPTIONS_TABLE} "
+                "(consumption_id, mandate_id, slot_ordinal, effect_id, effect_hash, "
+                "authorization_id, request_hash, request_json, consumption_hash, "
+                "consumption_json, event_hash, consumed_at) "
+                f"SELECT consumption_id, mandate_id, slot_ordinal, effect_id, effect_hash, "
+                "authorization_id, request_hash, request_json, consumption_hash, "
+                f"consumption_json, event_hash, consumed_at FROM {old_consumptions}"
+            )
+            legacy_consumption_count = self.connection.execute(
+                f"SELECT count(*) FROM {old_consumptions}"
+            ).fetchone()[0]
+            backfill = self.connection.execute(
+                f"INSERT INTO {_OLLAMA_AUTH_OUTCOMES_TABLE} "
+                "(outcome_id, mandate_id, outcome_kind, slot_ordinal, effect_id, "
+                "effect_hash, authorization_id, request_hash, request_json, outcome_hash, "
+                "outcome_json, event_id, event_hash, consumption_id, settled_at) "
+                f"SELECT c.consumption_id, c.mandate_id, 'consumed', c.slot_ordinal, "
+                "c.effect_id, c.effect_hash, c.authorization_id, c.request_hash, "
+                "c.request_json, c.consumption_hash, c.consumption_json, e.event_id, "
+                "c.event_hash, c.consumption_id, c.consumed_at "
+                f"FROM {_OLLAMA_AUTH_CONSUMPTIONS_TABLE} AS c "
+                f"JOIN {_OLLAMA_AUTH_EVENTS_TABLE} AS e "
+                "ON e.content_hash=c.event_hash AND e.mandate_id=c.mandate_id "
+                "AND e.event_type='consumed' AND e.slot_ordinal=c.slot_ordinal"
+            )
+            if backfill.rowcount != legacy_consumption_count:
+                raise ValueError("authorization outcome backfill is incomplete")
+            self.connection.execute(f"DROP TABLE {old_consumptions}")
+            self.connection.execute(f"DROP TABLE {old_events}")
+            self.connection.execute(f"DROP TABLE {old_decisions}")
+            _verify_ollama_v2_authorization_v8(self.connection)
+            if advance_schema_version:
+                self.connection.execute(
+                    "INSERT OR REPLACE INTO schema_meta (key, value) "
+                    "VALUES ('schema_version', '8')"
+                )
+            self.connection.execute(f"RELEASE {savepoint}")
+        except BaseException:
+            try:
+                self.connection.execute(f"ROLLBACK TO {savepoint}")
+            finally:
+                self.connection.execute(f"RELEASE {savepoint}")
             raise
 
     def _ensure_creation_job_columns(self) -> None:

@@ -7,15 +7,20 @@ inference adapter in this module.  Successful application terminates only in
 
 from __future__ import annotations
 
+import gc
 import hashlib
+import threading
+import weakref
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Callable, Protocol
 
 from .ollama_v2_controller_contracts import (
     CONTROLLER_POLICY_CONTENT_HASH,
     SERVICE_UNIT_BYTES,
     SOCKET_UNIT_BYTES,
     AuthorizationConsumption,
+    AuthorizationOutcome,
+    AuthorizationRejection,
     AuthorizationRequest,
     BoundedTreeManifest,
     ControllerContractError,
@@ -70,12 +75,12 @@ class OllamaV2HostInspector(Protocol):
 
 
 class OllamaV2Authorization(Protocol):
-    def consume(self, request: AuthorizationRequest) -> AuthorizationConsumption: ...
+    def consume(self, request: AuthorizationRequest) -> AuthorizationOutcome: ...
 
     def resolve(
         self,
         request: AuthorizationRequest,
-    ) -> AuthorizationConsumption | None: ...
+    ) -> AuthorizationOutcome | None: ...
 
 
 class OllamaV2HostEffects(Protocol):
@@ -217,6 +222,224 @@ def _reject_generic_execution_surface(target: object) -> None:
             raise ControllerConstructionError("generic_execution_surface_forbidden")
 
 
+def _exact_authorization_outcome(
+    value: object,
+    request: AuthorizationRequest,
+    *,
+    _consumption_type=AuthorizationConsumption,
+    _rejection_type=AuthorizationRejection,
+    _consumption_from_document=AuthorizationConsumption.from_document,
+    _rejection_from_document=AuthorizationRejection.from_document,
+) -> AuthorizationOutcome:
+    try:
+        if type(value) is _consumption_type:
+            outcome = _consumption_from_document(value.to_document())
+        elif type(value) is _rejection_type:
+            outcome = _rejection_from_document(value.to_document())
+        else:
+            raise TypeError("inexact authorization outcome")
+    except (ControllerContractError, AttributeError, TypeError) as exc:
+        raise ControllerAuthorizationError("authorization_settlement_invalid") from exc
+    if not outcome.matches(request):
+        raise ControllerAuthorizationError("authorization_request_mismatch")
+    return outcome
+
+
+_STUDIO_AUTHORIZATION_ATTACHMENT_MARKER = object()
+_STUDIO_AUTHORIZATION_ATTACHMENT_LOCK = threading.RLock()
+_STUDIO_AUTHORIZATION_ATTACHMENTS: dict[int, _StudioAuthorizationAttachment] = {}
+
+
+class _StudioAuthorizationAttachment:
+    __slots__ = (
+        "port_ref",
+        "store",
+        "connection",
+        "path",
+        "poisoned_operations",
+        "attach",
+        "state",
+    )
+
+    def __init__(
+        self,
+        *,
+        port_ref: weakref.ReferenceType[object],
+        store: OllamaV2ControllerStore,
+        connection: object,
+        path: object,
+        poisoned_operations: object,
+        attach: Callable[[object, object], None],
+    ) -> None:
+        self.port_ref = port_ref
+        self.store = store
+        self.connection = connection
+        self.path = path
+        self.poisoned_operations = poisoned_operations
+        self.attach = attach
+        self.state = "registered"
+
+    def __copy__(self) -> object:
+        raise ControllerConstructionError("controller_authorization_attachment_invalid")
+
+    def __deepcopy__(self, _memo: object) -> object:
+        raise ControllerConstructionError("controller_authorization_attachment_invalid")
+
+    def __reduce__(self) -> object:
+        raise ControllerConstructionError("controller_authorization_attachment_invalid")
+
+    def retire(self) -> None:
+        self.state = "retired"
+
+    def complete(self, port: object, store: object) -> None:
+        if (
+            self.state != "consumed"
+            or self.port_ref() is not port
+            or self.store is not store
+        ):
+            self.retire()
+            raise ControllerConstructionError("controller_authorization_attachment_invalid")
+        try:
+            self.attach(port, store)
+        except BaseException as exc:
+            self.retire()
+            raise ControllerConstructionError(
+                "controller_authorization_attachment_invalid"
+            ) from exc
+        self.state = "attached"
+
+
+def _register_studio_authorization_port(
+    port: object,
+    store: object,
+    attach: object,
+    *,
+    _store_type=OllamaV2ControllerStore,
+    _marker=_STUDIO_AUTHORIZATION_ATTACHMENT_MARKER,
+    _marker_name="_controller_attachment_marker",
+    _attachments=_STUDIO_AUTHORIZATION_ATTACHMENTS,
+    _lock=_STUDIO_AUTHORIZATION_ATTACHMENT_LOCK,
+    _get_referrers=gc.get_referrers,
+    _weakref=weakref.ref,
+) -> None:
+    if type(store) is not _store_type or not callable(attach):
+        raise ControllerConstructionError("controller_authorization_attachment_invalid")
+    try:
+        connection = store._connection
+        path = store._path
+        poisoned_operations = store._poisoned_operations
+        if type(store._closed) is not bool or store._closed:
+            raise ValueError("closed controller store")
+        owners = tuple(
+            candidate
+            for candidate in _get_referrers(connection)
+            if type(candidate) is _store_type and candidate._connection is connection
+        )
+        if len(owners) != 1 or owners[0] is not store:
+            raise ValueError("ambiguous controller store")
+        key = id(port)
+
+        def release(reference: weakref.ReferenceType[object]) -> None:
+            with _lock:
+                current = _attachments.get(key)
+                if current is not None and current.port_ref is reference:
+                    _attachments.pop(key, None)
+
+        reference = _weakref(port, release)
+        object.__setattr__(port, _marker_name, _marker)
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ControllerConstructionError(
+            "controller_authorization_attachment_invalid"
+        ) from exc
+    registration = _StudioAuthorizationAttachment(
+        port_ref=reference,
+        store=store,
+        connection=connection,
+        path=path,
+        poisoned_operations=poisoned_operations,
+        attach=attach,
+    )
+    with _lock:
+        if key in _attachments:
+            registration.retire()
+            raise ControllerConstructionError(
+                "controller_authorization_attachment_invalid"
+            )
+        _attachments[key] = registration
+
+
+def _consume_studio_authorization_port_registration(
+    port: object,
+    store: object,
+    *,
+    _store_type=OllamaV2ControllerStore,
+    _marker=_STUDIO_AUTHORIZATION_ATTACHMENT_MARKER,
+    _marker_name="_controller_attachment_marker",
+    _attachments=_STUDIO_AUTHORIZATION_ATTACHMENTS,
+    _lock=_STUDIO_AUTHORIZATION_ATTACHMENT_LOCK,
+) -> _StudioAuthorizationAttachment | None:
+    marker = getattr(port, _marker_name, None)
+    key = id(port)
+    with _lock:
+        registration = _attachments.pop(key, None)
+    if marker is not _marker:
+        if registration is not None:
+            registration.retire()
+            raise ControllerConstructionError(
+                "controller_authorization_attachment_invalid"
+            )
+        return None
+    if (
+        registration is None
+        or registration.port_ref() is not port
+        or registration.state != "registered"
+    ):
+        if registration is not None:
+            registration.retire()
+        raise ControllerConstructionError("controller_authorization_attachment_invalid")
+    if (
+        type(store) is not _store_type
+        or store is not registration.store
+        or store._connection is not registration.connection
+        or store._path is not registration.path
+        or store._poisoned_operations is not registration.poisoned_operations
+        or type(store._closed) is not bool
+        or store._closed
+    ):
+        registration.retire()
+        raise ControllerConstructionError("controller_authorization_store_mismatch")
+    registration.state = "consumed"
+    return registration
+
+
+def _bind_studio_authorization_attachment(consumer):
+    def decorate(initializer):
+        def attached_init(
+            self,
+            store: OllamaV2ControllerStore,
+            inspector: OllamaV2HostInspector,
+            authorization: OllamaV2Authorization,
+            effects: OllamaV2HostEffects,
+        ) -> None:
+            registration = consumer(authorization, store)
+            try:
+                initializer(self, store, inspector, authorization, effects)
+                if registration is not None:
+                    registration.complete(authorization, store)
+            except BaseException:
+                if registration is not None and registration.state == "consumed":
+                    registration.retire()
+                raise
+
+        attached_init.__name__ = initializer.__name__
+        attached_init.__qualname__ = initializer.__qualname__
+        attached_init.__doc__ = initializer.__doc__
+        attached_init.__annotations__ = initializer.__annotations__
+        return attached_init
+
+    return decorate
+
+
 class OllamaV2Controller:
     """Closed state machine that advances one authorized host effect at a time."""
 
@@ -228,6 +451,7 @@ class OllamaV2Controller:
         "_store_record_authorization_pending",
         "_store_record_authorization_claimed",
         "_store_record_authorization_consumed",
+        "_store_record_authorization_rejected",
         "_store_load_authorization_request",
         "_store_load_authorization_consumption",
         "_store_record_dispatching",
@@ -238,6 +462,7 @@ class OllamaV2Controller:
         "_observe_call",
         "_consume_call",
         "_resolve_call",
+        "_exact_authorization_outcome_call",
         "_create_managed_root_call",
         "_create_principal_call",
         "_stage_release_call",
@@ -258,6 +483,9 @@ class OllamaV2Controller:
         "_dispatch_call",
     )
 
+    @_bind_studio_authorization_attachment(
+        _consume_studio_authorization_port_registration
+    )
     def __init__(
         self,
         store: OllamaV2ControllerStore,
@@ -283,6 +511,9 @@ class OllamaV2Controller:
         self._store_record_authorization_consumed = _capture_call(
             store, "record_authorization_consumed"
         )
+        self._store_record_authorization_rejected = _capture_call(
+            store, "record_authorization_rejected"
+        )
         self._store_load_authorization_request = _capture_call(
             store, "load_authorization_request"
         )
@@ -300,6 +531,7 @@ class OllamaV2Controller:
         self._observe_call = _capture_call(inspector, "observe")
         self._consume_call = _capture_call(authorization, "consume")
         self._resolve_call = _capture_call(authorization, "resolve")
+        self._exact_authorization_outcome_call = _exact_authorization_outcome
         self._create_managed_root_call = _capture_call(effects, "create_managed_root")
         self._create_principal_call = _capture_call(effects, "create_principal_exact")
         self._stage_release_call = _capture_call(effects, "stage_release")
@@ -392,48 +624,55 @@ class OllamaV2Controller:
             raise ControllerHostObservationError("host_observation_unavailable") from exc
         return self._exact_snapshot(value)
 
-    def _resolve_consumption(
+    def _settle_authorization(
         self,
         request: AuthorizationRequest,
-        *,
-        may_consume: bool,
+    ) -> AuthorizationOutcome:
+        try:
+            resolved = self._resolve_call(request)
+        except BaseException as exc:
+            raise ControllerAuthorizationError("authorization_settlement_unavailable") from exc
+        if resolved is not None:
+            return self._exact_authorization_outcome_call(resolved, request)
+
+        returned: object = None
+        consume_failed = False
+        try:
+            returned = self._consume_call(request)
+        except BaseException:
+            consume_failed = True
+
+        try:
+            resolved = self._resolve_call(request)
+        except BaseException as exc:
+            raise ControllerAuthorizationError("authorization_settlement_unavailable") from exc
+        if resolved is None:
+            raise ControllerAuthorizationError("authorization_settlement_pending")
+        exact_resolved = self._exact_authorization_outcome_call(resolved, request)
+        if not consume_failed and returned is not None:
+            exact_returned = self._exact_authorization_outcome_call(returned, request)
+            if exact_returned != exact_resolved:
+                raise ControllerAuthorizationError("authorization_settlement_mismatch")
+        return exact_resolved
+
+    def _resolve_durable_consumption(
+        self,
+        request: AuthorizationRequest,
+        durable: AuthorizationConsumption,
     ) -> AuthorizationConsumption:
         try:
             resolved = self._resolve_call(request)
         except BaseException as exc:
             raise ControllerAuthorizationError("authorization_resolution_failed") from exc
-        if resolved is None:
-            if not may_consume:
-                raise ControllerAuthorizationError("authorization_outcome_indeterminate")
-            try:
-                consumed = self._consume_call(request)
-            except BaseException as exc:
-                raise ControllerAuthorizationError("authorization_consumption_failed") from exc
-            try:
-                consumed = AuthorizationConsumption.from_document(consumed.to_document())
-            except (ControllerContractError, AttributeError, TypeError) as exc:
-                raise ControllerAuthorizationError("authorization_consumption_invalid") from exc
-            try:
-                resolved = self._resolve_call(request)
-            except BaseException as exc:
-                raise ControllerAuthorizationError("authorization_resolution_failed") from exc
-            if resolved is None:
-                raise ControllerAuthorizationError("authorization_consumption_unresolved")
-            try:
-                exact_resolved = AuthorizationConsumption.from_document(resolved.to_document())
-            except (ControllerContractError, AttributeError, TypeError) as exc:
-                raise ControllerAuthorizationError("authorization_resolution_invalid") from exc
-            if consumed != exact_resolved:
-                raise ControllerAuthorizationError("authorization_resolution_mismatch")
-            resolved = exact_resolved
-        else:
-            try:
-                resolved = AuthorizationConsumption.from_document(resolved.to_document())
-            except (ControllerContractError, AttributeError, TypeError) as exc:
-                raise ControllerAuthorizationError("authorization_resolution_invalid") from exc
-        if not resolved.matches(request):
-            raise ControllerAuthorizationError("authorization_request_mismatch")
-        return resolved
+        if type(resolved) is not AuthorizationConsumption:
+            raise ControllerAuthorizationError("authorization_resolution_invalid")
+        try:
+            exact = self._exact_authorization_outcome_call(resolved, request)
+        except ControllerAuthorizationError as exc:
+            raise ControllerAuthorizationError("authorization_resolution_invalid") from exc
+        if exact != durable:
+            raise ControllerAuthorizationError("authorization_resolution_mismatch")
+        return exact
 
     def _current_effect(
         self,
@@ -538,24 +777,6 @@ class OllamaV2Controller:
             raise ControllerStateError(f"{phase}_state_invalid")
         plan, _rollback, effect = self._current_effect(operation, phase=phase)
 
-        if operation.state != f"{phase}_dispatching":
-            try:
-                preflight = self._observe(operation)
-            except ControllerHostObservationError:
-                transition = self._store_record_recovery(
-                    operation,
-                    reason="host_observation_unavailable",
-                    observed_snapshot=None,
-                )
-                return self._exact_transition(transition).snapshot
-            if classify_effect_snapshot(preflight, effect) != "precondition":
-                transition = self._store_record_recovery(
-                    operation,
-                    reason="host_state_foreign",
-                    observed_snapshot=preflight,
-                )
-                return self._exact_transition(transition).snapshot
-
         if operation.state == f"{phase}_pending":
             request = AuthorizationRequest.create(
                 operation_id=operation.operation_id,
@@ -581,7 +802,6 @@ class OllamaV2Controller:
                 operation.current_authorization_hash
             )
 
-        claimed_now = False
         if operation.state == f"{phase}_authorization_pending":
             transition = self._exact_transition(
                 self._store_record_authorization_claimed(operation, request)
@@ -589,42 +809,57 @@ class OllamaV2Controller:
             operation = transition.snapshot
             if not transition.committed_now:
                 return operation
-            claimed_now = True
 
+        settled_consumption: AuthorizationConsumption | None = None
         if operation.state == f"{phase}_authorization_claimed":
-            try:
-                consumption = self._resolve_consumption(
-                    request,
-                    may_consume=claimed_now,
+            outcome = self._settle_authorization(request)
+            if type(outcome) is AuthorizationRejection:
+                transition = self._exact_transition(
+                    self._store_record_authorization_rejected(
+                        operation,
+                        request,
+                        outcome,
+                    )
                 )
-            except ControllerAuthorizationError as exc:
-                if str(exc) != "authorization_outcome_indeterminate":
-                    raise
-                transition = self._store_record_recovery(
-                    operation,
-                    reason="authorization_outcome_indeterminate",
-                    observed_snapshot=preflight,
-                )
-                return self._exact_transition(transition).snapshot
+                return transition.snapshot
+            if type(outcome) is not AuthorizationConsumption:
+                raise ControllerAuthorizationError("authorization_settlement_invalid")
             transition = self._exact_transition(
                 self._store_record_authorization_consumed(
                     operation,
                     request,
-                    consumption,
+                    outcome,
                 )
             )
             operation = transition.snapshot
+            settled_consumption = outcome
             if not transition.committed_now:
                 return operation
-        elif operation.state in {
+        elif operation.state not in {
+            f"{phase}_authorization_consumed",
+            f"{phase}_dispatching",
+        }:
+            raise ControllerStateError("authorization_state_invalid")
+
+        if operation.state in {
             f"{phase}_authorization_consumed",
             f"{phase}_dispatching",
         }:
             consumption = self._store_load_authorization_consumption(
                 request.authorization_id
             )
-            if consumption is None or not consumption.matches(request):
+            if (
+                type(consumption) is not AuthorizationConsumption
+                or not consumption.matches(request)
+            ):
                 raise ControllerAuthorizationError("durable_consumption_missing")
+            if operation.state == f"{phase}_authorization_consumed":
+                if settled_consumption is None:
+                    consumption = self._resolve_durable_consumption(request, consumption)
+                elif consumption != settled_consumption:
+                    raise ControllerAuthorizationError(
+                        "authorization_settlement_mismatch"
+                    )
         else:
             raise ControllerStateError("authorization_state_invalid")
 

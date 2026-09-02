@@ -369,7 +369,7 @@ class StudioCreationChangesetV3ContractTests(unittest.TestCase):
                         "SELECT name FROM sqlite_master WHERE type = 'table'"
                     )
                 }
-                self.assertEqual(6, SCHEMA_VERSION)
+                self.assertEqual(8, SCHEMA_VERSION)
                 self.assertIn("creation_changesets", tables)
                 self.assertIn("creation_changeset_attempts", tables)
                 operation_columns = {
@@ -381,7 +381,7 @@ class StudioCreationChangesetV3ContractTests(unittest.TestCase):
                 self.assertTrue({"base_size", "proposed_size"} <= operation_columns)
             with StudioStore(data_dir) as reopened:
                 self.assertEqual(
-                    "6",
+                    "8",
                     reopened.connection.execute(
                         "SELECT value FROM schema_meta WHERE key = 'schema_version'"
                     ).fetchone()["value"],

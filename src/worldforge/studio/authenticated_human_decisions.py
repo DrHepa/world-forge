@@ -19,6 +19,8 @@ import re
 import sqlite3
 import sys
 import threading
+import time
+import weakref
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
@@ -32,11 +34,11 @@ from worldforge.agent_harness.approvals import (
     ExecutionApprovalAuthority,
     ExecutionApprovalDecision,
     ExecutionApprovalReview,
+    _authority_functions,
+    _configure_studio_execution_approval_authority,
     _exact_hash,
     _exact_id,
     _exact_integer,
-    _authority_functions,
-    _configure_studio_execution_approval_authority,
     _register_studio_execution_approval_authority,
     _validate_authority_snapshot,
     _validate_decision,
@@ -44,8 +46,8 @@ from worldforge.agent_harness.approvals import (
 )
 from worldforge.studio.errors import StudioError
 from worldforge.studio.storage import (
-    StudioStore,
     _AUTHORITY_SCHEMA_ERROR,
+    StudioStore,
     _verify_authenticated_human_decision_v6,
     decode_object,
     encode_json,
@@ -946,6 +948,7 @@ class StudioAuthenticatedHumanDecisionAuthority(ExecutionApprovalAuthority):
                     self._connection.commit()
                     self._publish_anchor_after_commit(head)
                     phase = "done"
+                    _ = phase
                 except sqlite3.Error as exc:
                     failure = _LatchedFailure(
                         exc,
@@ -1506,8 +1509,133 @@ def _decision_from_json(
     return _decision_from_document(decode_object(value, context="authenticated decision"), review)
 
 
+def _director_clock_ms(_time_ns=time.time_ns) -> int:
+    return _time_ns() // 1_000_000
+
+
+def _build_ollama_v2_authorization_construction_capsule(
+    _authority_type=StudioAuthenticatedHumanDecisionAuthority,
+    _credential_type=_CredentialEvidence,
+    _id=id,
+    _object_factory=object,
+    _rlock_factory=threading.RLock,
+    _store_type=StudioStore,
+    _type=type,
+    _weakref_ref=weakref.ref,
+):
+    """Bind one-use construction to an exact successfully registered authority."""
+    registry: dict[int, tuple[object, ...]] = {}
+    pending: dict[int, tuple[object, ...]] = {}
+    lock = _rlock_factory()
+
+    def register(authority: StudioAuthenticatedHumanDecisionAuthority) -> None:
+        if _type(authority) is not _authority_type:
+            raise ApprovalError("approval_authority_invalid")
+        epoch = _object_factory()
+        record = (
+            _weakref_ref(authority),
+            authority._store,
+            authority._event_key,
+            authority._credential,
+            authority._connection,
+            authority._lock,
+            epoch,
+        )
+        with lock:
+            stale_authorities = [
+                key for key, existing in registry.items() if existing[1] is authority._store
+            ]
+            for key in stale_authorities:
+                registry.pop(key, None)
+            stale_tokens = [
+                key for key, issued in pending.items() if issued[2] is authority._store
+            ]
+            for key in stale_tokens:
+                pending.pop(key, None)
+            registry[_id(authority)] = record
+
+    def invalidate(authority: object) -> None:
+        if _type(authority) is not _authority_type:
+            raise ApprovalError("approval_authority_invalid")
+        with lock:
+            record = registry.get(_id(authority))
+        if record is None or record[0]() is not authority:
+            with lock:
+                stale = [key for key, value in pending.items() if value[1] is authority]
+                for key in stale:
+                    pending.pop(key, None)
+            return
+        authority_lock = record[5]
+        with authority_lock:
+            with lock:
+                if registry.get(_id(authority)) is record:
+                    registry.pop(_id(authority), None)
+                stale = [key for key, value in pending.items() if value[1] is authority]
+                for key in stale:
+                    pending.pop(key, None)
+
+    def active(authority: object, epoch: object) -> bool:
+        with lock:
+            record = registry.get(_id(authority))
+        if record is None:
+            return False
+        reference = record[0]
+        return reference() is authority and record[6] is epoch
+
+    def issue(authority: object) -> object:
+        if _type(authority) is not _authority_type:
+            raise ApprovalError("approval_authority_invalid")
+        with lock:
+            record = registry.get(_id(authority))
+            if record is None or record[0]() is not authority:
+                raise ApprovalError("approval_authority_invalid")
+            token = _object_factory()
+            pending[_id(token)] = (token, authority, *record[1:])
+        return token
+
+    def consume(authority: object, token: object) -> tuple[tuple[str, object], ...]:
+        with lock:
+            issued = pending.pop(_id(token), None)
+            current = registry.get(_id(authority))
+        valid = (
+            issued is not None
+            and current is not None
+            and issued[0] is token
+            and issued[1] is authority
+            and current[0]() is authority
+            and all(issued[index + 2] is current[index + 1] for index in range(6))
+        )
+        if not valid:
+            raise ApprovalError("approval_authority_invalid")
+        assert issued is not None
+        return (
+            ("_authority", authority),
+            ("_store", issued[2]),
+            ("_event_key", issued[3]),
+            ("_credential", issued[4]),
+            ("_connection", issued[5]),
+            ("_lock", issued[6]),
+            ("_epoch", issued[7]),
+            ("_epoch_check", active),
+            ("_clock_ms", _director_clock_ms),
+            ("_require_authority_usable", authority._require_usable),
+            ("_poison_authority", authority._poison),
+        )
+
+    return register, invalidate, issue, consume
+
+
+(
+    _register_studio_ollama_v2_authorization_authority,
+    _invalidate_studio_ollama_v2_authorization_authority,
+    _issue_studio_ollama_v2_authorization_capsule,
+    _consume_studio_ollama_v2_authorization_capsule,
+) = _build_ollama_v2_authorization_construction_capsule()
+
+
 def _build_studio_authority_construction_capsule(
     register_studio,
+    _register_ollama=_register_studio_ollama_v2_authorization_authority,
     _approval_error=ApprovalError,
     _authority_type=StudioAuthenticatedHumanDecisionAuthority,
     _base_exception=BaseException,
@@ -1644,6 +1772,7 @@ def _build_studio_authority_construction_capsule(
             )
         try:
             register_studio(authority, token)
+            _register_ollama(authority)
         except _base_exception:
             with lock:
                 pending.pop(token_id, None)

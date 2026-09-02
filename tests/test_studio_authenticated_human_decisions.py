@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import dis
 import hashlib
 import inspect
@@ -26,9 +27,12 @@ from worldforge.agent_harness_contracts import MAX_SAFE_INTEGER
 from worldforge.studio.authenticated_human_decisions import (
     StudioAuthenticatedHumanDecisionAuthority,
     _canonical_utc_timestamp,
+    _consume_studio_ollama_v2_authorization_capsule,
     _event_document,
     _event_mac,
     _immediate_interrupted_primary,
+    _invalidate_studio_ollama_v2_authorization_authority,
+    _issue_studio_ollama_v2_authorization_capsule,
     _note_indeterminate_cleanup,
 )
 from worldforge.studio.errors import StudioError
@@ -421,6 +425,31 @@ class _BaseExceptionFaultConnection:
 
 
 class StudioAuthenticatedHumanDecisionAuthorityTests(unittest.TestCase):
+    def test_ollama_domain_capsule_is_exact_registered_identity_bound_and_one_use(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store, authority = self._enrolled(directory)
+            self.addCleanup(store.close)
+            token = _issue_studio_ollama_v2_authorization_capsule(authority)
+            values = dict(
+                _consume_studio_ollama_v2_authorization_capsule(authority, token)
+            )
+            self.assertIs(authority, values["_authority"])
+            self.assertIs(store, values["_store"])
+            self.assertIs(authority._event_key, values["_event_key"])
+            self.assertIs(authority._credential, values["_credential"])
+            self.assertIs(authority._connection, values["_connection"])
+            self.assertIs(authority._lock, values["_lock"])
+            with self.assertRaisesRegex(ApprovalError, "approval_authority_invalid"):
+                _consume_studio_ollama_v2_authorization_capsule(authority, token)
+
+            copied = copy.copy(authority)
+            self.assertIsNot(copied, authority)
+            with self.assertRaisesRegex(ApprovalError, "approval_authority_invalid"):
+                _issue_studio_ollama_v2_authorization_capsule(copied)
+            _invalidate_studio_ollama_v2_authorization_authority(authority)
+            with self.assertRaisesRegex(ApprovalError, "approval_authority_invalid"):
+                _issue_studio_ollama_v2_authorization_capsule(authority)
+
     _PASSPHRASE = "director passphrase with enough UTF-8 bytes"
 
     def _enrolled(

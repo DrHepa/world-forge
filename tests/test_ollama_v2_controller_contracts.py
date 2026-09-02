@@ -5,6 +5,7 @@ import dataclasses
 import hashlib
 import unittest
 from pathlib import Path
+from typing import get_args
 
 from worldforge.provider_evidence.ollama_v2_controller_contracts import (
     CONTROLLER_GID,
@@ -17,6 +18,8 @@ from worldforge.provider_evidence.ollama_v2_controller_contracts import (
     SERVICE_UNIT_BYTES,
     SOCKET_UNIT_BYTES,
     AuthorizationConsumption,
+    AuthorizationOutcome,
+    AuthorizationRejection,
     AuthorizationRequest,
     BoundedTreeManifest,
     ControllerContractError,
@@ -464,6 +467,97 @@ class ExactControllerContractTests(unittest.TestCase):
         hostile["content_hash"] = AuthorizationConsumption.compute_document_hash(hostile)
         with self.assertRaisesRegex(ControllerContractError, "authorization_consumption_invalid"):
             AuthorizationConsumption.from_document(hostile)
+
+    def test_authorization_rejection_is_exact_canonical_and_request_bound(self) -> None:
+        request = AuthorizationRequest.create(
+            operation_id="op-authorization-rejection",
+            plan_hash="1" * 64,
+            effect_id="effect-authorization-rejection",
+            phase="apply",
+            attempt=3,
+            expected_generation=7,
+            expected_sequence=7,
+            expected_head_hash="2" * 64,
+            ownership_token="owner-" + "3" * 32,
+        )
+        reasons = ("revoked", "expired", "denied")
+        rejections = tuple(
+            AuthorizationRejection.create(
+                request,
+                authority_id="studio-director-ollama-v2",
+                mandate_id="mandate-exact-rejection",
+                decision_id="decision-exact-rejection",
+                slot_ordinal=2,
+                effect_hash="4" * 64,
+                reason=reason,
+                settlement_event_id=index,
+                settlement_event_hash=str(index) * 64,
+            )
+            for index, reason in enumerate(reasons, 1)
+        )
+
+        self.assertEqual(
+            frozenset({AuthorizationConsumption, AuthorizationRejection}),
+            frozenset(get_args(AuthorizationOutcome)),
+        )
+        self.assertEqual(reasons, tuple(rejection.reason for rejection in rejections))
+        for rejection in rejections:
+            with self.subTest(reason=rejection.reason):
+                document = rejection.to_document()
+                payload = dict(document)
+                actual_hash = payload.pop("content_hash")
+                self.assertEqual(
+                    hashlib.sha256(canonical_controller_bytes(payload)).hexdigest(),
+                    actual_hash,
+                )
+                self.assertEqual(
+                    rejection,
+                    AuthorizationRejection.from_document(document),
+                )
+                self.assertTrue(rejection.matches(request))
+                self.assertEqual(request.authorization_id, rejection.authorization_id)
+                self.assertEqual(request.content_hash, rejection.request_hash)
+                self.assertEqual(request.operation_id, rejection.operation_id)
+                self.assertEqual(request.plan_hash, rejection.plan_hash)
+                self.assertEqual(request.effect_id, rejection.effect_id)
+                self.assertEqual(request.phase, rejection.phase)
+                self.assertEqual(request.attempt, rejection.attempt)
+                self.assertEqual(request.expected_generation, rejection.expected_generation)
+                self.assertEqual(request.expected_sequence, rejection.expected_sequence)
+                self.assertEqual(request.expected_head_hash, rejection.expected_head_hash)
+                self.assertEqual(request.ownership_token, rejection.ownership_token)
+                self.assertEqual(request.policy_content_hash, rejection.policy_content_hash)
+                self.assertEqual(
+                    request.interpreter_binding_hash,
+                    rejection.interpreter_binding_hash,
+                )
+
+        other = dataclasses.replace(request, expected_sequence=8)
+        self.assertFalse(rejections[0].matches(other))
+
+        for key, hostile_value in (
+            ("reason", "cancelled"),
+            ("settlement_event_id", False),
+            ("effect_hash", "not-a-hash"),
+        ):
+            with self.subTest(field=key):
+                hostile = rejections[0].to_document()
+                hostile[key] = hostile_value
+                hostile["content_hash"] = AuthorizationRejection.compute_document_hash(hostile)
+                with self.assertRaisesRegex(
+                    ControllerContractError,
+                    "authorization_rejection_invalid",
+                ):
+                    AuthorizationRejection.from_document(hostile)
+
+        class RejectionSubclass(AuthorizationRejection):
+            pass
+
+        with self.assertRaisesRegex(
+            ControllerContractError,
+            "authorization_rejection_invalid",
+        ):
+            RejectionSubclass.from_document(rejections[0].to_document())
 
     def test_operation_and_rollback_contracts_preserve_only_proven_effect_lineage(self) -> None:
         baseline = make_empty_host_snapshot("snap-operation-baseline", observed_generation=0)

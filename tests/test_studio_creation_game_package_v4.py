@@ -331,6 +331,13 @@ class StudioGamePackageContractTests(unittest.TestCase):
                 connection.execute(
                     "ALTER TABLE creation_job_attempts DROP COLUMN binary_output_ino"
                 )
+                for table in (
+                    "studio_ollama_v2_authorization_outcomes",
+                    "studio_ollama_v2_authorization_consumptions",
+                    "studio_ollama_v2_authorization_events",
+                    "studio_ollama_v2_authorization_decisions",
+                ):
+                    connection.execute(f"DROP TABLE {table}")
                 connection.execute(
                     "UPDATE schema_meta SET value = '4' WHERE key = 'schema_version'"
                 )
@@ -340,7 +347,7 @@ class StudioGamePackageContractTests(unittest.TestCase):
             for _ in range(2):
                 with StudioStore(data) as migrated:
                     self.assertEqual(
-                        "6",
+                        "8",
                         migrated.connection.execute(
                             "SELECT value FROM schema_meta WHERE key = 'schema_version'"
                         ).fetchone()["value"],

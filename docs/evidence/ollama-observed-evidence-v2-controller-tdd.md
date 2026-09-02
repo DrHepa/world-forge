@@ -11,13 +11,14 @@
 
 ## Safety boundary
 
-This work adds deterministic planning, exact private contracts, a private
-durable controller store, closed effect dispatch, one-use authorization,
-post-call observation, read-only reconciliation, and explicit rollback. It
-does **not** add a concrete interpreter, subprocess or generic command
-surface, POSIX account management, systemd integration, socket lifecycle,
-Studio v7 authority, provider adapter, model load, inference, or native
-evidence.
+The original Stage-B work added deterministic planning, exact private
+contracts, a private durable controller store, closed effect dispatch, one-use
+authorization, post-call observation, read-only reconciliation, and explicit
+rollback. It did **not** add a concrete interpreter, subprocess or generic
+command surface, POSIX account management, systemd integration, socket
+lifecycle, Studio authority, provider adapter, model load, inference, or native
+evidence. Stage C later added backend-only Studio schema-v8 settlement without
+adding any of those absent native or provider boundaries.
 
 All host-facing behavior was exercised through test-local fakes. No live
 filesystem preparation, account/group change, service/process/socket/model
@@ -49,7 +50,7 @@ No local-service/native selector and no full discovery ran.
 
 | Confirmed issue | Genuine RED | GREEN and triangulation |
 |---|---|---|
-| Complete host projection | After effect 1, removing the managed root still let the controller prepare and authorize effect 2. During rollback, a previously removed principal could reappear while later cleanup still progressed. | Every effect hash now covers the full stable host projection, including all ownership tokens. Apply and rollback preflight before authorization and again before dispatch; post-call observation classifies that same complete projection. Both prior-resource drifts now enter `recovery_required` without another authorization or effect. |
+| Complete host projection | After effect 1, removing the managed root still let the controller prepare and authorize effect 2. During rollback, a previously removed principal could reappear while later cleanup still progressed. | Every effect hash now covers the full stable host projection, including all ownership tokens. At the original Stage-B boundary, apply and rollback preflight ran before authorization and again before dispatch; post-call observation classified that same complete projection. Stage C later moved the first host preflight after terminal authorization settlement, while retaining complete pre-dispatch and post-call projection checks. |
 | Same-operation duplicate dispatch | Two barrier-synchronized controllers sharing one store both consumed authorization and invoked the same effect after observing a duplicate historical transition. | Every mutation returns `ControllerStoreTransition(snapshot, committed_now)`. A durable pending-to-claimed transition assigns the sole caller allowed to consume, and only the dispatch-transition owner may invoke the effect. Barrier tests prove one consume, one effect call, and one cursor advance, including resume from an already-pending request. |
 | Distinct-operation ownership | Two operation IDs could both become active for the fixed resources because no durable lease or resource capability distinguished ownership. | Plan/effect/authorization/operation/observation/rollback contracts bind an operation-specific ownership token. Operation creation transactionally acquires one fixed-host-scope lease, held through owned, prepared, and recovery states and released only at exact `rolled_back_clean`. Concurrent creation/apply and rollback barriers prove operation B neither credits nor deletes operation A resources. |
 | Semantic reopen/replay | Reopen accepted an orphan pending authorization, altered consumed decision provenance, a postcondition attempt whose after-snapshot was rewritten to its pre-snapshot, missing completed rows, and an extra dispatch row without any transition event. Event documents also had no auxiliary bindings. | Closed event bindings now hash exact plans, requests, consumptions, effects, attempts, whole-host projections, ownership, recovery, and rollback. Reopen recomputes event identities and classifications, replays every operation snapshot mutation, and requires a one-to-one event/authorization/attempt census. Complete apply-plus-rollback replay and foreign-ownership projection tests triangulate the valid and hostile paths. |
@@ -107,7 +108,8 @@ JSON-compatible contracts for:
 - interpreter binding and bounded tree manifests;
 - principal and unit observations plus the complete host snapshot;
 - closed host effects and deterministic controller plans;
-- authorization requests and consumptions;
+- authorization requests, consumptions, rejections, and the exact
+  `AuthorizationOutcome` union;
 - operation snapshots and rollback plans.
 
 Every accepted document is rebuilt as a detached copy and has canonical JSON
@@ -193,15 +195,23 @@ recovery_required
 ```
 
 Before every possible host call, the controller durably records the exact
-pending authorization, atomically claims that request, consumes one exact
-request only for the claim owner, records its consumption, and records
-dispatching. Only a caller with direct exception-free transition ownership
-calls the one closed effect method; an exception-reconciled post-state is
-always non-owner. The full host projection is checked before authorization, again
-before dispatch, and after the possible call, even when the method raises. A
-resumed dispatching state observes but never invokes the effect again. A
-possible effect therefore requires observation and a fresh authorization before
-any later attempt.
+pending authorization and atomically claims that request. Claimed is a
+monotonic settlement fence: `resolve`, optional `consume`, and a second
+`resolve` must converge on one exact `AuthorizationOutcome`. Pending or
+unavailable settlement leaves the claim unchanged. A live generic recovery
+transition cannot clear claimed state; semantic replay still accepts the
+earlier canonical claimed-to-recovery history so existing databases remain
+readable. A consumption is recorded before preflight and dispatch. A rejection
+records `authorization.rejected` and enters `recovery_required` without a host
+observation, attempt, or effect. No host preflight or effect occurs before
+terminal settlement.
+
+Only a caller with direct exception-free transition ownership calls the one
+closed effect method; an exception-reconciled post-state is always non-owner.
+After consumed settlement, the full host projection is checked before dispatch
+and after the possible call, even when the method raises. A resumed dispatching
+state observes but never invokes the effect again. A possible effect therefore
+requires observation and a fresh authorization before any later attempt.
 
 Precondition, postcondition, foreign, and unavailable observations are
 distinct durable outcomes. Reconciliation never writes. Rollback is never
@@ -213,7 +223,11 @@ released only after reusable whole-host `rolled_back_clean` proof. Recovery
 events remain durable history, while the active recovery reason is cleared
 only by that terminal proof.
 
-## Final bounded gates
+## Historical ADR-0050-B bounded gates
+
+The following 81-test result is the exact publication gate for Stage B before
+the additive Studio Stage-C bridge existed. It remains historical evidence,
+not the current A/B/C compatibility count.
 
 ### Provider-evidence selector
 
@@ -326,7 +340,10 @@ observed no effect. The fake was corrected to use its bound plan's operation ID,
 after which the barrier test proved the intended lease behavior. This was a
 test-fixture defect, not native execution or a host mutation.
 
-## Exact stage matrix
+## Historical stage matrix at Stage-B publication
+
+This table records the naming and state at the original Stage-B boundary. The
+current seven-stage release-train matrix follows it below.
 
 | ADR-0050 stage | Status after these gates |
 |---|---|
@@ -338,11 +355,76 @@ test-fixture defect, not native execution or a host mutation.
 | F — native observed evidence and real inference | **ABSENT** |
 | Overall ADR-0050 | **PARTIAL**, unavailable, non-production |
 
-## Root publication steps
+## Historical pre-settlement A/B/C compatibility update
+
+The additive Stage-C consumption-parity remediation previously reran the
+complete four-module foundation/controller selection before terminal rejection
+settlement existed:
+
+```text
+PYTHONPATH=src python3 -m unittest \
+  tests.test_ollama_observed_evidence_v2 \
+  tests.test_ollama_v2_controller_contracts \
+  tests.test_ollama_v2_controller_store \
+  tests.test_ollama_v2_controller
+Ran 83 tests in 11.486s
+OK
+```
+
+The added controller regression resumes a durable consumed authorization
+through the real state-machine path. Before any APPLY or ROLLBACK dispatch it
+requires an exact-type resolver result and complete equality with the durable
+ControllerStore consumption. An equal detached copy succeeds; foreign
+authority or decision provenance and subclass results fail before another
+controller event, attempt, or effect. The resolver target remains the one
+captured at controller construction despite later instance or class
+replacement.
+
+That 83-test count is historical. It must not be read as the final controller
+selection for the settlement candidate.
+
+## Current controller settlement update
+
+The final three-module controller selection, excluding the separately preserved
+14-test pure foundation suite, passed:
+
+```text
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m unittest \
+  tests.test_ollama_v2_controller_contracts \
+  tests.test_ollama_v2_controller_store \
+  tests.test_ollama_v2_controller
+Ran 79 tests
+OK
+```
+
+The additive cases cover the exact canonical rejection outcome, durable APPLY
+and ROLLBACK rejection events, the monotonic claimed settlement fence,
+settlement pending/unavailable immutability, lost consume-reply resolution,
+prohibition of live generic claimed recovery, readable legacy claimed-recovery
+history, no preflight/effect before settlement, and captured-call replacement
+resistance. Rejected requests create no effect attempt and never invoke the
+test-local host port.
+
+| Current ADR-0050 stage | Status |
+|---|---|
+| A — corrected v2 policy foundation | **COMPLETE** |
+| B — deterministic non-native controller core | **COMPLETE** |
+| C — backend Studio plan authorization and closed controller bridge | **COMPLETE** |
+| D — concrete closed host interpreter/broker | **ABSENT** |
+| E — Studio protocol, Electron IPC, and UI ceremony | **ABSENT** |
+| F — separately authorized host preparation | **ABSENT** |
+| G — native observed evidence and bounded real inference | **ABSENT** |
+| Overall ADR-0050 | **PARTIAL**, unavailable, non-production |
+
+## Historical Stage-B root publication steps
+
+The following checklist was completed when Stage B was published as
+`c2c86621842c45f79c2ad5730d91adb4b2f1b9c7`; it is retained as provenance, not
+as an instruction for the current Stage-C candidate.
 
 1. Review the complete dirty diff against
    `211d52f4e8fd20f40e5cbceda7584b3ce8129bf9` in a fresh read-only context.
-2. Rerun identity check-only; the delegated final gate currently reports
+2. At Stage-B publication, canonical generation and check-only both reported
    `306` entries and `1072` occurrences.
 3. Only if later root-owned edits make that check stale, run the canonical
    generator in authorized write mode once and immediately recheck; never
@@ -351,6 +433,9 @@ test-fixture defect, not native execution or a host mutation.
    bounded gates.
 5. Only the root publisher may stage, conventionally commit, and push.
 
-Until those steps and the absent stages are completed, this work is not native
+The current Stage-C identity check is intentionally recorded in the Studio
+settlement evidence rather than inferred from this historical checklist.
+
+Until the currently absent stages are completed, this work is not native
 Ollama evidence, not availability, not a provider PASS, and not production
 readiness.

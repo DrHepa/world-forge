@@ -22,7 +22,7 @@
     },
     {
       "category": "migration",
-      "file_sha256": "4ea28b883656dba3dcc543a87b92066aed61a49752964093b64a131cb14a1fd6",
+      "file_sha256": "701051c802affe30ecccc16d54601a07e304a64f44d2f1c1925cd240b31fdd14",
       "justification": "The compatibility bridge retains this old public location until the authorized cutover.",
       "offsets": [
         4147,
@@ -1003,11 +1003,11 @@
     },
     {
       "category": "legacy_contract",
-      "file_sha256": "f4ca62c42b403e783db3a284940f0a4c6ab4840a8f90b868b89134ecfef8e527",
+      "file_sha256": "65536127a685deff2d454beed2d49403385c4c628467164e4599cc61e09d0230",
       "justification": "Published legacy format, schema, protocol, or storage identity remains immutable.",
       "offsets": [
-        13995,
-        22461
+        14543,
+        23009
       ],
       "path": "docs/ARCHITECTURE.md",
       "pattern": "rpg-world-forge"
@@ -3499,7 +3499,7 @@
     },
     {
       "category": "regression_fixture",
-      "file_sha256": "48236998c267af326262ea597e8942e5e76d6949a9a73712ae4135bfcf411d7d",
+      "file_sha256": "97ce03634eea5d6c725c662d056605f1d477b6b727ded7a123c77652912f1937",
       "justification": "Exercises retained Studio protocol and compatibility behavior.",
       "offsets": [
         8272,
@@ -3510,24 +3510,24 @@
     },
     {
       "category": "regression_fixture",
-      "file_sha256": "f0a01a6bc3166cf700fe156d77fee4826b7a91f2ad6be380ff9cdb2b5e4a1324",
+      "file_sha256": "da4f4d515e8bda897f753137afb21ece9595f7de1e5e0b8d23e21bcaf5ce3cff",
       "justification": "Exercises retained Studio protocol and compatibility behavior.",
       "offsets": [
-        11872,
-        12992,
-        17518,
-        18515,
-        18944,
-        117843,
-        118624,
-        147412,
-        152561,
-        154796,
-        156733,
-        159252,
-        159946,
-        162405,
-        163346
+        12189,
+        13309,
+        17835,
+        18832,
+        19261,
+        118415,
+        119196,
+        147984,
+        153133,
+        155368,
+        157305,
+        159824,
+        160518,
+        162977,
+        163918
       ],
       "path": "tests/test_studio_creation_jobs_v4.py",
       "pattern": "rpg-world-forge"
@@ -3575,27 +3575,27 @@
     },
     {
       "category": "regression_fixture",
-      "file_sha256": "31eeef1f025ed6909e1854160f1b3c1cc7911760a363a4e0cdfe24ae608ad262",
+      "file_sha256": "c0fbdb874c4115532b512016f4ca134750a5dd85959ae44960f8bd7a04e524c0",
       "justification": "Exercises retained Studio protocol and compatibility behavior.",
       "offsets": [
         8095,
         9400,
         9998,
         10323,
-        12089,
-        83794,
-        84553,
-        86029,
-        86570,
-        87391,
-        88196
+        12462,
+        84167,
+        84926,
+        86402,
+        86943,
+        87764,
+        88569
       ],
       "path": "tests/test_studio_creation_v3.py",
       "pattern": "rpg-world-forge"
     },
     {
       "category": "regression_fixture",
-      "file_sha256": "4df1b16ef38b44be776f3298fa7a2edf3d708e0e4aa69f4cc14139656ed46831",
+      "file_sha256": "25390c18ccd2f8c049bfe5091a22e832e8c3c1ab11348d445b1d71f96aa7827d",
       "justification": "Regression evidence preserves legacy identity input and reader behavior.",
       "offsets": [
         1836,
@@ -3605,17 +3605,17 @@
         8746,
         10068,
         12631,
-        66605,
-        67227,
-        68002,
-        71974
+        66944,
+        67566,
+        68341,
+        72313
       ],
       "path": "tests/test_studio_external_jobs.py",
       "pattern": "rpg-world-forge"
     },
     {
       "category": "regression_fixture",
-      "file_sha256": "3c75ba13a668297b3929625f8af76a256f81506277edefbc31a9010883de8377",
+      "file_sha256": "4a2ca29b646e92bdc8bcc8e648c02cab47d4b856bb2d5f591cf162c617321193",
       "justification": "Exercises retained Studio protocol and compatibility behavior.",
       "offsets": [
         721,
@@ -3627,7 +3627,7 @@
         35658,
         40599,
         41126,
-        44982
+        44994
       ],
       "path": "tests/test_studio_protocol_v5.py",
       "pattern": "rpg-world-forge"
@@ -3678,13 +3678,13 @@
     },
     {
       "category": "regression_fixture",
-      "file_sha256": "1884e1e6ea09089b3837abdc439866c759a5ee5c8b49fce08340bf805292baa8",
+      "file_sha256": "0a513782927f55822f9250d67b54c66ba900d69af58d76231bcadbd86eadab2c",
       "justification": "Regression evidence preserves legacy identity input and reader behavior.",
       "offsets": [
-        24897,
-        25713,
-        29130,
-        29946
+        46350,
+        47166,
+        50583,
+        51399
       ],
       "path": "tests/test_studio_storage.py",
       "pattern": "rpg-world-forge"

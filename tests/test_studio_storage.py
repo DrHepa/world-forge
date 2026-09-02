@@ -7,10 +7,16 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from worldforge.studio import storage as storage_module
+from worldforge.studio.director_control import StudioDirectorControl
 from worldforge.studio.errors import StudioError
 from worldforge.studio.jobs import JobManager
-from worldforge.studio.storage import StudioStore, encode_json
-
+from worldforge.studio.storage import (
+    SCHEMA_VERSION,
+    StudioStore,
+    _verify_ollama_v2_authorization_v8,
+    encode_json,
+)
 
 _PRIVATE_EVENTS = "studio_authenticated_human_decision_events"
 _PRIVATE_APPROVAL_INDEX = "studio_authenticated_human_decision_events_approval_idx"
@@ -18,6 +24,27 @@ _PRIVATE_APPROVAL_INDEX_SQL = (
     f"CREATE INDEX {_PRIVATE_APPROVAL_INDEX} "
     f"ON {_PRIVATE_EVENTS}(approval_id, event_id)"
 )
+
+
+class _SchemaCrash(BaseException):
+    pass
+
+
+class _AuthorizationPragmaMutationConnection:
+    def __init__(
+        self,
+        connection: sqlite3.Connection,
+        target: str,
+        replacement: tuple[tuple[object, ...], ...],
+    ) -> None:
+        self._connection = connection
+        self._target = target
+        self._replacement = replacement
+
+    def execute(self, sql: str, *args: object):
+        if sql == self._target:
+            return self._replacement
+        return self._connection.execute(sql, *args)
 
 
 def _replace_private_table_sql(
@@ -68,8 +95,22 @@ def _create_genuine_v5_store(data_dir: Path) -> None:
         mock.patch.object(
             StudioStore, "_create_v6_schema", autospec=True, return_value=None
         ),
+        mock.patch.object(
+            StudioStore, "_create_v7_schema", autospec=True, return_value=None
+        ),
+        mock.patch.object(
+            StudioStore, "_create_v8_schema", autospec=True, return_value=None
+        ),
         mock.patch(
             "worldforge.studio.storage._verify_authenticated_human_decision_v6",
+            return_value=None,
+        ),
+        mock.patch(
+            "worldforge.studio.storage._verify_ollama_v2_authorization_v7",
+            return_value=None,
+        ),
+        mock.patch(
+            "worldforge.studio.storage._verify_ollama_v2_authorization_v8",
             return_value=None,
         ),
     ):
@@ -91,7 +132,474 @@ def _create_genuine_v5_store(data_dir: Path) -> None:
         raise AssertionError("fixture is not an exact pre-v6 StudioStore")
 
 
+def _create_genuine_v6_store(data_dir: Path) -> None:
+    with StudioStore(data_dir):
+        pass
+    with sqlite3.connect(data_dir / "studio.sqlite3") as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("DROP TABLE studio_ollama_v2_authorization_outcomes")
+        connection.execute("DROP TABLE studio_ollama_v2_authorization_consumptions")
+        connection.execute("DROP TABLE studio_ollama_v2_authorization_events")
+        connection.execute("DROP TABLE studio_ollama_v2_authorization_decisions")
+        connection.execute(
+            "UPDATE schema_meta SET value='6' WHERE key='schema_version'"
+        )
+
+
+def _create_genuine_v7_store(data_dir: Path) -> None:
+    with (
+        mock.patch.object(
+            StudioStore, "_create_v8_schema", autospec=True, return_value=None
+        ),
+        mock.patch(
+            "worldforge.studio.storage._verify_ollama_v2_authorization_v8",
+            return_value=None,
+        ),
+    ):
+        with StudioStore(data_dir):
+            pass
+    with sqlite3.connect(data_dir / "studio.sqlite3") as connection:
+        version = connection.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone()[0]
+        outcome = connection.execute(
+            "SELECT name FROM sqlite_schema "
+            "WHERE name='studio_ollama_v2_authorization_outcomes'"
+        ).fetchone()
+    if version != "7" or outcome is not None:
+        raise AssertionError("fixture is not an exact schema-v7 StudioStore")
+
+
+def _create_data_bearing_v7_store(data_dir: Path) -> dict[str, tuple[object, ...]]:
+    with StudioStore(data_dir) as store:
+        control = StudioDirectorControl(store)
+        control.enroll(passphrase="correct horse battery staple")
+        control.close()
+    values: dict[str, tuple[object, ...]] = {
+        "decision": (
+            "mandate-migrated",
+            "director_local",
+            "operation-migrated",
+            "apply",
+            "p" * 64,
+            None,
+            "s" * 64,
+            "r" * 64,
+            '{"legacy":"review"}',
+            "d" * 64,
+            '{"legacy":"decision"}',
+            "approved",
+            1,
+            1,
+            1,
+            "e" * 64,
+            "2026-09-02T12:00:00.000000Z",
+        ),
+        "event": (
+            1,
+            "director_local",
+            "mandate-migrated",
+            1,
+            "consumed",
+            0,
+            '{"legacy":"event"}',
+            "e" * 64,
+            "0" * 64,
+            b"m" * 32,
+            "2026-09-02T12:00:00.000000Z",
+        ),
+        "consumption": (
+            "consumption-migrated",
+            "mandate-migrated",
+            0,
+            "effect-migrated",
+            "f" * 64,
+            "authorization-migrated",
+            "q" * 64,
+            '{"legacy":"request"}',
+            "c" * 64,
+            '{"legacy":"consumption"}',
+            "e" * 64,
+            "2026-09-02T12:00:00.000000Z",
+        ),
+    }
+    with sqlite3.connect(data_dir / "studio.sqlite3") as connection:
+        connection.execute("PRAGMA foreign_keys = OFF")
+        for table in (
+            "studio_ollama_v2_authorization_outcomes",
+            "studio_ollama_v2_authorization_consumptions",
+            "studio_ollama_v2_authorization_events",
+            "studio_ollama_v2_authorization_decisions",
+        ):
+            connection.execute(f"DROP TABLE {table}")
+        for statement in storage_module._OLLAMA_AUTH_V7_DDL:  # noqa: SLF001
+            connection.execute(statement)
+        connection.execute(
+            "INSERT INTO studio_ollama_v2_authorization_decisions VALUES "
+            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            values["decision"],
+        )
+        connection.execute(
+            "INSERT INTO studio_ollama_v2_authorization_events VALUES "
+            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            values["event"],
+        )
+        connection.execute(
+            "INSERT INTO studio_ollama_v2_authorization_consumptions VALUES "
+            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            values["consumption"],
+        )
+        connection.execute("UPDATE schema_meta SET value='7' WHERE key='schema_version'")
+    return values
+
+
+def _authorization_schema_fingerprint(connection: sqlite3.Connection):
+    return connection.execute(
+        "SELECT type, name, tbl_name, sql FROM sqlite_schema "
+        "WHERE name LIKE 'studio_ollama_v2_authorization_%' "
+        "OR tbl_name LIKE 'studio_ollama_v2_authorization_%' "
+        "ORDER BY type, name, tbl_name"
+    ).fetchall()
+
+
 class StudioStorageTests(unittest.TestCase):
+    def test_v8_verifier_rejects_exact_xinfo_and_autoindex_shape_drift(self) -> None:
+        cases = (
+            (
+                'PRAGMA table_xinfo("studio_ollama_v2_authorization_decisions")',
+                (
+                    (0, "mandate_id", "BLOB", 1, None, 1, 0),
+                    (1, "credential_id", "TEXT", 1, None, 0, 0),
+                    (2, "operation_id", "TEXT", 1, None, 0, 0),
+                    (3, "phase", "TEXT", 1, None, 0, 0),
+                    (4, "plan_hash", "TEXT", 1, None, 0, 0),
+                    (5, "rollback_plan_hash", "TEXT", 0, None, 0, 0),
+                    (6, "starting_snapshot_hash", "TEXT", 1, None, 0, 0),
+                    (7, "review_hash", "TEXT", 1, None, 0, 0),
+                    (8, "review_json", "TEXT", 1, None, 0, 0),
+                    (9, "decision_hash", "TEXT", 0, None, 0, 0),
+                    (10, "decision_json", "TEXT", 0, None, 0, 0),
+                    (11, "state", "TEXT", 1, None, 0, 0),
+                    (12, "generation", "INTEGER", 1, None, 0, 0),
+                    (13, "slot_count", "INTEGER", 1, None, 0, 0),
+                    (14, "consumed_count", "INTEGER", 1, None, 0, 0),
+                    (15, "last_event_hash", "TEXT", 1, None, 0, 0),
+                    (16, "updated_at", "TEXT", 1, None, 0, 0),
+                ),
+            ),
+            (
+                'PRAGMA index_info("sqlite_autoindex_'
+                'studio_ollama_v2_authorization_consumptions_2")',
+                ((0, 3, "effect_id"),),
+            ),
+        )
+        with tempfile.TemporaryDirectory() as directory, StudioStore(
+            Path(directory) / "studio"
+        ) as store:
+            for target, replacement in cases:
+                with self.subTest(target=target), self.assertRaisesRegex(
+                    StudioError,
+                    "Ollama v2 authorization database schema is invalid",
+                ):
+                    _verify_ollama_v2_authorization_v8(
+                        _AuthorizationPragmaMutationConnection(
+                            store.connection,
+                            target,
+                            replacement,
+                        )
+                    )
+
+    def test_schema_v8_adds_exact_ollama_authorization_objects(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, StudioStore(
+            Path(directory) / "studio"
+        ) as store:
+            self.assertEqual(8, SCHEMA_VERSION)
+            self.assertEqual(
+                "8",
+                store.connection.execute(
+                    "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+                ).fetchone()[0],
+            )
+            objects = {
+                (row[0], row[1], row[2])
+                for row in store.connection.execute(
+                    "SELECT type, name, tbl_name FROM sqlite_schema "
+                    "WHERE name LIKE 'studio_ollama_v2_authorization_%'"
+                )
+            }
+            self.assertEqual(
+                {
+                    (
+                        "table",
+                        "studio_ollama_v2_authorization_decisions",
+                        "studio_ollama_v2_authorization_decisions",
+                    ),
+                    (
+                        "table",
+                        "studio_ollama_v2_authorization_consumptions",
+                        "studio_ollama_v2_authorization_consumptions",
+                    ),
+                    (
+                        "table",
+                        "studio_ollama_v2_authorization_events",
+                        "studio_ollama_v2_authorization_events",
+                    ),
+                    (
+                        "index",
+                        "studio_ollama_v2_authorization_events_mandate_idx",
+                        "studio_ollama_v2_authorization_events",
+                    ),
+                    (
+                        "table",
+                        "studio_ollama_v2_authorization_outcomes",
+                        "studio_ollama_v2_authorization_outcomes",
+                    ),
+                },
+                objects,
+            )
+            _verify_ollama_v2_authorization_v8(store.connection)
+
+    def test_primary_migrates_exact_v7_to_v8_and_secondary_refuses_v7(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory) / "studio"
+            _create_genuine_v7_store(data_dir)
+            with self.assertRaisesRegex(StudioError, "requires schema version 8"):
+                StudioStore(data_dir, mode="secondary")
+            with StudioStore(data_dir) as migrated:
+                self.assertEqual(
+                    "8",
+                    migrated.connection.execute(
+                        "SELECT value FROM schema_meta WHERE key='schema_version'"
+                    ).fetchone()[0],
+                )
+                self.assertEqual(
+                    1,
+                    migrated.connection.execute(
+                        "SELECT count(*) FROM sqlite_schema "
+                        "WHERE type='table' AND "
+                        "name='studio_ollama_v2_authorization_outcomes'"
+                    ).fetchone()[0],
+                )
+            with StudioStore(data_dir, mode="secondary"):
+                pass
+
+    def test_v7_to_v8_preserves_rows_backfills_bijection_and_matches_fresh_shape(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory) / "migrated"
+            fresh_dir = Path(directory) / "fresh"
+            values = _create_data_bearing_v7_store(data_dir)
+            with self.assertRaisesRegex(StudioError, "requires schema version 8"):
+                StudioStore(data_dir, mode="secondary")
+            with StudioStore(data_dir) as migrated, StudioStore(fresh_dir) as fresh:
+                self.assertEqual(
+                    values["decision"],
+                    tuple(
+                        migrated.connection.execute(
+                            "SELECT * FROM studio_ollama_v2_authorization_decisions"
+                        ).fetchone()
+                    ),
+                )
+                self.assertEqual(
+                    values["event"],
+                    tuple(
+                        migrated.connection.execute(
+                            "SELECT * FROM studio_ollama_v2_authorization_events"
+                        ).fetchone()
+                    ),
+                )
+                self.assertEqual(
+                    values["consumption"],
+                    tuple(
+                        migrated.connection.execute(
+                            "SELECT * FROM studio_ollama_v2_authorization_consumptions"
+                        ).fetchone()
+                    ),
+                )
+                outcome = migrated.connection.execute(
+                    "SELECT * FROM studio_ollama_v2_authorization_outcomes"
+                ).fetchone()
+                self.assertEqual(
+                    (
+                        "consumption-migrated",
+                        "mandate-migrated",
+                        "consumed",
+                        0,
+                        "effect-migrated",
+                        "f" * 64,
+                        "authorization-migrated",
+                        "q" * 64,
+                        '{"legacy":"request"}',
+                        "c" * 64,
+                        '{"legacy":"consumption"}',
+                        1,
+                        "e" * 64,
+                        "consumption-migrated",
+                        "2026-09-02T12:00:00.000000Z",
+                    ),
+                    tuple(outcome),
+                )
+                self.assertEqual(
+                    _authorization_schema_fingerprint(fresh.connection),
+                    _authorization_schema_fingerprint(migrated.connection),
+                )
+                _verify_ollama_v2_authorization_v8(migrated.connection)
+
+    def test_v7_to_v8_exception_and_baseexception_restore_exact_data_bearing_v7(self) -> None:
+        for failure in (
+            sqlite3.OperationalError("simulated v8 verification failure"),
+            _SchemaCrash("simulated v8 interruption"),
+        ):
+            with (
+                self.subTest(failure=type(failure).__name__),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                data_dir = Path(directory) / "studio"
+                values = _create_data_bearing_v7_store(data_dir)
+                with sqlite3.connect(data_dir / "studio.sqlite3") as before_connection:
+                    before = _authorization_schema_fingerprint(before_connection)
+                with mock.patch(
+                    "worldforge.studio.storage._verify_ollama_v2_authorization_v8",
+                    side_effect=failure,
+                ):
+                    expected = StudioError if isinstance(failure, Exception) else _SchemaCrash
+                    with self.assertRaises(expected):
+                        StudioStore(data_dir)
+                with sqlite3.connect(data_dir / "studio.sqlite3") as connection:
+                    self.assertEqual(
+                        "7",
+                        connection.execute(
+                            "SELECT value FROM schema_meta WHERE key='schema_version'"
+                        ).fetchone()[0],
+                    )
+                    self.assertEqual(before, _authorization_schema_fingerprint(connection))
+                    self.assertEqual(
+                        values["decision"],
+                        tuple(
+                            connection.execute(
+                                "SELECT * FROM studio_ollama_v2_authorization_decisions"
+                            ).fetchone()
+                        ),
+                    )
+                    self.assertEqual(
+                        values["event"],
+                        tuple(
+                            connection.execute(
+                                "SELECT * FROM studio_ollama_v2_authorization_events"
+                            ).fetchone()
+                        ),
+                    )
+                    self.assertEqual(
+                        values["consumption"],
+                        tuple(
+                            connection.execute(
+                                "SELECT * FROM studio_ollama_v2_authorization_consumptions"
+                            ).fetchone()
+                        ),
+                    )
+
+    def test_primary_migrates_exact_v6_to_v8_and_secondary_never_migrates(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory) / "studio"
+            _create_genuine_v6_store(data_dir)
+            with self.assertRaisesRegex(StudioError, "requires schema version 8"):
+                StudioStore(data_dir, mode="secondary")
+            with StudioStore(data_dir) as migrated:
+                self.assertEqual(
+                    "8",
+                    migrated.connection.execute(
+                        "SELECT value FROM schema_meta WHERE key='schema_version'"
+                    ).fetchone()[0],
+                )
+            with StudioStore(data_dir, mode="secondary"):
+                pass
+
+    def test_v6_to_v7_failure_at_every_ddl_boundary_restores_exact_v6(self) -> None:
+        boundaries = (
+            (sqlite3.SQLITE_CREATE_TABLE, "studio_ollama_v2_authorization_decisions"),
+            (sqlite3.SQLITE_CREATE_TABLE, "studio_ollama_v2_authorization_consumptions"),
+            (sqlite3.SQLITE_CREATE_TABLE, "studio_ollama_v2_authorization_events"),
+            (sqlite3.SQLITE_CREATE_INDEX, "studio_ollama_v2_authorization_events_mandate_idx"),
+            (sqlite3.SQLITE_INSERT, "schema_meta"),
+        )
+        original = StudioStore._create_v7_schema
+        for action, object_name in boundaries:
+            with self.subTest(object_name=object_name), tempfile.TemporaryDirectory() as directory:
+                data_dir = Path(directory) / "studio"
+                _create_genuine_v6_store(data_dir)
+
+                def fail(store, *, advance_schema_version=False, _action=action, _name=object_name):
+                    def authorizer(observed, first, _second, _database, _trigger):
+                        return (
+                            sqlite3.SQLITE_DENY
+                            if observed == _action and first == _name
+                            else sqlite3.SQLITE_OK
+                        )
+                    store.connection.set_authorizer(authorizer)
+                    try:
+                        original(store, advance_schema_version=advance_schema_version)
+                    finally:
+                        store.connection.set_authorizer(None)
+
+                with mock.patch.object(
+                    StudioStore, "_create_v7_schema", autospec=True, side_effect=fail
+                ):
+                    with self.assertRaises(StudioError):
+                        StudioStore(data_dir)
+                with sqlite3.connect(data_dir / "studio.sqlite3") as connection:
+                    self.assertEqual(
+                        "6",
+                        connection.execute(
+                            "SELECT value FROM schema_meta WHERE key='schema_version'"
+                        ).fetchone()[0],
+                    )
+                    self.assertEqual(
+                        [],
+                        connection.execute(
+                            "SELECT name FROM sqlite_schema "
+                            "WHERE name LIKE 'studio_ollama_v2_authorization_%'"
+                        ).fetchall(),
+                    )
+
+    def test_v6_to_v7_baseexception_after_ddl_restores_exact_v6(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory) / "studio"
+            _create_genuine_v6_store(data_dir)
+            with mock.patch(
+                "worldforge.studio.storage._verify_ollama_v2_authorization_v7",
+                side_effect=_SchemaCrash("simulated interruption"),
+            ):
+                with self.assertRaises(_SchemaCrash):
+                    StudioStore(data_dir)
+            with sqlite3.connect(data_dir / "studio.sqlite3") as connection:
+                self.assertEqual(
+                    "6",
+                    connection.execute(
+                        "SELECT value FROM schema_meta WHERE key='schema_version'"
+                    ).fetchone()[0],
+                )
+                self.assertEqual(
+                    [],
+                    connection.execute(
+                        "SELECT name FROM sqlite_schema "
+                        "WHERE name LIKE 'studio_ollama_v2_authorization_%'"
+                    ).fetchall(),
+                )
+
+    def test_primary_and_secondary_reject_casefold_v7_debris(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory) / "studio"
+            with StudioStore(data_dir):
+                pass
+            with sqlite3.connect(data_dir / "studio.sqlite3") as connection:
+                connection.execute(
+                    "CREATE TABLE Studio_Ollama_V2_Authorization_Debris(value TEXT)"
+                )
+            for mode in ("primary", "secondary"):
+                with self.subTest(mode=mode), self.assertRaisesRegex(
+                    StudioError, "Ollama v2 authorization database schema is invalid"
+                ):
+                    StudioStore(data_dir, mode=mode)
+
     def test_creates_hardened_schema_and_rejects_future_version(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             data_dir = Path(directory) / "studio"
@@ -495,7 +1003,7 @@ class StudioStorageTests(unittest.TestCase):
                 self.assertIsInstance(outcome[0], sqlite3.ProgrammingError)
                 store.connection.rollback()
                 self.assertEqual(
-                    "6",
+                    "8",
                     store.connection.execute(
                         "SELECT value FROM schema_meta WHERE key = 'schema_version'"
                     ).fetchone()[0],
@@ -766,17 +1274,17 @@ class StudioStorageTests(unittest.TestCase):
             with self.assertRaisesRegex(StudioError, "does not exist"):
                 StudioStore(missing, mode="secondary")
 
-    def test_primary_migrates_v5_to_v6_atomically_but_secondary_refuses_to_migrate(self) -> None:
+    def test_primary_migrates_v5_through_v8_but_secondary_refuses_to_migrate(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             data_dir = Path(directory) / "studio"
             _create_genuine_v5_store(data_dir)
 
-            with self.assertRaisesRegex(StudioError, "requires schema version 6"):
+            with self.assertRaisesRegex(StudioError, "requires schema version 8"):
                 StudioStore(data_dir, mode="secondary")
 
             with StudioStore(data_dir) as migrated:
                 self.assertEqual(
-                    "6",
+                    "8",
                     migrated.connection.execute(
                         "SELECT value FROM schema_meta WHERE key = 'schema_version'"
                     ).fetchone()[0],
@@ -792,6 +1300,10 @@ class StudioStorageTests(unittest.TestCase):
                         "studio_authenticated_human_credentials",
                         "studio_authenticated_human_decisions",
                         "studio_authenticated_human_decision_events",
+                        "studio_ollama_v2_authorization_decisions",
+                        "studio_ollama_v2_authorization_consumptions",
+                        "studio_ollama_v2_authorization_events",
+                        "studio_ollama_v2_authorization_outcomes",
                     }
                     <= tables
                 )

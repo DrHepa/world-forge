@@ -2082,6 +2082,247 @@ class AuthorizationConsumption(_CanonicalContract):
         return result
 
 
+@dataclass(frozen=True, slots=True)
+class AuthorizationRejection(_CanonicalContract):
+    rejection_id: str
+    authorization_id: str
+    request_hash: str
+    operation_id: str
+    plan_hash: str
+    effect_id: str
+    phase: str
+    attempt: int
+    expected_generation: int
+    expected_sequence: int
+    expected_head_hash: str
+    ownership_token: str
+    policy_content_hash: str
+    interpreter_binding_hash: str
+    authority_id: str
+    mandate_id: str
+    decision_id: str
+    slot_ordinal: int
+    effect_hash: str
+    reason: str
+    settlement_event_id: int
+    settlement_event_hash: str
+
+    def __post_init__(self) -> None:
+        reason = "authorization_rejection_invalid"
+        _require_id(self.rejection_id, reason)
+        _require_id(self.authorization_id, reason)
+        _require_hash(self.request_hash, reason)
+        _require_id(self.operation_id, reason)
+        _require_hash(self.plan_hash, reason)
+        _require_id(self.effect_id, reason)
+        if type(self.phase) is not str or self.phase not in {"apply", "rollback"}:
+            _fail(reason)
+        _require_int(self.attempt, reason, minimum=1)
+        _require_int(self.expected_generation, reason)
+        _require_int(self.expected_sequence, reason)
+        _require_hash(self.expected_head_hash, reason)
+        _require_id(self.ownership_token, reason)
+        _require_hash(self.policy_content_hash, reason)
+        _require_hash(self.interpreter_binding_hash, reason)
+        _require_id(self.authority_id, reason)
+        _require_id(self.mandate_id, reason)
+        _require_id(self.decision_id, reason)
+        _require_int(self.slot_ordinal, reason, maximum=31)
+        _require_hash(self.effect_hash, reason)
+        if type(self.reason) is not str or self.reason not in {
+            "revoked",
+            "expired",
+            "denied",
+        }:
+            _fail(reason)
+        _require_int(self.settlement_event_id, reason, minimum=1)
+        _require_hash(self.settlement_event_hash, reason)
+        if (
+            self.policy_content_hash != CONTROLLER_POLICY_CONTENT_HASH
+            or self.interpreter_binding_hash
+            != canonical_interpreter_binding().content_hash
+        ):
+            _fail(reason)
+
+    @property
+    def content_hash(self) -> str:
+        return _document_hash(self._payload())
+
+    def _payload(self) -> dict[str, object]:
+        return {
+            "format": "world-forge.private.ollama_v2_authorization_rejection",
+            "format_version": FORMAT_VERSION,
+            "rejection_id": self.rejection_id,
+            "authorization_id": self.authorization_id,
+            "request_hash": self.request_hash,
+            "operation_id": self.operation_id,
+            "plan_hash": self.plan_hash,
+            "effect_id": self.effect_id,
+            "phase": self.phase,
+            "attempt": self.attempt,
+            "expected_generation": self.expected_generation,
+            "expected_sequence": self.expected_sequence,
+            "expected_head_hash": self.expected_head_hash,
+            "ownership_token": self.ownership_token,
+            "policy_content_hash": self.policy_content_hash,
+            "interpreter_binding_hash": self.interpreter_binding_hash,
+            "authority_id": self.authority_id,
+            "mandate_id": self.mandate_id,
+            "decision_id": self.decision_id,
+            "slot_ordinal": self.slot_ordinal,
+            "effect_hash": self.effect_hash,
+            "reason": self.reason,
+            "settlement_event_id": self.settlement_event_id,
+            "settlement_event_hash": self.settlement_event_hash,
+        }
+
+    def to_document(self) -> dict[str, object]:
+        return _seal(self._payload())
+
+    @classmethod
+    def create(
+        cls,
+        request: AuthorizationRequest,
+        *,
+        authority_id: str,
+        mandate_id: str,
+        decision_id: str,
+        slot_ordinal: int,
+        effect_hash: str,
+        reason: str,
+        settlement_event_id: int,
+        settlement_event_hash: str,
+    ) -> AuthorizationRejection:
+        failure = "authorization_rejection_invalid"
+        if cls is not AuthorizationRejection or type(request) is not AuthorizationRequest:
+            _fail(failure)
+        try:
+            exact_request = AuthorizationRequest.from_document(request.to_document())
+        except (ControllerContractError, AttributeError, TypeError):
+            _fail(failure)
+        seed = {
+            "authorization_id": exact_request.authorization_id,
+            "request_hash": exact_request.content_hash,
+            "operation_id": exact_request.operation_id,
+            "plan_hash": exact_request.plan_hash,
+            "effect_id": exact_request.effect_id,
+            "phase": exact_request.phase,
+            "attempt": exact_request.attempt,
+            "expected_generation": exact_request.expected_generation,
+            "expected_sequence": exact_request.expected_sequence,
+            "expected_head_hash": exact_request.expected_head_hash,
+            "ownership_token": exact_request.ownership_token,
+            "policy_content_hash": exact_request.policy_content_hash,
+            "interpreter_binding_hash": exact_request.interpreter_binding_hash,
+            "authority_id": authority_id,
+            "mandate_id": mandate_id,
+            "decision_id": decision_id,
+            "slot_ordinal": slot_ordinal,
+            "effect_hash": effect_hash,
+            "reason": reason,
+            "settlement_event_id": settlement_event_id,
+            "settlement_event_hash": settlement_event_hash,
+        }
+        rejection_id = "reject-" + hashlib.sha256(
+            canonical_controller_bytes(seed)
+        ).hexdigest()[:32]
+        return cls(rejection_id=rejection_id, **seed)  # type: ignore[arg-type]
+
+    def matches(self, request: AuthorizationRequest) -> bool:
+        return type(request) is AuthorizationRequest and (
+            self.authorization_id == request.authorization_id
+            and self.request_hash == request.content_hash
+            and self.operation_id == request.operation_id
+            and self.plan_hash == request.plan_hash
+            and self.effect_id == request.effect_id
+            and self.phase == request.phase
+            and self.attempt == request.attempt
+            and self.expected_generation == request.expected_generation
+            and self.expected_sequence == request.expected_sequence
+            and self.expected_head_hash == request.expected_head_hash
+            and self.ownership_token == request.ownership_token
+            and self.policy_content_hash == request.policy_content_hash
+            and self.interpreter_binding_hash == request.interpreter_binding_hash
+        )
+
+    @classmethod
+    def from_document(cls, value: object) -> AuthorizationRejection:
+        reason = "authorization_rejection_invalid"
+        if cls is not AuthorizationRejection:
+            _fail(reason)
+        keys = {
+            "format",
+            "format_version",
+            "rejection_id",
+            "authorization_id",
+            "request_hash",
+            "operation_id",
+            "plan_hash",
+            "effect_id",
+            "phase",
+            "attempt",
+            "expected_generation",
+            "expected_sequence",
+            "expected_head_hash",
+            "ownership_token",
+            "policy_content_hash",
+            "interpreter_binding_hash",
+            "authority_id",
+            "mandate_id",
+            "decision_id",
+            "slot_ordinal",
+            "effect_hash",
+            "reason",
+            "settlement_event_id",
+            "settlement_event_hash",
+            "content_hash",
+        }
+        checked = _expect_document(
+            value,
+            keys=keys,
+            format_name="world-forge.private.ollama_v2_authorization_rejection",
+            reason=reason,
+        )
+        kwargs = {
+            key: checked[key]
+            for key in keys - {"format", "format_version", "content_hash"}
+        }
+        try:
+            result = cls(**kwargs)  # type: ignore[arg-type]
+        except TypeError:
+            _fail(reason)
+        rebuilt = cls.create(
+            AuthorizationRequest(
+                authorization_id=result.authorization_id,
+                operation_id=result.operation_id,
+                plan_hash=result.plan_hash,
+                effect_id=result.effect_id,
+                phase=result.phase,
+                attempt=result.attempt,
+                expected_generation=result.expected_generation,
+                expected_sequence=result.expected_sequence,
+                expected_head_hash=result.expected_head_hash,
+                ownership_token=result.ownership_token,
+                policy_content_hash=result.policy_content_hash,
+                interpreter_binding_hash=result.interpreter_binding_hash,
+            ),
+            authority_id=result.authority_id,
+            mandate_id=result.mandate_id,
+            decision_id=result.decision_id,
+            slot_ordinal=result.slot_ordinal,
+            effect_hash=result.effect_hash,
+            reason=result.reason,
+            settlement_event_id=result.settlement_event_id,
+            settlement_event_hash=result.settlement_event_hash,
+        )
+        if result != rebuilt or checked["content_hash"] != result.content_hash:
+            _fail(reason)
+        return result
+
+
+AuthorizationOutcome = AuthorizationConsumption | AuthorizationRejection
+
+
 OPERATION_STATES = (
     "apply_pending",
     "apply_authorization_pending",
@@ -2500,6 +2741,8 @@ def build_rollback_plan(
 __all__ = (
     "APPLY_EFFECT_KINDS",
     "AuthorizationConsumption",
+    "AuthorizationOutcome",
+    "AuthorizationRejection",
     "AuthorizationRequest",
     "BoundedTreeManifest",
     "CONTROLLER_ACCOUNT",

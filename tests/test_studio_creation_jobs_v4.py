@@ -189,6 +189,13 @@ def _seed_global_creation_artifact_registry(data_dir: Path) -> None:
             "'world-forge.project', 1, 'legacy_game', ?)",
             (_HASH_B,),
         )
+        for table in (
+            "studio_ollama_v2_authorization_outcomes",
+            "studio_ollama_v2_authorization_consumptions",
+            "studio_ollama_v2_authorization_events",
+            "studio_ollama_v2_authorization_decisions",
+        ):
+            store.connection.execute(f"DROP TABLE {table}")
         store.connection.execute("UPDATE schema_meta SET value = '3' WHERE key = 'schema_version'")
     store.connection.execute("PRAGMA foreign_keys = ON")
     store.close()
@@ -833,7 +840,7 @@ class StudioCreationJobV4StorageTests(unittest.TestCase):
                         tuple(dependency),
                     )
                     self.assertEqual(
-                        "6",
+                        "8",
                         migrated.connection.execute(
                             "SELECT value FROM schema_meta WHERE key = 'schema_version'"
                         ).fetchone()[0],
@@ -1097,7 +1104,7 @@ class StudioCreationJobV4StorageTests(unittest.TestCase):
     def test_v3_to_v4_migration_is_additive_and_preserves_legacy_bytes(self) -> None:
         from worldforge.studio.storage import SCHEMA_VERSION, StudioStore
 
-        self.assertEqual(6, SCHEMA_VERSION)
+        self.assertEqual(8, SCHEMA_VERSION)
         with tempfile.TemporaryDirectory() as temporary:
             store = StudioStore(Path(temporary))
             legacy_payload = '{"legacy":"bytes-preserved"}'
@@ -1112,6 +1119,10 @@ class StudioCreationJobV4StorageTests(unittest.TestCase):
                     "UPDATE schema_meta SET value = '3' WHERE key = 'schema_version'"
                 )
                 for table in (
+                    "studio_ollama_v2_authorization_outcomes",
+                    "studio_ollama_v2_authorization_consumptions",
+                    "studio_ollama_v2_authorization_events",
+                    "studio_ollama_v2_authorization_decisions",
                     "creation_artifact_dependencies",
                     "creation_artifacts",
                     "creation_job_attempts",
@@ -1128,7 +1139,7 @@ class StudioCreationJobV4StorageTests(unittest.TestCase):
                 version = migrated.connection.execute(
                     "SELECT value FROM schema_meta WHERE key = 'schema_version'"
                 ).fetchone()["value"]
-                self.assertEqual("6", version)
+                self.assertEqual("8", version)
                 payload = migrated.connection.execute(
                     "SELECT payload_json FROM events WHERE entity_id = 'legacy_01'"
                 ).fetchone()["payload_json"]

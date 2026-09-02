@@ -20,6 +20,8 @@ from pathlib import Path
 
 from .ollama_v2_controller_contracts import (
     AuthorizationConsumption,
+    AuthorizationOutcome,
+    AuthorizationRejection,
     AuthorizationRequest,
     ControllerContractError,
     ControllerPlan,
@@ -320,6 +322,24 @@ _EVENT_BINDING_KEYS = {
         "authority_id",
         "decision_id",
     },
+    "authorization.rejected": {
+        "authorization_id",
+        "request_hash",
+        "effect_id",
+        "phase",
+        "attempt",
+        "ownership_token",
+        "rejection_id",
+        "rejection_hash",
+        "authority_id",
+        "mandate_id",
+        "decision_id",
+        "slot_ordinal",
+        "effect_hash",
+        "reason",
+        "settlement_event_id",
+        "settlement_event_hash",
+    },
     "effect.dispatching": {
         "attempt_id",
         "attempt_document_hash",
@@ -392,6 +412,36 @@ def _consumption_bindings(
         "authority_id": consumption.authority_id,
         "decision_id": consumption.decision_id,
     }
+
+
+def _rejection_bindings(
+    request: AuthorizationRequest,
+    rejection: AuthorizationRejection,
+) -> dict[str, object]:
+    return {
+        **_request_bindings(request),
+        "rejection_id": rejection.rejection_id,
+        "rejection_hash": rejection.content_hash,
+        "authority_id": rejection.authority_id,
+        "mandate_id": rejection.mandate_id,
+        "decision_id": rejection.decision_id,
+        "slot_ordinal": rejection.slot_ordinal,
+        "effect_hash": rejection.effect_hash,
+        "reason": rejection.reason,
+        "settlement_event_id": rejection.settlement_event_id,
+        "settlement_event_hash": rejection.settlement_event_hash,
+    }
+
+
+def _decode_authorization_outcome(value: object) -> AuthorizationOutcome:
+    if type(value) is not dict:
+        raise ControllerContractError("authorization_outcome_invalid")
+    format_name = value.get("format")
+    if format_name == "world-forge.private.ollama_v2_authorization_consumption":
+        return AuthorizationConsumption.from_document(value)
+    if format_name == "world-forge.private.ollama_v2_authorization_rejection":
+        return AuthorizationRejection.from_document(value)
+    raise ControllerContractError("authorization_outcome_invalid")
 
 
 def _attempt_document_hash(
@@ -928,13 +978,13 @@ class OllamaV2ControllerStore:
             if row["consumption_json"] is None:
                 raise ControllerStoreCorruptionError("authorization_state_invalid")
             try:
-                consumption = AuthorizationConsumption.from_document(
+                outcome = _decode_authorization_outcome(
                     _decode_canonical_json(row["consumption_json"])
                 )
             except ControllerContractError as exc:
-                raise ControllerStoreCorruptionError("authorization_consumption_invalid") from exc
-            if not consumption.matches(request):
-                raise ControllerStoreCorruptionError("authorization_consumption_mismatch")
+                raise ControllerStoreCorruptionError("authorization_outcome_invalid") from exc
+            if not outcome.matches(request):
+                raise ControllerStoreCorruptionError("authorization_outcome_mismatch")
         else:
             raise ControllerStoreCorruptionError("authorization_state_invalid")
 
@@ -996,7 +1046,7 @@ class OllamaV2ControllerStore:
             (operation_id,),
         ).fetchall()
         requests: dict[str, AuthorizationRequest] = {}
-        consumptions: dict[str, AuthorizationConsumption | None] = {}
+        outcomes: dict[str, AuthorizationOutcome | None] = {}
         authorization_states: dict[str, str] = {}
         for authorization_row in authorization_rows:
             self._verify_authorization_row(authorization_row)
@@ -1009,9 +1059,9 @@ class OllamaV2ControllerStore:
             requests[authorization_id] = request
             authorization_states[authorization_id] = str(authorization_row["state"])
             if authorization_row["consumption_json"] is None:
-                consumptions[authorization_id] = None
+                outcomes[authorization_id] = None
             else:
-                consumptions[authorization_id] = AuthorizationConsumption.from_document(
+                outcomes[authorization_id] = _decode_authorization_outcome(
                     _decode_canonical_json(authorization_row["consumption_json"])
                 )
 
@@ -1039,6 +1089,7 @@ class OllamaV2ControllerStore:
         pending_events: Counter[str] = Counter()
         claimed_events: Counter[str] = Counter()
         consumed_events: Counter[str] = Counter()
+        rejected_events: Counter[str] = Counter()
         dispatch_events: Counter[str] = Counter()
         observed_events: Counter[str] = Counter()
         rollback_events = 0
@@ -1094,6 +1145,7 @@ class OllamaV2ControllerStore:
                 "authorization.pending",
                 "authorization.claimed",
                 "authorization.consumed",
+                "authorization.rejected",
             }:
                 authorization_id = str(bindings["authorization_id"])
                 request = requests.get(authorization_id)
@@ -1168,10 +1220,13 @@ class OllamaV2ControllerStore:
                         event_kind,
                         request.content_hash,
                     )
-                else:
+                elif event_kind == "authorization.consumed":
                     consumed_events[authorization_id] += 1
-                    consumption = consumptions.get(authorization_id)
-                    if consumption is None or not consumption.matches(request):
+                    consumption = outcomes.get(authorization_id)
+                    if (
+                        type(consumption) is not AuthorizationConsumption
+                        or not consumption.matches(request)
+                    ):
                         raise ControllerStoreCorruptionError(
                             "authorization_consumption_event_invalid"
                         )
@@ -1194,6 +1249,48 @@ class OllamaV2ControllerStore:
                         event_kind,
                         consumption.content_hash,
                     )
+                else:
+                    rejected_events[authorization_id] += 1
+                    rejection = outcomes.get(authorization_id)
+                    if (
+                        type(rejection) is not AuthorizationRejection
+                        or not rejection.matches(request)
+                    ):
+                        raise ControllerStoreCorruptionError(
+                            "authorization_rejection_event_invalid"
+                        )
+                    expected_bindings = _rejection_bindings(request, rejection)
+                    if (
+                        previous.state != f"{request.phase}_authorization_claimed"
+                        or previous.current_effect_id != request.effect_id
+                        or previous.current_authorization_hash != request.content_hash
+                    ):
+                        raise ControllerStoreCorruptionError(
+                            "authorization_rejection_event_invalid"
+                        )
+                    effect = self._replay_effect(
+                        plan,
+                        rollback,
+                        previous,
+                        request.phase,
+                    )
+                    if rejection.effect_hash != effect.content_hash:
+                        raise ControllerStoreCorruptionError(
+                            "authorization_rejection_effect_invalid"
+                        )
+                    expected = replace(
+                        candidate,
+                        state="recovery_required",
+                        recovery_reason=f"authorization_{rejection.reason}",
+                        current_effect_id=None,
+                        current_authorization_hash=None,
+                        current_attempt_id=None,
+                    )
+                    expected_event_id = self._event_id(
+                        operation_id,
+                        event_kind,
+                        rejection.content_hash,
+                    )
                 if bindings != expected_bindings:
                     raise ControllerStoreCorruptionError(
                         "authorization_event_bindings_invalid"
@@ -1208,8 +1305,8 @@ class OllamaV2ControllerStore:
                 attempt_row, before_snapshot, _after_snapshot = attempt_entry
                 authorization_id = str(attempt_row["authorization_id"])
                 request = requests.get(authorization_id)
-                consumption = consumptions.get(authorization_id)
-                if request is None or consumption is None:
+                consumption = outcomes.get(authorization_id)
+                if request is None or type(consumption) is not AuthorizationConsumption:
                     raise ControllerStoreCorruptionError(
                         "effect_attempt_authorization_invalid"
                     )
@@ -1299,8 +1396,8 @@ class OllamaV2ControllerStore:
                 attempt_row, before_snapshot, after_snapshot = attempt_entry
                 authorization_id = str(attempt_row["authorization_id"])
                 request = requests.get(authorization_id)
-                consumption = consumptions.get(authorization_id)
-                if request is None or consumption is None:
+                consumption = outcomes.get(authorization_id)
+                if request is None or type(consumption) is not AuthorizationConsumption:
                     raise ControllerStoreCorruptionError(
                         "effect_attempt_authorization_invalid"
                     )
@@ -1597,10 +1694,14 @@ class OllamaV2ControllerStore:
             if pending_events[authorization_id] != 1:
                 raise ControllerStoreCorruptionError("authorization_bijection_invalid")
             expected_claimed = 1 if state in {"claimed", "consumed"} else 0
-            expected_consumed = 1 if state == "consumed" else 0
+            outcome = outcomes[authorization_id]
+            expected_consumed = int(type(outcome) is AuthorizationConsumption)
+            expected_rejected = int(type(outcome) is AuthorizationRejection)
             if (
                 claimed_events[authorization_id] != expected_claimed
                 or consumed_events[authorization_id] != expected_consumed
+                or rejected_events[authorization_id] != expected_rejected
+                or (state == "consumed") != (outcome is not None)
             ):
                 raise ControllerStoreCorruptionError("authorization_bijection_invalid")
         if set(attempts) != set(dispatch_events):
@@ -2194,6 +2295,66 @@ class OllamaV2ControllerStore:
             auxiliary=auxiliary,
         )
 
+    def record_authorization_rejected(
+        self,
+        expected: OperationSnapshot,
+        request: AuthorizationRequest,
+        rejection: AuthorizationRejection,
+    ) -> ControllerStoreTransition:
+        self._ensure_open()
+        request = self._normalize_request(request)
+        if type(rejection) is not AuthorizationRejection:
+            raise ControllerStoreError("authorization_rejection_invalid")
+        try:
+            rejection = AuthorizationRejection.from_document(rejection.to_document())
+        except ControllerContractError as exc:
+            raise ControllerStoreError("authorization_rejection_invalid") from exc
+        if (
+            expected.state != f"{request.phase}_authorization_claimed"
+            or expected.current_effect_id != request.effect_id
+            or expected.current_authorization_hash != request.content_hash
+            or not rejection.matches(request)
+        ):
+            raise ControllerStoreConflictError("authorization_rejection_mismatch")
+        plan = self.load_plan(expected.operation_id)
+        rollback = self.load_rollback_plan(expected.operation_id)
+        effect = self._replay_effect(plan, rollback, expected, request.phase)
+        if rejection.effect_hash != effect.content_hash:
+            raise ControllerStoreConflictError("authorization_rejection_effect_mismatch")
+        rejection_bytes = _encode_document(rejection.to_document())
+
+        def mutation(snapshot: OperationSnapshot) -> OperationSnapshot:
+            return replace(
+                snapshot,
+                state="recovery_required",
+                recovery_reason=f"authorization_{rejection.reason}",
+                current_effect_id=None,
+                current_authorization_hash=None,
+                current_attempt_id=None,
+            )
+
+        def auxiliary(connection: sqlite3.Connection, _after: OperationSnapshot) -> None:
+            cursor = connection.execute(
+                "UPDATE controller_authorizations SET consumption_json = ?, state = 'consumed' "
+                "WHERE authorization_id = ? AND state = 'claimed' AND request_json = ?",
+                (
+                    rejection_bytes,
+                    request.authorization_id,
+                    _encode_document(request.to_document()),
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ControllerStoreConflictError("authorization_rejection_conflict")
+
+        return self._append_transition(
+            expected,
+            event_kind="authorization.rejected",
+            identity=rejection.content_hash,
+            bindings=_rejection_bindings(request, rejection),
+            mutation=mutation,
+            auxiliary=auxiliary,
+        )
+
     def load_authorization_consumption(
         self,
         authorization_id: str,
@@ -2208,9 +2369,14 @@ class OllamaV2ControllerStore:
         if row[0] is None:
             return None
         try:
-            return AuthorizationConsumption.from_document(_decode_canonical_json(row[0]))
+            outcome = _decode_authorization_outcome(_decode_canonical_json(row[0]))
         except ControllerContractError as exc:
-            raise ControllerStoreCorruptionError("authorization_consumption_invalid") from exc
+            raise ControllerStoreCorruptionError("authorization_outcome_invalid") from exc
+        if type(outcome) is AuthorizationRejection:
+            return None
+        if type(outcome) is not AuthorizationConsumption:
+            raise ControllerStoreCorruptionError("authorization_outcome_invalid")
+        return outcome
 
     def load_authorization_request(self, request_hash: str) -> AuthorizationRequest:
         """Load the one canonical request bound to an in-flight operation state."""
@@ -2604,7 +2770,10 @@ class OllamaV2ControllerStore:
         observed_snapshot: HostSnapshot | None,
     ) -> ControllerStoreTransition:
         self._ensure_open()
-        if expected.state == "rolled_back_clean":
+        if expected.state == "rolled_back_clean" or expected.state in {
+            "apply_authorization_claimed",
+            "rollback_authorization_claimed",
+        }:
             raise ControllerStoreConflictError("recovery_source_state_invalid")
         _validate_identifier(reason, "recovery_reason_invalid")
         if observed_snapshot is not None:

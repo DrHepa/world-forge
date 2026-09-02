@@ -16,6 +16,7 @@ from worldforge.provider_evidence.ollama_v2_controller_contracts import (
     MODEL_FINAL_ROOT,
     RELEASE_FINAL_ROOT,
     AuthorizationConsumption,
+    AuthorizationRejection,
     AuthorizationRequest,
     BoundedTreeManifest,
     ManifestEntry,
@@ -90,6 +91,26 @@ def _request(operation: OperationSnapshot, effect_id: str, *, phase: str = "appl
         expected_sequence=operation.sequence,
         expected_head_hash=operation.event_head_hash,
         ownership_token=operation.ownership_token,
+    )
+
+
+def _rejection(
+    request: AuthorizationRequest,
+    *,
+    effect_hash: str,
+    reason: str,
+    settlement_event_id: int,
+) -> AuthorizationRejection:
+    return AuthorizationRejection.create(
+        request,
+        authority_id="studio-director-ollama-v2",
+        mandate_id=f"mandate-{request.operation_id}-{request.phase}",
+        decision_id=f"decision-{request.operation_id}-{request.phase}",
+        slot_ordinal=0,
+        effect_hash=effect_hash,
+        reason=reason,
+        settlement_event_id=settlement_event_id,
+        settlement_event_hash=f"{settlement_event_id:x}" * 64,
     )
 
 
@@ -427,6 +448,196 @@ class DurableControllerStoreTests(unittest.TestCase):
             attempt = store.effect_attempt_document(dispatching.current_attempt_id)
             self.assertEqual("postcondition", attempt["outcome"])
             self.assertEqual(applied_snapshot.to_document(), attempt["after_snapshot"])
+
+    def test_apply_authorization_rejection_is_terminal_durable_and_schema_v1(self) -> None:
+        plan = _plan("op-store-apply-rejected")
+        effect = plan.effects[0]
+        with OllamaV2ControllerStore(self.database) as store:
+            operation = store.create_operation(
+                OperationSnapshot.create(plan.operation_id, plan),
+                plan,
+                idempotency_key="create-store-apply-rejected",
+            ).snapshot
+            request = _request(operation, effect.effect_id)
+            pending = store.record_authorization_pending(operation, request).snapshot
+            claimed = store.record_authorization_claimed(pending, request).snapshot
+            rejection = _rejection(
+                request,
+                effect_hash=effect.content_hash,
+                reason="denied",
+                settlement_event_id=1,
+            )
+
+            rejected_result = store.record_authorization_rejected(
+                claimed,
+                request,
+                rejection,
+            )
+            duplicate_result = store.record_authorization_rejected(
+                claimed,
+                request,
+                rejection,
+            )
+            rejected = rejected_result.snapshot
+
+            self.assertTrue(rejected_result.committed_now)
+            self.assertFalse(duplicate_result.committed_now)
+            self.assertEqual(rejected, duplicate_result.snapshot)
+            self.assertEqual("recovery_required", rejected.state)
+            self.assertEqual("authorization_denied", rejected.recovery_reason)
+            self.assertIsNone(rejected.current_effect_id)
+            self.assertIsNone(rejected.current_authorization_hash)
+            self.assertEqual(operation.next_attempt, rejected.next_attempt)
+            self.assertEqual(
+                0,
+                store._connection.execute(
+                    "SELECT COUNT(*) FROM controller_effect_attempts WHERE operation_id=?",
+                    (operation.operation_id,),
+                ).fetchone()[0],
+            )
+            self.assertIsNone(store.load_authorization_consumption(request.authorization_id))
+            events = store.event_documents(operation.operation_id)
+            self.assertEqual(
+                (
+                    "operation.created",
+                    "authorization.pending",
+                    "authorization.claimed",
+                    "authorization.rejected",
+                ),
+                tuple(event["event_kind"] for event in events),
+            )
+            self.assertEqual(rejection.content_hash, events[-1]["bindings"]["rejection_hash"])
+            row = store._connection.execute(
+                "SELECT state, consumption_json FROM controller_authorizations "
+                "WHERE authorization_id=?",
+                (request.authorization_id,),
+            ).fetchone()
+            self.assertEqual("consumed", row["state"])
+            self.assertEqual(
+                rejection,
+                AuthorizationRejection.from_document(json.loads(row["consumption_json"])),
+            )
+            self.assertEqual(1, store._connection.execute("PRAGMA user_version").fetchone()[0])
+
+        with OllamaV2ControllerStore(self.database) as reopened:
+            self.assertEqual(rejected, reopened.load_operation(operation.operation_id))
+            self.assertEqual(
+                "authorization.rejected",
+                reopened.event_documents(operation.operation_id)[-1]["event_kind"],
+            )
+
+    def test_rollback_authorization_rejection_preserves_exact_replay(self) -> None:
+        with OllamaV2ControllerStore(self.database) as store:
+            plan, _request_value, _consumption, _dispatching, applied, _snapshot = (
+                _record_first_postcondition(store, "op-store-rollback-rejected")
+            )
+            rollback = build_rollback_plan(
+                applied.operation_id,
+                plan,
+                applied.applied_effect_ids,
+            )
+            rollback_pending = store.record_rollback_plan(applied, rollback).snapshot
+            effect = rollback.effects[0]
+            request = _request(rollback_pending, effect.effect_id, phase="rollback")
+            pending = store.record_authorization_pending(rollback_pending, request).snapshot
+            claimed = store.record_authorization_claimed(pending, request).snapshot
+            rejection = _rejection(
+                request,
+                effect_hash=effect.content_hash,
+                reason="revoked",
+                settlement_event_id=2,
+            )
+
+            rejected = store.record_authorization_rejected(
+                claimed,
+                request,
+                rejection,
+            ).snapshot
+
+            self.assertEqual("recovery_required", rejected.state)
+            self.assertEqual("authorization_revoked", rejected.recovery_reason)
+            self.assertEqual(0, rejected.rollback_cursor)
+            self.assertEqual(1, rejected.apply_cursor)
+            self.assertEqual(rollback.content_hash, rejected.rollback_plan_hash)
+
+        with OllamaV2ControllerStore(self.database) as reopened:
+            self.assertEqual(rejected, reopened.load_operation(applied.operation_id))
+            events = reopened.event_documents(applied.operation_id)
+            self.assertEqual("authorization.rejected", events[-1]["event_kind"])
+            self.assertEqual("rollback", events[-1]["bindings"]["phase"])
+            self.assertEqual(rejection.effect_hash, events[-1]["bindings"]["effect_hash"])
+
+    def test_live_claimed_recovery_is_forbidden_but_legacy_history_reopens(self) -> None:
+        plan = _plan("op-store-claimed-recovery")
+        with OllamaV2ControllerStore(self.database) as store:
+            operation = store.create_operation(
+                OperationSnapshot.create(plan.operation_id, plan),
+                plan,
+                idempotency_key="create-store-claimed-recovery",
+            ).snapshot
+            request = _request(operation, plan.effects[0].effect_id)
+            pending = store.record_authorization_pending(operation, request).snapshot
+            claimed = store.record_authorization_claimed(pending, request).snapshot
+
+            with self.assertRaisesRegex(
+                ControllerStoreConflictError,
+                "recovery_source_state_invalid",
+            ):
+                store.record_recovery(
+                    claimed,
+                    reason="authorization_outcome_indeterminate",
+                    observed_snapshot=None,
+                )
+            self.assertEqual(claimed, store.load_operation(operation.operation_id))
+
+            reason = "authorization_outcome_indeterminate"
+            identity = hashlib.sha256(
+                canonical_controller_bytes(
+                    {
+                        "reason": reason,
+                        "expected_head_hash": claimed.event_head_hash,
+                        "snapshot_hash": None,
+                    }
+                )
+            ).hexdigest()
+
+            def legacy_mutation(snapshot: OperationSnapshot) -> OperationSnapshot:
+                return dataclasses.replace(
+                    snapshot,
+                    state="recovery_required",
+                    recovery_reason=reason,
+                    current_effect_id=None,
+                    current_authorization_hash=None,
+                    current_attempt_id=None,
+                )
+
+            legacy = store._append_transition(
+                claimed,
+                event_kind="operation.recovery_required",
+                identity=identity,
+                bindings={
+                    "reason": reason,
+                    "observed_snapshot_hash": None,
+                    "observed_projection_hash": None,
+                },
+                mutation=legacy_mutation,
+            ).snapshot
+            self.assertEqual("recovery_required", legacy.state)
+
+        with OllamaV2ControllerStore(self.database) as reopened:
+            self.assertEqual(legacy, reopened.load_operation(operation.operation_id))
+            self.assertEqual(
+                (
+                    "operation.created",
+                    "authorization.pending",
+                    "authorization.claimed",
+                    "operation.recovery_required",
+                ),
+                tuple(
+                    event["event_kind"]
+                    for event in reopened.event_documents(operation.operation_id)
+                ),
+            )
 
     def test_precondition_retry_uses_new_attempt_and_foreign_observation_requires_recovery(
         self,

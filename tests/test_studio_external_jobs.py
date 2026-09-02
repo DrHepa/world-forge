@@ -406,7 +406,7 @@ class StudioExternalStorageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             data_dir = Path(directory) / "studio"
             with StudioStore(data_dir) as store:
-                self.assertEqual(6, SCHEMA_VERSION)
+                self.assertEqual(8, SCHEMA_VERSION)
                 store.connection.execute(
                     "INSERT INTO workspaces "
                     "(workspace_id, record_json, forge_dev, forge_ino, world_dev, world_ino, "
@@ -421,6 +421,13 @@ class StudioExternalStorageTests(unittest.TestCase):
 
             connection = sqlite3.connect(data_dir / "studio.sqlite3")
             connection.execute("DROP TABLE external_grants")
+            for table in (
+                "studio_ollama_v2_authorization_outcomes",
+                "studio_ollama_v2_authorization_consumptions",
+                "studio_ollama_v2_authorization_events",
+                "studio_ollama_v2_authorization_decisions",
+            ):
+                connection.execute(f"DROP TABLE {table}")
             connection.execute("UPDATE schema_meta SET value = '1' WHERE key = 'schema_version'")
             connection.commit()
             connection.close()
@@ -430,7 +437,7 @@ class StudioExternalStorageTests(unittest.TestCase):
                     version = reopened.connection.execute(
                         "SELECT value FROM schema_meta WHERE key = 'schema_version'"
                     ).fetchone()[0]
-                    self.assertEqual("6", version)
+                    self.assertEqual("8", version)
                     self.assertEqual(
                         "{}",
                         reopened.connection.execute(

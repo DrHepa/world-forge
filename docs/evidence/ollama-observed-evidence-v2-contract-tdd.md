@@ -9,10 +9,11 @@
 
 ## Boundaries
 
-This evidence covers pure validation of supplied ADR bytes and JSON-compatible
-documents. It is not evidence of a controller, Studio v7 authority, host setup,
-systemd unit installation, service lifecycle, socket operation, provider SDK,
-model load, inference, cancellation, replay, pricing, or production readiness.
+This evidence covers the Stage-A pure validation of supplied ADR bytes and
+JSON-compatible documents. At that historical boundary it was not evidence of
+a controller, Studio v7 authority, host setup, systemd unit installation,
+service lifecycle, socket operation, provider SDK, model load, inference,
+cancellation, replay, pricing, or production readiness.
 No network, install, service/process/socket/model operation, host-configuration
 mutation, provider execution, or inference was used. After the source and
 documentation bytes settled, the root publisher ran the canonical identity
@@ -155,10 +156,15 @@ legacy identity allowlist: entries=306 occurrences=1072
 The entry and occurrence counts remained unchanged; only generator-owned file
 hashes moved to the reviewed ADR-0050-A bytes.
 
-## Truthful remaining work
+## Historical Stage-A remaining-work snapshot
+
+The absence list below is the exact Stage-A publication boundary. Controller B
+and backend Studio authorization C were added later; the list is retained as
+historical evidence rather than current status.
 
 - real evidence controller: **ABSENT**
-- Studio Director domain/Store/protocol/UI v7 authority: **ABSENT**
+- then-planned Studio Director domain/Store/protocol/UI v7 authority:
+  **ABSENT at Stage A**
 - dedicated host principal and sealed copied roots: **NOT PREPARED**
 - installed socket/service units and native lifecycle evidence: **ABSENT**
 - real model load/inference and observed cleanup evidence: **ABSENT**
@@ -167,3 +173,29 @@ hashes moved to the reviewed ADR-0050-A bytes.
 
 Therefore ADR-0050 is not complete and this document records no synthetic or
 native Ollama PASS.
+
+## Current release-train status
+
+| ADR-0050 stage | Current status |
+|---|---|
+| A — corrected v2 policy foundation | **COMPLETE** |
+| B — deterministic non-native controller core | **COMPLETE** |
+| C — backend Studio plan authorization and closed controller bridge | **COMPLETE** |
+| D — concrete closed host interpreter/broker | **ABSENT** |
+| E — Studio protocol, Electron IPC, and UI ceremony | **ABSENT** |
+| F — separately authorized host preparation | **ABSENT** |
+| G — native observed evidence and bounded real inference | **ABSENT** |
+
+The current implementation remains **PARTIAL**, `availability: unavailable`,
+and `production_eligible: false`. A/B/C test evidence is still non-native and
+does not establish provider admission, host preparation, systemd behavior,
+model load, inference, provider-request replay, pricing, or production
+readiness.
+
+Stage C now uses StudioStore schema v8 and a terminal consumed-or-rejected
+outcome ledger. Its stronger recovery gate executes fresh OS interpreter
+processes, but neither that additive backend evidence nor the controller
+settlement contracts modify this pure Stage-A package, the public provider
+catalog, or either existing synthetic runtime identity. Current settlement and
+gate details are recorded in
+[`ollama-observed-evidence-v2-studio-authorization-tdd.md`](ollama-observed-evidence-v2-studio-authorization-tdd.md).

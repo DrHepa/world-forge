@@ -672,8 +672,18 @@ with OllamaV2CustodyLedgerReferenceStore(root, mode='open') as store:
             for call in (
                 lambda: store.load_c2_reference(c2.reference_id),
                 lambda: store.load_dispatch_intent(dispatch.dispatch_id),
+                lambda: store.load_mutation_ack("ack-closed"),
+                lambda: store.load_manager_reload_witness("reload-closed"),
+                lambda: store.load_record("record-closed"),
+                lambda: store.load_tombstone("tombstone-closed"),
+                lambda: store.load_release("release-closed"),
                 lambda: store.attach_c2_reference(c2),
                 lambda: store.commit_dispatch_intent(dispatch),
+                lambda: store.record_mutation_ack(dispatch),
+                lambda: store.record_manager_reload_witness(dispatch),
+                lambda: store.record_effect_observation(dispatch),
+                lambda: store.tombstone_observed_record("record-closed"),
+                lambda: store.release_tombstoned_record("tombstone-closed"),
             ):
                 with self.assertRaisesRegex(Exception, "reference_store_closed"):
                     call()

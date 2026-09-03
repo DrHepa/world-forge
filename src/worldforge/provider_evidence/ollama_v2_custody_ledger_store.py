@@ -41,7 +41,10 @@ from .ollama_v2_native_execution_contracts import (
     ROOT_GLOBAL_ENFORCED,
     SOURCE_CUSTODY_VERIFIED,
     OllamaV2C2AuthorizationReferenceD2,
+    OllamaV2CustodyLedgerRecordD2,
     OllamaV2DispatchEnvelopeD2,
+    OllamaV2ManagerReloadWitnessD2,
+    OllamaV2MutationAckD2,
     OllamaV2NativeExecutionBindingD2,
     OllamaV2NativeExecutionContractError,
     OllamaV2NativeReservationD2,
@@ -79,6 +82,13 @@ _SOURCE_FORMAT = "world-forge.private.ollama_v2_source_bundle_descriptor_d2"
 _RESERVATION_FORMAT = "world-forge.private.ollama_v2_native_reservation_d2"
 _C2_FORMAT = "world-forge.private.ollama_v2_c2_authorization_reference_d2"
 _DISPATCH_FORMAT = "world-forge.private.ollama_v2_dispatch_envelope_d2"
+_ACK_FORMAT = "world-forge.private.ollama_v2_mutation_ack_d2"
+_WITNESS_FORMAT = "world-forge.private.ollama_v2_manager_reload_witness_d2"
+_RECORD_FORMAT = "world-forge.private.ollama_v2_custody_ledger_record_d2"
+_TOMBSTONE_FORMAT = "world-forge.private.ollama_v2_custody_reference_tombstone"
+_RELEASE_FORMAT = "world-forge.private.ollama_v2_custody_reference_release"
+_TOMBSTONE_ID_DOMAIN = b"world-forge.private.ollama_v2_custody_tombstone_id.v1\0"
+_RELEASE_ID_DOMAIN = b"world-forge.private.ollama_v2_custody_release_id.v1\0"
 _MAX_EVENT_BYTES = 4 * 1024 * 1024
 
 
@@ -286,6 +296,213 @@ def _reference_event_id(identity: dict[str, object]) -> str:
     return "event-" + digest[:32]
 
 
+def _reference_artifact_hash(payload: dict[str, object]) -> str:
+    return hashlib.sha256(
+        canonical_ollama_v2_native_execution_bytes(payload)
+    ).hexdigest()
+
+
+def _reference_lifecycle_id(
+    prefix: str,
+    domain: bytes,
+    payload: dict[str, object],
+) -> str:
+    return prefix + hashlib.sha256(
+        domain + canonical_ollama_v2_native_execution_bytes(payload)
+    ).hexdigest()[:32]
+
+
+def _copy_reference_lifecycle_document(
+    value: object,
+    *,
+    keys: frozenset[str],
+    reason: str,
+) -> dict[str, object]:
+    if type(value) is not dict:
+        raise CustodyLedgerReferenceInvalidStateError(reason)
+    items = tuple(dict.items(value))
+    if any(type(key) is not str for key, _ in items):
+        raise CustodyLedgerReferenceInvalidStateError(reason)
+    checked = {key: item for key, item in items}
+    if set(checked) != keys:
+        raise CustodyLedgerReferenceInvalidStateError(reason)
+    for key, item in checked.items():
+        if key == "format_version":
+            if type(item) is not int:
+                raise CustodyLedgerReferenceInvalidStateError(reason)
+        elif type(item) is not str:
+            raise CustodyLedgerReferenceInvalidStateError(reason)
+    return checked
+
+
+@dataclass(frozen=True, slots=True)
+class CustodyLedgerReferenceTombstone:
+    """Store-owned non-evidence marker for one exact observed record."""
+
+    tombstone_id: str
+    record_hash: str
+
+    def __post_init__(self) -> None:
+        payload = {"scope": CUSTODY_SCOPE, "record_hash": self.record_hash}
+        if (
+            type(self.tombstone_id) is not str
+            or _ID_RE.fullmatch(self.tombstone_id) is None
+            or type(self.record_hash) is not str
+            or _HASH_RE.fullmatch(self.record_hash) is None
+            or self.record_hash == _ZERO_HASH
+            or self.tombstone_id
+            != _reference_lifecycle_id(
+                "tombstone-", _TOMBSTONE_ID_DOMAIN, payload
+            )
+        ):
+            raise CustodyLedgerReferenceInvalidStateError(
+                "reference_tombstone_invalid"
+            )
+
+    @property
+    def content_hash(self) -> str:
+        return _reference_artifact_hash(self._payload())
+
+    def _payload(self) -> dict[str, object]:
+        return {
+            "format": _TOMBSTONE_FORMAT,
+            "format_version": 1,
+            "scope": CUSTODY_SCOPE,
+            "tombstone_id": self.tombstone_id,
+            "record_hash": self.record_hash,
+        }
+
+    def to_document(self) -> dict[str, object]:
+        return {**self._payload(), "content_hash": self.content_hash}
+
+    def to_bytes(self) -> bytes:
+        return canonical_ollama_v2_native_execution_bytes(self.to_document())
+
+    @classmethod
+    def _create(cls, record_hash: str) -> CustodyLedgerReferenceTombstone:
+        payload = {"scope": CUSTODY_SCOPE, "record_hash": record_hash}
+        return cls(
+            tombstone_id=_reference_lifecycle_id(
+                "tombstone-", _TOMBSTONE_ID_DOMAIN, payload
+            ),
+            record_hash=record_hash,
+        )
+
+    @classmethod
+    def from_document(cls, value: object) -> CustodyLedgerReferenceTombstone:
+        checked = _copy_reference_lifecycle_document(
+            value,
+            keys=frozenset(
+                {
+                    "format",
+                    "format_version",
+                    "scope",
+                    "tombstone_id",
+                    "record_hash",
+                    "content_hash",
+                }
+            ),
+            reason="reference_tombstone_invalid",
+        )
+        if (
+            checked["format"] != _TOMBSTONE_FORMAT
+            or checked["format_version"] != 1
+            or checked["scope"] != CUSTODY_SCOPE
+        ):
+            raise CustodyLedgerReferenceInvalidStateError(
+                "reference_tombstone_invalid"
+            )
+        result = cls(
+            tombstone_id=checked["tombstone_id"],
+            record_hash=checked["record_hash"],
+        )
+        if checked["content_hash"] != result.content_hash:
+            raise CustodyLedgerReferenceInvalidStateError(
+                "reference_tombstone_invalid"
+            )
+        return result
+
+
+@dataclass(frozen=True, slots=True)
+class CustodyLedgerReferenceRelease:
+    """Store-owned non-evidence marker for one exact tombstone release."""
+
+    release_id: str
+    tombstone_hash: str
+
+    def __post_init__(self) -> None:
+        payload = {"scope": CUSTODY_SCOPE, "tombstone_hash": self.tombstone_hash}
+        if (
+            type(self.release_id) is not str
+            or _ID_RE.fullmatch(self.release_id) is None
+            or type(self.tombstone_hash) is not str
+            or _HASH_RE.fullmatch(self.tombstone_hash) is None
+            or self.tombstone_hash == _ZERO_HASH
+            or self.release_id
+            != _reference_lifecycle_id("release-", _RELEASE_ID_DOMAIN, payload)
+        ):
+            raise CustodyLedgerReferenceInvalidStateError("reference_release_invalid")
+
+    @property
+    def content_hash(self) -> str:
+        return _reference_artifact_hash(self._payload())
+
+    def _payload(self) -> dict[str, object]:
+        return {
+            "format": _RELEASE_FORMAT,
+            "format_version": 1,
+            "scope": CUSTODY_SCOPE,
+            "release_id": self.release_id,
+            "tombstone_hash": self.tombstone_hash,
+        }
+
+    def to_document(self) -> dict[str, object]:
+        return {**self._payload(), "content_hash": self.content_hash}
+
+    def to_bytes(self) -> bytes:
+        return canonical_ollama_v2_native_execution_bytes(self.to_document())
+
+    @classmethod
+    def _create(cls, tombstone_hash: str) -> CustodyLedgerReferenceRelease:
+        payload = {"scope": CUSTODY_SCOPE, "tombstone_hash": tombstone_hash}
+        return cls(
+            release_id=_reference_lifecycle_id(
+                "release-", _RELEASE_ID_DOMAIN, payload
+            ),
+            tombstone_hash=tombstone_hash,
+        )
+
+    @classmethod
+    def from_document(cls, value: object) -> CustodyLedgerReferenceRelease:
+        checked = _copy_reference_lifecycle_document(
+            value,
+            keys=frozenset(
+                {
+                    "format",
+                    "format_version",
+                    "scope",
+                    "release_id",
+                    "tombstone_hash",
+                    "content_hash",
+                }
+            ),
+            reason="reference_release_invalid",
+        )
+        if (
+            checked["format"] != _RELEASE_FORMAT
+            or checked["format_version"] != 1
+            or checked["scope"] != CUSTODY_SCOPE
+        ):
+            raise CustodyLedgerReferenceInvalidStateError("reference_release_invalid")
+        result = cls(
+            release_id=checked["release_id"],
+            tombstone_hash=checked["tombstone_hash"],
+        )
+        if checked["content_hash"] != result.content_hash:
+            raise CustodyLedgerReferenceInvalidStateError("reference_release_invalid")
+        return result
+
+
 @dataclass(frozen=True, slots=True)
 class CustodyLedgerReferenceEventDocument:
     """One exact store-owned event in the local reference hash chain."""
@@ -303,6 +520,11 @@ class CustodyLedgerReferenceEventDocument:
         | OllamaV2NativeReservationD2
         | OllamaV2C2AuthorizationReferenceD2
         | OllamaV2DispatchEnvelopeD2
+        | OllamaV2MutationAckD2
+        | OllamaV2ManagerReloadWitnessD2
+        | OllamaV2CustodyLedgerRecordD2
+        | CustodyLedgerReferenceTombstone
+        | CustodyLedgerReferenceRelease
     )
     binding_hash: str | None
     binding: OllamaV2NativeExecutionBindingD2 | None
@@ -322,6 +544,11 @@ class CustodyLedgerReferenceEventDocument:
                 "reservation.held",
                 "c2.referenced",
                 "dispatch.committed",
+                "mutation.acknowledged",
+                "manager.witnessed",
+                "effect.observed",
+                "reservation.tombstoned",
+                "reservation.released",
             }
             and type(self.subject_stage) is str
             and type(self.artifact_type) is str
@@ -368,12 +595,58 @@ class CustodyLedgerReferenceEventDocument:
                 and self.binding_hash is None
                 and self.binding is None
             )
-        else:
+        elif self.event_type == "dispatch.committed":
             exact = (
                 type(self.artifact) is OllamaV2DispatchEnvelopeD2
                 and self.subject_stage == "dispatch.committed"
                 and self.artifact_id == self.artifact.dispatch_id
                 and self.artifact_type == _DISPATCH_FORMAT
+                and self.binding_hash is None
+                and self.binding is None
+            )
+        elif self.event_type == "mutation.acknowledged":
+            exact = (
+                type(self.artifact) is OllamaV2MutationAckD2
+                and self.subject_stage == self.event_type
+                and self.artifact_id == self.artifact.ack_id
+                and self.artifact_type == _ACK_FORMAT
+                and self.binding_hash is None
+                and self.binding is None
+            )
+        elif self.event_type == "manager.witnessed":
+            exact = (
+                type(self.artifact) is OllamaV2ManagerReloadWitnessD2
+                and self.subject_id == self.artifact.ack_id
+                and self.subject_stage == self.event_type
+                and self.artifact_id == self.artifact.witness_id
+                and self.artifact_type == _WITNESS_FORMAT
+                and self.binding_hash is None
+                and self.binding is None
+            )
+        elif self.event_type == "effect.observed":
+            exact = (
+                type(self.artifact) is OllamaV2CustodyLedgerRecordD2
+                and self.subject_stage == self.event_type
+                and self.artifact_id == self.artifact.record_id
+                and self.artifact_type == _RECORD_FORMAT
+                and self.binding_hash is None
+                and self.binding is None
+            )
+        elif self.event_type == "reservation.tombstoned":
+            exact = (
+                type(self.artifact) is CustodyLedgerReferenceTombstone
+                and self.subject_stage == self.event_type
+                and self.artifact_id == self.artifact.tombstone_id
+                and self.artifact_type == _TOMBSTONE_FORMAT
+                and self.binding_hash is None
+                and self.binding is None
+            )
+        else:
+            exact = (
+                type(self.artifact) is CustodyLedgerReferenceRelease
+                and self.subject_stage == self.event_type
+                and self.artifact_id == self.artifact.release_id
+                and self.artifact_type == _RELEASE_FORMAT
                 and self.binding_hash is None
                 and self.binding is None
             )
@@ -439,6 +712,11 @@ class CustodyLedgerReferenceEventDocument:
             | OllamaV2NativeReservationD2
             | OllamaV2C2AuthorizationReferenceD2
             | OllamaV2DispatchEnvelopeD2
+            | OllamaV2MutationAckD2
+            | OllamaV2ManagerReloadWitnessD2
+            | OllamaV2CustodyLedgerRecordD2
+            | CustodyLedgerReferenceTombstone
+            | CustodyLedgerReferenceRelease
         ),
         binding: OllamaV2NativeExecutionBindingD2 | None,
         previous_event_hash: str,
@@ -487,6 +765,57 @@ class CustodyLedgerReferenceEventDocument:
             artifact_type = _DISPATCH_FORMAT
             binding_hash = None
             binding = None
+        elif (
+            event_type == "mutation.acknowledged"
+            and type(artifact) is OllamaV2MutationAckD2
+            and type(subject_id) is str
+            and binding is None
+        ):
+            subject_stage = event_type
+            artifact_id = artifact.ack_id
+            artifact_type = _ACK_FORMAT
+            binding_hash = None
+        elif (
+            event_type == "manager.witnessed"
+            and type(artifact) is OllamaV2ManagerReloadWitnessD2
+            and (subject_id is None or subject_id == artifact.ack_id)
+            and binding is None
+        ):
+            subject_id = artifact.ack_id
+            subject_stage = event_type
+            artifact_id = artifact.witness_id
+            artifact_type = _WITNESS_FORMAT
+            binding_hash = None
+        elif (
+            event_type == "effect.observed"
+            and type(artifact) is OllamaV2CustodyLedgerRecordD2
+            and type(subject_id) is str
+            and binding is None
+        ):
+            subject_stage = event_type
+            artifact_id = artifact.record_id
+            artifact_type = _RECORD_FORMAT
+            binding_hash = None
+        elif (
+            event_type == "reservation.tombstoned"
+            and type(artifact) is CustodyLedgerReferenceTombstone
+            and type(subject_id) is str
+            and binding is None
+        ):
+            subject_stage = event_type
+            artifact_id = artifact.tombstone_id
+            artifact_type = _TOMBSTONE_FORMAT
+            binding_hash = None
+        elif (
+            event_type == "reservation.released"
+            and type(artifact) is CustodyLedgerReferenceRelease
+            and type(subject_id) is str
+            and binding is None
+        ):
+            subject_stage = event_type
+            artifact_id = artifact.release_id
+            artifact_type = _RELEASE_FORMAT
+            binding_hash = None
         else:
             raise CustodyLedgerReferenceInvalidStateError(
                 "reference_event_document_invalid"
@@ -576,6 +905,34 @@ def _reference_object_pairs(pairs: list[tuple[str, object]]) -> dict[str, object
     return result
 
 
+def _parse_reference_artifact(value: bytes) -> object:
+    try:
+        document = json.loads(
+            value.decode("utf-8"),
+            object_pairs_hook=_reference_object_pairs,
+            parse_float=_reject_reference_json_number,
+            parse_constant=_reject_reference_json_number,
+        )
+    except CustodyLedgerReferenceStoreError:
+        raise
+    except (UnicodeError, ValueError, TypeError, RecursionError) as exc:
+        raise CustodyLedgerReferenceInvalidStateError(
+            "reference_event_json_invalid"
+        ) from exc
+    if (
+        type(document) is not dict
+        or canonical_ollama_v2_native_execution_bytes(document) != value
+    ):
+        raise CustodyLedgerReferenceInvalidStateError(
+            "reference_event_json_noncanonical"
+        )
+    if document.get("format") == _TOMBSTONE_FORMAT:
+        return CustodyLedgerReferenceTombstone.from_document(document)
+    if document.get("format") == _RELEASE_FORMAT:
+        return CustodyLedgerReferenceRelease.from_document(document)
+    return parse_ollama_v2_native_execution_contract(value)
+
+
 def parse_custody_ledger_reference_event(
     value: object,
 ) -> CustodyLedgerReferenceEventDocument:
@@ -627,7 +984,7 @@ def parse_custody_ledger_reference_event(
             "reference_event_document_invalid"
         )
     try:
-        artifact = parse_ollama_v2_native_execution_contract(
+        artifact = _parse_reference_artifact(
             canonical_ollama_v2_native_execution_bytes(document["artifact"])
         )
         binding_document = document["binding"]
@@ -668,6 +1025,10 @@ class CustodyLedgerReferenceSnapshot:
     active_reservation: OllamaV2NativeReservationD2 | None
     active_c2_reference: OllamaV2C2AuthorizationReferenceD2 | None
     active_dispatch_intent: OllamaV2DispatchEnvelopeD2 | None
+    active_mutation_ack: OllamaV2MutationAckD2 | None
+    active_manager_reload_witness: OllamaV2ManagerReloadWitnessD2 | None
+    active_record: OllamaV2CustodyLedgerRecordD2 | None
+    active_tombstone: CustodyLedgerReferenceTombstone | None
 
     def __post_init__(self) -> None:
         if type(self.head) is not CustodyLedgerReferenceHead:
@@ -680,6 +1041,10 @@ class CustodyLedgerReferenceSnapshot:
                     self.active_reservation,
                     self.active_c2_reference,
                     self.active_dispatch_intent,
+                    self.active_mutation_ack,
+                    self.active_manager_reload_witness,
+                    self.active_record,
+                    self.active_tombstone,
                 )
             )
         else:
@@ -692,13 +1057,24 @@ class CustodyLedgerReferenceSnapshot:
                 and self.head.active_reservation_id == reservation.reservation_id
                 and self.head.active_fence_hash == reservation.fence_hash
                 and self.head.fence_generation == reservation.fence_generation
-                and self.head.record_sequence == reservation.previous_fence_sequence
-                and self.head.record_head_hash == reservation.previous_fence_hash
+                and (
+                    self.head.active_state in {"observed", "tombstoned"}
+                    or (
+                        self.head.record_sequence
+                        == reservation.previous_fence_sequence
+                        and self.head.record_head_hash
+                        == reservation.previous_fence_hash
+                    )
+                )
             )
             if self.head.active_state == "reserved":
                 valid = valid and (
                     self.active_c2_reference is None
                     and self.active_dispatch_intent is None
+                    and self.active_mutation_ack is None
+                    and self.active_manager_reload_witness is None
+                    and self.active_record is None
+                    and self.active_tombstone is None
                 )
             elif self.head.active_state == "c2_referenced":
                 c2 = self.active_c2_reference
@@ -707,8 +1083,12 @@ class CustodyLedgerReferenceSnapshot:
                     and c2.execution_binding_hash == binding.content_hash
                     and c2.reservation_hash == reservation.content_hash
                     and self.active_dispatch_intent is None
+                    and self.active_mutation_ack is None
+                    and self.active_manager_reload_witness is None
+                    and self.active_record is None
+                    and self.active_tombstone is None
                 )
-            elif self.head.active_state == "dispatch_committed":
+            else:
                 c2 = self.active_c2_reference
                 dispatch = self.active_dispatch_intent
                 valid = valid and (
@@ -720,8 +1100,65 @@ class CustodyLedgerReferenceSnapshot:
                     and dispatch.reservation.to_bytes() == reservation.to_bytes()
                     and dispatch.c2_authorization.to_bytes() == c2.to_bytes()
                 )
-            else:
-                valid = False
+                if self.head.active_state == "dispatch_committed":
+                    valid = valid and (
+                        self.active_mutation_ack is None
+                        and self.active_manager_reload_witness is None
+                        and self.active_record is None
+                        and self.active_tombstone is None
+                    )
+                else:
+                    ack = self.active_mutation_ack
+                    valid = valid and (
+                        type(ack) is OllamaV2MutationAckD2
+                        and ack.dispatch_hash == dispatch.content_hash
+                    )
+                    if self.head.active_state == "acknowledged":
+                        valid = valid and (
+                            self.active_manager_reload_witness is None
+                            and self.active_record is None
+                            and self.active_tombstone is None
+                        )
+                    else:
+                        witness = self.active_manager_reload_witness
+                        record = self.active_record
+                        if self.head.active_state == "witnessed":
+                            valid = valid and (
+                                type(witness) is OllamaV2ManagerReloadWitnessD2
+                                and witness.dispatch == dispatch
+                                and witness.ack == ack
+                                and self.active_record is None
+                                and self.active_tombstone is None
+                            )
+                        elif self.head.active_state in {"observed", "tombstoned"}:
+                            valid = valid and (
+                                type(record) is OllamaV2CustodyLedgerRecordD2
+                                and record.dispatch == dispatch
+                                and record.ack == ack
+                                and self.head.record_sequence == record.record_sequence
+                                and self.head.record_head_hash == record.content_hash
+                            )
+                            if dispatch.effect_kind == "manager.reload":
+                                valid = valid and (
+                                    type(witness) is OllamaV2ManagerReloadWitnessD2
+                                    and record.reload_witness_hash
+                                    == witness.content_hash
+                                    and record.observed_snapshot
+                                    == witness.observed_snapshot
+                                )
+                            else:
+                                valid = valid and witness is None
+                            if self.head.active_state == "observed":
+                                valid = valid and self.active_tombstone is None
+                            else:
+                                tombstone = self.active_tombstone
+                                valid = valid and (
+                                    type(tombstone)
+                                    is CustodyLedgerReferenceTombstone
+                                    and tombstone.record_hash == record.content_hash
+                                )
+                        else:
+                            valid = False
         if not valid:
             raise CustodyLedgerReferenceInvalidStateError("reference_snapshot_invalid")
 
@@ -746,6 +1183,14 @@ class CustodyLedgerReferenceTransition:
 @dataclass(slots=True)
 class _ReferenceReplay:
     snapshot: CustodyLedgerReferenceSnapshot
+    bindings: dict[
+        str,
+        tuple[OllamaV2NativeExecutionBindingD2, CustodyLedgerReferenceEventDocument],
+    ]
+    reservations: dict[
+        str,
+        tuple[OllamaV2NativeReservationD2, CustodyLedgerReferenceEventDocument],
+    ]
     sources: dict[str, tuple[OllamaV2SourceBundleDescriptorD2, CustodyLedgerReferenceEventDocument]]
     c2_references: dict[
         str,
@@ -756,10 +1201,30 @@ class _ReferenceReplay:
         str,
         tuple[OllamaV2DispatchEnvelopeD2, CustodyLedgerReferenceEventDocument],
     ]
+    mutation_acks: dict[
+        str, tuple[OllamaV2MutationAckD2, CustodyLedgerReferenceEventDocument]
+    ]
+    manager_witnesses: dict[
+        str,
+        tuple[OllamaV2ManagerReloadWitnessD2, CustodyLedgerReferenceEventDocument],
+    ]
+    records: dict[
+        str, tuple[OllamaV2CustodyLedgerRecordD2, CustodyLedgerReferenceEventDocument]
+    ]
+    tombstones: dict[
+        str, tuple[CustodyLedgerReferenceTombstone, CustodyLedgerReferenceEventDocument]
+    ]
+    releases: dict[
+        str, tuple[CustodyLedgerReferenceRelease, CustodyLedgerReferenceEventDocument]
+    ]
     events: dict[str, CustodyLedgerReferenceEventDocument]
     reservation_event: CustodyLedgerReferenceEventDocument | None
     c2_event: CustodyLedgerReferenceEventDocument | None
     dispatch_event: CustodyLedgerReferenceEventDocument | None
+    ack_event: CustodyLedgerReferenceEventDocument | None
+    witness_event: CustodyLedgerReferenceEventDocument | None
+    record_event: CustodyLedgerReferenceEventDocument | None
+    tombstone_event: CustodyLedgerReferenceEventDocument | None
 
 
 _STATUS = CustodyLedgerReferenceStatus(
@@ -1113,9 +1578,9 @@ class OllamaV2CustodyLedgerReferenceStore:
     ) -> OllamaV2NativeExecutionBindingD2 | None:
         self._assert_boundary()
         self._assert_identifier(binding_id)
-        binding = self._verify_store().snapshot.active_binding
+        binding = self._verify_store().bindings.get(binding_id)
         self._assert_boundary()
-        return binding if binding is not None and binding.binding_id == binding_id else None
+        return None if binding is None else binding[0]
 
     def load_reservation(
         self,
@@ -1123,13 +1588,9 @@ class OllamaV2CustodyLedgerReferenceStore:
     ) -> OllamaV2NativeReservationD2 | None:
         self._assert_boundary()
         self._assert_identifier(reservation_id)
-        reservation = self._verify_store().snapshot.active_reservation
+        reservation = self._verify_store().reservations.get(reservation_id)
         self._assert_boundary()
-        return (
-            reservation
-            if reservation is not None and reservation.reservation_id == reservation_id
-            else None
-        )
+        return None if reservation is None else reservation[0]
 
     def load_c2_reference(
         self,
@@ -1150,6 +1611,50 @@ class OllamaV2CustodyLedgerReferenceStore:
         dispatch = self._verify_store().dispatch_intents.get(dispatch_id)
         self._assert_boundary()
         return None if dispatch is None else dispatch[0]
+
+    def load_mutation_ack(self, ack_id: str) -> OllamaV2MutationAckD2 | None:
+        self._assert_boundary()
+        self._assert_identifier(ack_id)
+        ack = self._verify_store().mutation_acks.get(ack_id)
+        self._assert_boundary()
+        return None if ack is None else ack[0]
+
+    def load_manager_reload_witness(
+        self,
+        witness_id: str,
+    ) -> OllamaV2ManagerReloadWitnessD2 | None:
+        self._assert_boundary()
+        self._assert_identifier(witness_id)
+        witness = self._verify_store().manager_witnesses.get(witness_id)
+        self._assert_boundary()
+        return None if witness is None else witness[0]
+
+    def load_record(self, record_id: str) -> OllamaV2CustodyLedgerRecordD2 | None:
+        self._assert_boundary()
+        self._assert_identifier(record_id)
+        record = self._verify_store().records.get(record_id)
+        self._assert_boundary()
+        return None if record is None else record[0]
+
+    def load_tombstone(
+        self,
+        tombstone_id: str,
+    ) -> CustodyLedgerReferenceTombstone | None:
+        self._assert_boundary()
+        self._assert_identifier(tombstone_id)
+        tombstone = self._verify_store().tombstones.get(tombstone_id)
+        self._assert_boundary()
+        return None if tombstone is None else tombstone[0]
+
+    def load_release(
+        self,
+        release_id: str,
+    ) -> CustodyLedgerReferenceRelease | None:
+        self._assert_boundary()
+        self._assert_identifier(release_id)
+        release = self._verify_store().releases.get(release_id)
+        self._assert_boundary()
+        return None if release is None else release[0]
 
     def register_source(
         self,
@@ -1204,6 +1709,18 @@ class OllamaV2CustodyLedgerReferenceStore:
         try:
             state = self._verify_store()
             self._require_mutable(state.snapshot)
+            historical = state.bindings.get(binding.binding_id)
+            if historical is not None:
+                if historical[0].to_bytes() != binding.to_bytes():
+                    raise CustodyLedgerReferenceDuplicateMismatchError(
+                        "reference_duplicate_mismatch"
+                    )
+                self._rollback()
+                return CustodyLedgerReferenceTransition(
+                    snapshot=state.snapshot,
+                    event=historical[1],
+                    committed_now=False,
+                )
             active = state.snapshot.active_binding
             if active is not None:
                 if active.to_bytes() != binding.to_bytes():
@@ -1261,6 +1778,18 @@ class OllamaV2CustodyLedgerReferenceStore:
         try:
             state = self._verify_store()
             self._require_mutable(state.snapshot)
+            existing_reference = state.c2_references.get(reference.reference_id)
+            if existing_reference is not None:
+                if existing_reference[0].to_bytes() != reference.to_bytes():
+                    raise CustodyLedgerReferenceDuplicateMismatchError(
+                        "reference_duplicate_mismatch"
+                    )
+                self._rollback()
+                return CustodyLedgerReferenceTransition(
+                    snapshot=state.snapshot,
+                    event=existing_reference[1],
+                    committed_now=False,
+                )
             active = state.snapshot.active_c2_reference
             if active is not None:
                 if active.to_bytes() != reference.to_bytes():
@@ -1290,9 +1819,7 @@ class OllamaV2CustodyLedgerReferenceStore:
                 raise CustodyLedgerReferenceConflictError(
                     "reference_c2_active_mismatch"
                 )
-            existing_reference = state.c2_references.get(reference.reference_id)
-            existing_consumption = state.c2_consumptions.get(reference.consumption_id)
-            if existing_reference is not None or existing_consumption is not None:
+            if reference.consumption_id in state.c2_consumptions:
                 raise CustodyLedgerReferenceDuplicateMismatchError(
                     "reference_duplicate_mismatch"
                 )
@@ -1335,6 +1862,18 @@ class OllamaV2CustodyLedgerReferenceStore:
         try:
             state = self._verify_store()
             self._require_mutable(state.snapshot)
+            existing = state.dispatch_intents.get(dispatch.dispatch_id)
+            if existing is not None:
+                if existing[0].to_bytes() != dispatch.to_bytes():
+                    raise CustodyLedgerReferenceDuplicateMismatchError(
+                        "reference_duplicate_mismatch"
+                    )
+                self._rollback()
+                return CustodyLedgerReferenceTransition(
+                    snapshot=state.snapshot,
+                    event=existing[1],
+                    committed_now=False,
+                )
             active = state.snapshot.active_dispatch_intent
             if active is not None:
                 if active.to_bytes() != dispatch.to_bytes():
@@ -1367,10 +1906,6 @@ class OllamaV2CustodyLedgerReferenceStore:
                 raise CustodyLedgerReferenceConflictError(
                     "reference_dispatch_active_mismatch"
                 )
-            if dispatch.dispatch_id in state.dispatch_intents:
-                raise CustodyLedgerReferenceDuplicateMismatchError(
-                    "reference_duplicate_mismatch"
-                )
             event = CustodyLedgerReferenceEventDocument.create(
                 sequence=snapshot.head.event_sequence + 1,
                 event_type="dispatch.committed",
@@ -1394,6 +1929,340 @@ class OllamaV2CustodyLedgerReferenceStore:
         except sqlite3.Error as exc:
             self._rollback()
             _raise_sqlite_failure(exc, "reference_dispatch_commit_failed")
+
+    def record_mutation_ack(
+        self,
+        ack: OllamaV2MutationAckD2,
+    ) -> CustodyLedgerReferenceTransition:
+        """Persist a correlation ACK without interpreting it as host success."""
+
+        self._assert_boundary()
+        if type(ack) is not OllamaV2MutationAckD2:
+            raise CustodyLedgerReferenceInvalidStateError("reference_ack_invalid")
+        self._begin_immediate()
+        try:
+            state = self._verify_store()
+            self._require_mutable(state.snapshot)
+            existing = state.mutation_acks.get(ack.ack_id)
+            if existing is not None:
+                if existing[0].to_bytes() != ack.to_bytes():
+                    raise CustodyLedgerReferenceDuplicateMismatchError(
+                        "reference_duplicate_mismatch"
+                    )
+                self._rollback()
+                return CustodyLedgerReferenceTransition(
+                    snapshot=state.snapshot,
+                    event=existing[1],
+                    committed_now=False,
+                )
+            snapshot = state.snapshot
+            if snapshot.head.active_state != "dispatch_committed":
+                raise CustodyLedgerReferenceConflictError(
+                    "reference_ack_state_conflict"
+                )
+            dispatch = snapshot.active_dispatch_intent
+            assert type(dispatch) is OllamaV2DispatchEnvelopeD2
+            if ack.dispatch_hash != dispatch.content_hash:
+                raise CustodyLedgerReferenceConflictError(
+                    "reference_ack_active_mismatch"
+                )
+            event = CustodyLedgerReferenceEventDocument.create(
+                sequence=snapshot.head.event_sequence + 1,
+                event_type="mutation.acknowledged",
+                artifact=ack,
+                binding=None,
+                previous_event_hash=snapshot.head.event_head_hash,
+                subject_id=dispatch.dispatch_id,
+            )
+            self._assert_no_unique_collision(event)
+            self._insert_event(event)
+            self._update_active_state_for_event(
+                event,
+                expected_state="dispatch_committed",
+                next_state="acknowledged",
+            )
+            after = self._verify_store().snapshot
+            return self._finish_event_commit(event, after)
+        except CustodyLedgerReferenceStoreError:
+            self._rollback()
+            raise
+        except sqlite3.Error as exc:
+            self._rollback()
+            _raise_sqlite_failure(exc, "reference_ack_commit_failed")
+
+    def record_manager_reload_witness(
+        self,
+        witness: OllamaV2ManagerReloadWitnessD2,
+    ) -> CustodyLedgerReferenceTransition:
+        """Persist the required unverified witness for manager.reload only."""
+
+        self._assert_boundary()
+        if type(witness) is not OllamaV2ManagerReloadWitnessD2:
+            raise CustodyLedgerReferenceInvalidStateError(
+                "reference_manager_witness_invalid"
+            )
+        self._begin_immediate()
+        try:
+            state = self._verify_store()
+            self._require_mutable(state.snapshot)
+            existing = state.manager_witnesses.get(witness.witness_id)
+            if existing is not None:
+                if existing[0].to_bytes() != witness.to_bytes():
+                    raise CustodyLedgerReferenceDuplicateMismatchError(
+                        "reference_duplicate_mismatch"
+                    )
+                self._rollback()
+                return CustodyLedgerReferenceTransition(
+                    snapshot=state.snapshot,
+                    event=existing[1],
+                    committed_now=False,
+                )
+            dispatch = state.snapshot.active_dispatch_intent
+            if dispatch is not None and dispatch.effect_kind != "manager.reload":
+                raise CustodyLedgerReferenceConflictError(
+                    "reference_manager_witness_not_required"
+                )
+            snapshot = state.snapshot
+            if snapshot.head.active_state != "acknowledged":
+                raise CustodyLedgerReferenceConflictError(
+                    "reference_manager_witness_state_conflict"
+                )
+            ack = snapshot.active_mutation_ack
+            dispatch = snapshot.active_dispatch_intent
+            assert type(ack) is OllamaV2MutationAckD2
+            assert type(dispatch) is OllamaV2DispatchEnvelopeD2
+            if witness.dispatch != dispatch or witness.ack != ack:
+                raise CustodyLedgerReferenceConflictError(
+                    "reference_manager_witness_active_mismatch"
+                )
+            event = CustodyLedgerReferenceEventDocument.create(
+                sequence=snapshot.head.event_sequence + 1,
+                event_type="manager.witnessed",
+                artifact=witness,
+                binding=None,
+                previous_event_hash=snapshot.head.event_head_hash,
+            )
+            self._assert_no_unique_collision(event)
+            self._insert_event(event)
+            self._update_active_state_for_event(
+                event,
+                expected_state="acknowledged",
+                next_state="witnessed",
+            )
+            after = self._verify_store().snapshot
+            return self._finish_event_commit(event, after)
+        except CustodyLedgerReferenceStoreError:
+            self._rollback()
+            raise
+        except sqlite3.Error as exc:
+            self._rollback()
+            _raise_sqlite_failure(exc, "reference_manager_witness_commit_failed")
+
+    def record_effect_observation(
+        self,
+        record: OllamaV2CustodyLedgerRecordD2,
+    ) -> CustodyLedgerReferenceTransition:
+        """Persist an exact D2.1a observed-unverified record; execute nothing."""
+
+        self._assert_boundary()
+        if type(record) is not OllamaV2CustodyLedgerRecordD2:
+            raise CustodyLedgerReferenceInvalidStateError(
+                "reference_observation_invalid"
+            )
+        self._begin_immediate()
+        try:
+            state = self._verify_store()
+            self._require_mutable(state.snapshot)
+            existing = state.records.get(record.record_id)
+            if existing is not None:
+                if existing[0].to_bytes() != record.to_bytes():
+                    raise CustodyLedgerReferenceDuplicateMismatchError(
+                        "reference_duplicate_mismatch"
+                    )
+                self._rollback()
+                return CustodyLedgerReferenceTransition(
+                    snapshot=state.snapshot,
+                    event=existing[1],
+                    committed_now=False,
+                )
+            snapshot = state.snapshot
+            dispatch = snapshot.active_dispatch_intent
+            ack = snapshot.active_mutation_ack
+            if dispatch is None or ack is None:
+                raise CustodyLedgerReferenceConflictError(
+                    "reference_observation_state_conflict"
+                )
+            expected_state = (
+                "witnessed"
+                if dispatch.effect_kind == "manager.reload"
+                else "acknowledged"
+            )
+            if snapshot.head.active_state != expected_state:
+                raise CustodyLedgerReferenceConflictError(
+                    "reference_observation_state_conflict"
+                )
+            reservation = snapshot.active_reservation
+            binding = snapshot.active_binding
+            assert type(reservation) is OllamaV2NativeReservationD2
+            assert type(binding) is OllamaV2NativeExecutionBindingD2
+            if (
+                record.dispatch.to_bytes() != dispatch.to_bytes()
+                or record.ack.to_bytes() != ack.to_bytes()
+                or record.execution_binding_hash != binding.content_hash
+                or record.reservation_id != reservation.reservation_id
+                or record.record_generation != snapshot.head.fence_generation
+                or record.record_sequence != snapshot.head.record_sequence + 1
+                or record.previous_record_hash != snapshot.head.record_head_hash
+            ):
+                raise CustodyLedgerReferenceConflictError(
+                    "reference_observation_active_mismatch"
+                )
+            witness = snapshot.active_manager_reload_witness
+            if dispatch.effect_kind == "manager.reload":
+                if (
+                    type(witness) is not OllamaV2ManagerReloadWitnessD2
+                    or record.reload_witness_hash != witness.content_hash
+                    or record.observed_snapshot != witness.observed_snapshot
+                ):
+                    raise CustodyLedgerReferenceConflictError(
+                        "reference_observation_active_mismatch"
+                    )
+                subject_id = witness.witness_id
+            else:
+                if witness is not None or record.reload_witness_hash is not None:
+                    raise CustodyLedgerReferenceConflictError(
+                        "reference_observation_active_mismatch"
+                    )
+                subject_id = ack.ack_id
+            event = CustodyLedgerReferenceEventDocument.create(
+                sequence=snapshot.head.event_sequence + 1,
+                event_type="effect.observed",
+                artifact=record,
+                binding=None,
+                previous_event_hash=snapshot.head.event_head_hash,
+                subject_id=subject_id,
+            )
+            self._assert_no_unique_collision(event)
+            self._insert_event(event)
+            self._update_observed_state_for_event(event, record, expected_state)
+            after = self._verify_store().snapshot
+            return self._finish_event_commit(event, after)
+        except CustodyLedgerReferenceStoreError:
+            self._rollback()
+            raise
+        except sqlite3.Error as exc:
+            self._rollback()
+            _raise_sqlite_failure(exc, "reference_observation_commit_failed")
+
+    def tombstone_observed_record(
+        self,
+        record_id: str,
+    ) -> CustodyLedgerReferenceTransition:
+        self._assert_boundary()
+        self._assert_identifier(record_id)
+        self._begin_immediate()
+        try:
+            state = self._verify_store()
+            self._require_mutable(state.snapshot)
+            record_entry = state.records.get(record_id)
+            if record_entry is None:
+                raise CustodyLedgerReferenceConflictError(
+                    "reference_tombstone_record_missing"
+                )
+            record = record_entry[0]
+            tombstone = CustodyLedgerReferenceTombstone._create(record.content_hash)
+            existing = state.tombstones.get(tombstone.tombstone_id)
+            if existing is not None:
+                self._rollback()
+                return CustodyLedgerReferenceTransition(
+                    snapshot=state.snapshot,
+                    event=existing[1],
+                    committed_now=False,
+                )
+            snapshot = state.snapshot
+            if (
+                snapshot.head.active_state != "observed"
+                or snapshot.active_record != record
+            ):
+                raise CustodyLedgerReferenceConflictError(
+                    "reference_tombstone_state_conflict"
+                )
+            event = CustodyLedgerReferenceEventDocument.create(
+                sequence=snapshot.head.event_sequence + 1,
+                event_type="reservation.tombstoned",
+                artifact=tombstone,
+                binding=None,
+                previous_event_hash=snapshot.head.event_head_hash,
+                subject_id=record.record_id,
+            )
+            self._assert_no_unique_collision(event)
+            self._insert_event(event)
+            self._update_active_state_for_event(
+                event,
+                expected_state="observed",
+                next_state="tombstoned",
+            )
+            after = self._verify_store().snapshot
+            return self._finish_event_commit(event, after)
+        except CustodyLedgerReferenceStoreError:
+            self._rollback()
+            raise
+        except sqlite3.Error as exc:
+            self._rollback()
+            _raise_sqlite_failure(exc, "reference_tombstone_commit_failed")
+
+    def release_tombstoned_record(
+        self,
+        tombstone_id: str,
+    ) -> CustodyLedgerReferenceTransition:
+        self._assert_boundary()
+        self._assert_identifier(tombstone_id)
+        self._begin_immediate()
+        try:
+            state = self._verify_store()
+            self._require_mutable(state.snapshot)
+            tombstone_entry = state.tombstones.get(tombstone_id)
+            if tombstone_entry is None:
+                raise CustodyLedgerReferenceConflictError(
+                    "reference_release_tombstone_missing"
+                )
+            tombstone = tombstone_entry[0]
+            release = CustodyLedgerReferenceRelease._create(tombstone.content_hash)
+            existing = state.releases.get(release.release_id)
+            if existing is not None:
+                self._rollback()
+                return CustodyLedgerReferenceTransition(
+                    snapshot=state.snapshot,
+                    event=existing[1],
+                    committed_now=False,
+                )
+            snapshot = state.snapshot
+            if (
+                snapshot.head.active_state != "tombstoned"
+                or snapshot.active_tombstone != tombstone
+            ):
+                raise CustodyLedgerReferenceConflictError(
+                    "reference_release_state_conflict"
+                )
+            event = CustodyLedgerReferenceEventDocument.create(
+                sequence=snapshot.head.event_sequence + 1,
+                event_type="reservation.released",
+                artifact=release,
+                binding=None,
+                previous_event_hash=snapshot.head.event_head_hash,
+                subject_id=tombstone.tombstone_id,
+            )
+            self._assert_no_unique_collision(event)
+            self._insert_event(event)
+            self._release_active_for_event(event)
+            after = self._verify_store().snapshot
+            return self._finish_event_commit(event, after)
+        except CustodyLedgerReferenceStoreError:
+            self._rollback()
+            raise
+        except sqlite3.Error as exc:
+            self._rollback()
+            _raise_sqlite_failure(exc, "reference_release_commit_failed")
 
     @staticmethod
     def _assert_identifier(value: object) -> None:
@@ -1575,6 +2444,65 @@ class OllamaV2CustodyLedgerReferenceStore:
                 event.event_hash,
                 CUSTODY_SCOPE,
                 expected_state,
+                event.sequence - 1,
+                event.previous_event_hash,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise CustodyLedgerReferenceConflictError("reference_head_conflict")
+
+    def _update_observed_state_for_event(
+        self,
+        event: CustodyLedgerReferenceEventDocument,
+        record: OllamaV2CustodyLedgerRecordD2,
+        expected_state: str,
+    ) -> None:
+        connection = self._connection
+        assert connection is not None
+        cursor = connection.execute(
+            """UPDATE ollama_v2_custody_head
+            SET record_sequence = ?, record_head_hash = ?, active_state = 'observed',
+                event_sequence = ?, event_head_hash = ?
+            WHERE scope = ? AND fence_generation = ?
+              AND record_sequence = ? AND record_head_hash = ?
+              AND active_state = ? AND active_reservation_id IS NOT NULL
+              AND active_fence_hash IS NOT NULL AND event_sequence = ?
+              AND event_head_hash = ? AND poisoned = 0""",
+            (
+                record.record_sequence,
+                record.content_hash,
+                event.sequence,
+                event.event_hash,
+                CUSTODY_SCOPE,
+                record.record_generation,
+                record.record_sequence - 1,
+                record.previous_record_hash,
+                expected_state,
+                event.sequence - 1,
+                event.previous_event_hash,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise CustodyLedgerReferenceConflictError("reference_head_conflict")
+
+    def _release_active_for_event(
+        self,
+        event: CustodyLedgerReferenceEventDocument,
+    ) -> None:
+        connection = self._connection
+        assert connection is not None
+        cursor = connection.execute(
+            """UPDATE ollama_v2_custody_head
+            SET active_reservation_id = NULL, active_fence_hash = NULL,
+                active_state = 'idle', event_sequence = ?, event_head_hash = ?
+            WHERE scope = ? AND active_state = 'tombstoned'
+              AND active_reservation_id IS NOT NULL
+              AND active_fence_hash IS NOT NULL AND event_sequence = ?
+              AND event_head_hash = ? AND poisoned = 0""",
+            (
+                event.sequence,
+                event.event_hash,
+                CUSTODY_SCOPE,
                 event.sequence - 1,
                 event.previous_event_hash,
             ),
@@ -2340,14 +3268,36 @@ class OllamaV2CustodyLedgerReferenceStore:
         active_reservation: OllamaV2NativeReservationD2 | None = None
         active_c2_reference: OllamaV2C2AuthorizationReferenceD2 | None = None
         active_dispatch_intent: OllamaV2DispatchEnvelopeD2 | None = None
+        active_mutation_ack: OllamaV2MutationAckD2 | None = None
+        active_manager_reload_witness: OllamaV2ManagerReloadWitnessD2 | None = None
+        active_record: OllamaV2CustodyLedgerRecordD2 | None = None
+        active_tombstone: CustodyLedgerReferenceTombstone | None = None
         active_state = "idle"
         reservation_event: CustodyLedgerReferenceEventDocument | None = None
         c2_event: CustodyLedgerReferenceEventDocument | None = None
         dispatch_event: CustodyLedgerReferenceEventDocument | None = None
+        ack_event: CustodyLedgerReferenceEventDocument | None = None
+        witness_event: CustodyLedgerReferenceEventDocument | None = None
+        record_event: CustodyLedgerReferenceEventDocument | None = None
+        tombstone_event: CustodyLedgerReferenceEventDocument | None = None
         sources: dict[
             str,
             tuple[
                 OllamaV2SourceBundleDescriptorD2,
+                CustodyLedgerReferenceEventDocument,
+            ],
+        ] = {}
+        bindings: dict[
+            str,
+            tuple[
+                OllamaV2NativeExecutionBindingD2,
+                CustodyLedgerReferenceEventDocument,
+            ],
+        ] = {}
+        reservations: dict[
+            str,
+            tuple[
+                OllamaV2NativeReservationD2,
                 CustodyLedgerReferenceEventDocument,
             ],
         ] = {}
@@ -2365,6 +3315,29 @@ class OllamaV2CustodyLedgerReferenceStore:
                 OllamaV2DispatchEnvelopeD2,
                 CustodyLedgerReferenceEventDocument,
             ],
+        ] = {}
+        mutation_acks: dict[
+            str,
+            tuple[OllamaV2MutationAckD2, CustodyLedgerReferenceEventDocument],
+        ] = {}
+        manager_witnesses: dict[
+            str,
+            tuple[
+                OllamaV2ManagerReloadWitnessD2,
+                CustodyLedgerReferenceEventDocument,
+            ],
+        ] = {}
+        records: dict[
+            str,
+            tuple[OllamaV2CustodyLedgerRecordD2, CustodyLedgerReferenceEventDocument],
+        ] = {}
+        tombstones: dict[
+            str,
+            tuple[CustodyLedgerReferenceTombstone, CustodyLedgerReferenceEventDocument],
+        ] = {}
+        releases: dict[
+            str,
+            tuple[CustodyLedgerReferenceRelease, CustodyLedgerReferenceEventDocument],
         ] = {}
         events: dict[str, CustodyLedgerReferenceEventDocument] = {}
         for row in rows:
@@ -2395,7 +3368,7 @@ class OllamaV2CustodyLedgerReferenceStore:
                     "reference_event_chain_invalid"
                 )
             try:
-                artifact = parse_ollama_v2_native_execution_contract(bytes(values[8]))
+                artifact = _parse_reference_artifact(bytes(values[8]))
                 binding = (
                     None
                     if values[10] is None
@@ -2469,6 +3442,8 @@ class OllamaV2CustodyLedgerReferenceStore:
                     )
                 if (
                     not source_valid
+                    or binding_value.binding_id in bindings
+                    or reservation.reservation_id in reservations
                     or reservation.fence_generation != fence_generation + 1
                     or reservation.previous_fence_sequence != record_sequence
                     or reservation.fence_sequence != record_sequence + 1
@@ -2478,6 +3453,8 @@ class OllamaV2CustodyLedgerReferenceStore:
                         "reference_reservation_graph_invalid"
                     )
                 fence_generation = reservation.fence_generation
+                bindings[binding_value.binding_id] = (binding_value, event)
+                reservations[reservation.reservation_id] = (reservation, event)
                 active_binding = binding_value
                 active_reservation = reservation
                 active_state = "reserved"
@@ -2528,6 +3505,156 @@ class OllamaV2CustodyLedgerReferenceStore:
                 active_dispatch_intent = dispatch
                 active_state = "dispatch_committed"
                 dispatch_event = event
+            elif event.event_type == "mutation.acknowledged":
+                ack = event.artifact
+                assert type(ack) is OllamaV2MutationAckD2
+                if (
+                    active_state != "dispatch_committed"
+                    or active_dispatch_intent is None
+                    or event.subject_id != active_dispatch_intent.dispatch_id
+                    or ack.dispatch_hash != active_dispatch_intent.content_hash
+                    or ack.ack_id in mutation_acks
+                ):
+                    raise CustodyLedgerReferenceCorruptionError(
+                        "reference_ack_graph_invalid"
+                    )
+                mutation_acks[ack.ack_id] = (ack, event)
+                active_mutation_ack = ack
+                active_state = "acknowledged"
+                ack_event = event
+            elif event.event_type == "manager.witnessed":
+                witness = event.artifact
+                assert type(witness) is OllamaV2ManagerReloadWitnessD2
+                if (
+                    active_state != "acknowledged"
+                    or active_dispatch_intent is None
+                    or active_mutation_ack is None
+                    or active_dispatch_intent.effect_kind != "manager.reload"
+                    or event.subject_id != active_mutation_ack.ack_id
+                    or witness.dispatch != active_dispatch_intent
+                    or witness.ack != active_mutation_ack
+                    or witness.witness_id in manager_witnesses
+                ):
+                    raise CustodyLedgerReferenceCorruptionError(
+                        "reference_manager_witness_graph_invalid"
+                    )
+                manager_witnesses[witness.witness_id] = (witness, event)
+                active_manager_reload_witness = witness
+                active_state = "witnessed"
+                witness_event = event
+            elif event.event_type == "effect.observed":
+                record = event.artifact
+                assert type(record) is OllamaV2CustodyLedgerRecordD2
+                expected_state = (
+                    "witnessed"
+                    if active_dispatch_intent is not None
+                    and active_dispatch_intent.effect_kind == "manager.reload"
+                    else "acknowledged"
+                )
+                expected_subject = (
+                    None
+                    if expected_state == "witnessed"
+                    and active_manager_reload_witness is None
+                    else (
+                        active_manager_reload_witness.witness_id
+                        if expected_state == "witnessed"
+                        else (
+                            None
+                            if active_mutation_ack is None
+                            else active_mutation_ack.ack_id
+                        )
+                    )
+                )
+                if (
+                    active_state != expected_state
+                    or active_binding is None
+                    or active_reservation is None
+                    or active_dispatch_intent is None
+                    or active_mutation_ack is None
+                    or event.subject_id != expected_subject
+                    or record.dispatch != active_dispatch_intent
+                    or record.ack != active_mutation_ack
+                    or record.execution_binding_hash != active_binding.content_hash
+                    or record.reservation_id != active_reservation.reservation_id
+                    or record.record_generation != fence_generation
+                    or record.record_sequence != record_sequence + 1
+                    or record.previous_record_hash != record_head_hash
+                    or record.record_id in records
+                ):
+                    raise CustodyLedgerReferenceCorruptionError(
+                        "reference_observation_graph_invalid"
+                    )
+                if active_dispatch_intent.effect_kind == "manager.reload":
+                    if (
+                        active_manager_reload_witness is None
+                        or record.reload_witness_hash
+                        != active_manager_reload_witness.content_hash
+                        or record.observed_snapshot
+                        != active_manager_reload_witness.observed_snapshot
+                    ):
+                        raise CustodyLedgerReferenceCorruptionError(
+                            "reference_observation_graph_invalid"
+                        )
+                elif (
+                    active_manager_reload_witness is not None
+                    or record.reload_witness_hash is not None
+                ):
+                    raise CustodyLedgerReferenceCorruptionError(
+                        "reference_observation_graph_invalid"
+                    )
+                records[record.record_id] = (record, event)
+                record_sequence = record.record_sequence
+                record_head_hash = record.content_hash
+                active_record = record
+                active_state = "observed"
+                record_event = event
+            elif event.event_type == "reservation.tombstoned":
+                tombstone = event.artifact
+                assert type(tombstone) is CustodyLedgerReferenceTombstone
+                if (
+                    active_state != "observed"
+                    or active_record is None
+                    or event.subject_id != active_record.record_id
+                    or tombstone.record_hash != active_record.content_hash
+                    or tombstone.tombstone_id in tombstones
+                ):
+                    raise CustodyLedgerReferenceCorruptionError(
+                        "reference_tombstone_graph_invalid"
+                    )
+                tombstones[tombstone.tombstone_id] = (tombstone, event)
+                active_tombstone = tombstone
+                active_state = "tombstoned"
+                tombstone_event = event
+            elif event.event_type == "reservation.released":
+                release = event.artifact
+                assert type(release) is CustodyLedgerReferenceRelease
+                if (
+                    active_state != "tombstoned"
+                    or active_tombstone is None
+                    or event.subject_id != active_tombstone.tombstone_id
+                    or release.tombstone_hash != active_tombstone.content_hash
+                    or release.release_id in releases
+                ):
+                    raise CustodyLedgerReferenceCorruptionError(
+                        "reference_release_graph_invalid"
+                    )
+                releases[release.release_id] = (release, event)
+                active_binding = None
+                active_reservation = None
+                active_c2_reference = None
+                active_dispatch_intent = None
+                active_mutation_ack = None
+                active_manager_reload_witness = None
+                active_record = None
+                active_tombstone = None
+                active_state = "idle"
+                reservation_event = None
+                c2_event = None
+                dispatch_event = None
+                ack_event = None
+                witness_event = None
+                record_event = None
+                tombstone_event = None
             else:
                 raise CustodyLedgerReferenceCorruptionError(
                     "reference_event_type_unsupported"
@@ -2560,17 +3687,32 @@ class OllamaV2CustodyLedgerReferenceStore:
             active_reservation=active_reservation,
             active_c2_reference=active_c2_reference,
             active_dispatch_intent=active_dispatch_intent,
+            active_mutation_ack=active_mutation_ack,
+            active_manager_reload_witness=active_manager_reload_witness,
+            active_record=active_record,
+            active_tombstone=active_tombstone,
         )
         return _ReferenceReplay(
             snapshot=snapshot,
+            bindings=bindings,
+            reservations=reservations,
             sources=sources,
             c2_references=c2_references,
             c2_consumptions=c2_consumptions,
             dispatch_intents=dispatch_intents,
+            mutation_acks=mutation_acks,
+            manager_witnesses=manager_witnesses,
+            records=records,
+            tombstones=tombstones,
+            releases=releases,
             events=events,
             reservation_event=reservation_event,
             c2_event=c2_event,
             dispatch_event=dispatch_event,
+            ack_event=ack_event,
+            witness_event=witness_event,
+            record_event=record_event,
+            tombstone_event=tombstone_event,
         )
 
     def _verify_schema_objects(self) -> None:
@@ -2707,10 +3849,12 @@ __all__ = (
     "CustodyLedgerReferenceHead",
     "CustodyLedgerReferenceInvalidStateError",
     "CustodyLedgerReferenceRecoveryRequiredError",
+    "CustodyLedgerReferenceRelease",
     "CustodyLedgerReferenceSchemaObject",
     "CustodyLedgerReferenceSnapshot",
     "CustodyLedgerReferenceStatus",
     "CustodyLedgerReferenceStoreError",
+    "CustodyLedgerReferenceTombstone",
     "CustodyLedgerReferenceTransition",
     "CustodyLedgerReferenceUnsupportedError",
     "OllamaV2CustodyLedgerReferenceStore",

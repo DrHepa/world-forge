@@ -61,9 +61,13 @@ class CustodyLedgerReferenceStoreSurfaceTests(unittest.TestCase):
             ("root", "mode"),
         )
         expected_methods = {
+            "attach_c2_reference",
             "close",
+            "commit_dispatch_intent",
             "head",
             "load_binding",
+            "load_c2_reference",
+            "load_dispatch_intent",
             "load_event",
             "load_reservation",
             "load_source",

@@ -1,9 +1,10 @@
 """Injected local reference store for the Ollama v2 custody ledger.
 
 This module is deliberately not a native custody implementation.  It provides
-only an identity-bound, event-only SQLite foundation for deterministic tests
-and future local reference semantics.  Its status can never be used as proof
-of root-global custody, native execution, or production eligibility.
+only an identity-bound, event-only SQLite reference for deterministic tests.
+Its durable dispatch event commits intent only and never executes an effect.
+Its status can never prove root-global custody, native execution, or production
+eligibility.
 """
 
 from __future__ import annotations
@@ -39,6 +40,8 @@ from .ollama_v2_native_execution_contracts import (
     PROVIDER_EXECUTION_ENABLED,
     ROOT_GLOBAL_ENFORCED,
     SOURCE_CUSTODY_VERIFIED,
+    OllamaV2C2AuthorizationReferenceD2,
+    OllamaV2DispatchEnvelopeD2,
     OllamaV2NativeExecutionBindingD2,
     OllamaV2NativeExecutionContractError,
     OllamaV2NativeReservationD2,
@@ -74,6 +77,8 @@ _EVENT_ID_DOMAIN = b"world-forge.private.ollama_v2_custody_reference_event_id.v1
 _EVENT_HASH_DOMAIN = b"world-forge.private.ollama_v2_custody_reference_event_hash.v1\0"
 _SOURCE_FORMAT = "world-forge.private.ollama_v2_source_bundle_descriptor_d2"
 _RESERVATION_FORMAT = "world-forge.private.ollama_v2_native_reservation_d2"
+_C2_FORMAT = "world-forge.private.ollama_v2_c2_authorization_reference_d2"
+_DISPATCH_FORMAT = "world-forge.private.ollama_v2_dispatch_envelope_d2"
 _MAX_EVENT_BYTES = 4 * 1024 * 1024
 
 
@@ -293,7 +298,12 @@ class CustodyLedgerReferenceEventDocument:
     artifact_id: str
     artifact_type: str
     artifact_hash: str
-    artifact: OllamaV2SourceBundleDescriptorD2 | OllamaV2NativeReservationD2
+    artifact: (
+        OllamaV2SourceBundleDescriptorD2
+        | OllamaV2NativeReservationD2
+        | OllamaV2C2AuthorizationReferenceD2
+        | OllamaV2DispatchEnvelopeD2
+    )
     binding_hash: str | None
     binding: OllamaV2NativeExecutionBindingD2 | None
     previous_event_hash: str
@@ -306,7 +316,13 @@ class CustodyLedgerReferenceEventDocument:
             and self.sequence >= 1
             and all(type(value) is str and _ID_RE.fullmatch(value) for value in scalar_ids)
             and type(self.event_type) is str
-            and self.event_type in {"source.registered", "reservation.held"}
+            and self.event_type
+            in {
+                "source.registered",
+                "reservation.held",
+                "c2.referenced",
+                "dispatch.committed",
+            }
             and type(self.subject_stage) is str
             and type(self.artifact_type) is str
             and type(self.artifact_hash) is str
@@ -330,7 +346,7 @@ class CustodyLedgerReferenceEventDocument:
                 and self.binding_hash is None
                 and self.binding is None
             )
-        else:
+        elif self.event_type == "reservation.held":
             exact = (
                 type(self.artifact) is OllamaV2NativeReservationD2
                 and type(self.binding) is OllamaV2NativeExecutionBindingD2
@@ -342,6 +358,24 @@ class CustodyLedgerReferenceEventDocument:
                 and self.artifact_type == _RESERVATION_FORMAT
                 and self.binding_hash == self.binding.content_hash
                 and self.artifact.execution_binding_hash == self.binding.content_hash
+            )
+        elif self.event_type == "c2.referenced":
+            exact = (
+                type(self.artifact) is OllamaV2C2AuthorizationReferenceD2
+                and self.subject_stage == "c2.referenced"
+                and self.artifact_id == self.artifact.reference_id
+                and self.artifact_type == _C2_FORMAT
+                and self.binding_hash is None
+                and self.binding is None
+            )
+        else:
+            exact = (
+                type(self.artifact) is OllamaV2DispatchEnvelopeD2
+                and self.subject_stage == "dispatch.committed"
+                and self.artifact_id == self.artifact.dispatch_id
+                and self.artifact_type == _DISPATCH_FORMAT
+                and self.binding_hash is None
+                and self.binding is None
             )
         identity = _event_identity_payload(
             event_type=self.event_type,
@@ -400,11 +434,21 @@ class CustodyLedgerReferenceEventDocument:
         *,
         sequence: int,
         event_type: str,
-        artifact: OllamaV2SourceBundleDescriptorD2 | OllamaV2NativeReservationD2,
+        artifact: (
+            OllamaV2SourceBundleDescriptorD2
+            | OllamaV2NativeReservationD2
+            | OllamaV2C2AuthorizationReferenceD2
+            | OllamaV2DispatchEnvelopeD2
+        ),
         binding: OllamaV2NativeExecutionBindingD2 | None,
         previous_event_hash: str,
+        subject_id: str | None = None,
     ) -> CustodyLedgerReferenceEventDocument:
-        if event_type == "source.registered" and type(artifact) is OllamaV2SourceBundleDescriptorD2:
+        if (
+            event_type == "source.registered"
+            and type(artifact) is OllamaV2SourceBundleDescriptorD2
+            and (subject_id is None or subject_id == artifact.descriptor_id)
+        ):
             subject_id = artifact.descriptor_id
             subject_stage = event_type
             artifact_id = artifact.descriptor_id
@@ -414,12 +458,35 @@ class CustodyLedgerReferenceEventDocument:
             event_type == "reservation.held"
             and type(artifact) is OllamaV2NativeReservationD2
             and type(binding) is OllamaV2NativeExecutionBindingD2
+            and (subject_id is None or subject_id == binding.binding_id)
         ):
             subject_id = binding.binding_id
             subject_stage = event_type
             artifact_id = artifact.reservation_id
             artifact_type = _RESERVATION_FORMAT
             binding_hash = binding.content_hash
+        elif (
+            event_type == "c2.referenced"
+            and type(artifact) is OllamaV2C2AuthorizationReferenceD2
+            and type(subject_id) is str
+            and binding is None
+        ):
+            subject_stage = event_type
+            artifact_id = artifact.reference_id
+            artifact_type = _C2_FORMAT
+            binding_hash = None
+            binding = None
+        elif (
+            event_type == "dispatch.committed"
+            and type(artifact) is OllamaV2DispatchEnvelopeD2
+            and type(subject_id) is str
+            and binding is None
+        ):
+            subject_stage = event_type
+            artifact_id = artifact.dispatch_id
+            artifact_type = _DISPATCH_FORMAT
+            binding_hash = None
+            binding = None
         else:
             raise CustodyLedgerReferenceInvalidStateError(
                 "reference_event_document_invalid"
@@ -453,6 +520,45 @@ class CustodyLedgerReferenceEventDocument:
             object.__setattr__(provisional, name, value)
         event_hash = provisional._computed_event_hash()
         return cls(event_hash=event_hash, **values)
+
+
+def _same_reference_event_identity(
+    expected: CustodyLedgerReferenceEventDocument,
+    observed: CustodyLedgerReferenceEventDocument,
+) -> bool:
+    """Compare canonical event identity while ignoring its journal position."""
+
+    expected_binding = expected.binding
+    observed_binding = observed.binding
+    return (
+        expected.event_id == observed.event_id
+        and _event_identity_payload(
+            event_type=expected.event_type,
+            subject_id=expected.subject_id,
+            subject_stage=expected.subject_stage,
+            artifact_id=expected.artifact_id,
+            artifact_type=expected.artifact_type,
+            artifact_hash=expected.artifact_hash,
+            binding_hash=expected.binding_hash,
+        )
+        == _event_identity_payload(
+            event_type=observed.event_type,
+            subject_id=observed.subject_id,
+            subject_stage=observed.subject_stage,
+            artifact_id=observed.artifact_id,
+            artifact_type=observed.artifact_type,
+            artifact_hash=observed.artifact_hash,
+            binding_hash=observed.binding_hash,
+        )
+        and expected.artifact.to_bytes() == observed.artifact.to_bytes()
+        and (
+            expected_binding is None
+            and observed_binding is None
+            or expected_binding is not None
+            and observed_binding is not None
+            and expected_binding.to_bytes() == observed_binding.to_bytes()
+        )
+    )
 
 
 def _reject_reference_json_number(_: str) -> object:
@@ -555,35 +661,67 @@ def parse_custody_ledger_reference_event(
 
 @dataclass(frozen=True, slots=True)
 class CustodyLedgerReferenceSnapshot:
-    """Exact replayed active projection of the b2 reference store."""
+    """Exact replayed active projection of the event-only reference store."""
 
     head: CustodyLedgerReferenceHead
     active_binding: OllamaV2NativeExecutionBindingD2 | None
     active_reservation: OllamaV2NativeReservationD2 | None
+    active_c2_reference: OllamaV2C2AuthorizationReferenceD2 | None
+    active_dispatch_intent: OllamaV2DispatchEnvelopeD2 | None
 
     def __post_init__(self) -> None:
         if type(self.head) is not CustodyLedgerReferenceHead:
             raise CustodyLedgerReferenceInvalidStateError("reference_snapshot_invalid")
         if self.head.active_state == "idle":
-            valid = self.active_binding is None and self.active_reservation is None
-        elif self.head.active_state == "reserved":
-            valid = (
-                type(self.active_binding) is OllamaV2NativeExecutionBindingD2
-                and type(self.active_reservation) is OllamaV2NativeReservationD2
-                and self.active_reservation.execution_binding_hash
-                == self.active_binding.content_hash
-                and self.head.active_reservation_id
-                == self.active_reservation.reservation_id
-                and self.head.active_fence_hash == self.active_reservation.fence_hash
-                and self.head.fence_generation
-                == self.active_reservation.fence_generation
-                and self.head.record_sequence
-                == self.active_reservation.previous_fence_sequence
-                and self.head.record_head_hash
-                == self.active_reservation.previous_fence_hash
+            valid = all(
+                value is None
+                for value in (
+                    self.active_binding,
+                    self.active_reservation,
+                    self.active_c2_reference,
+                    self.active_dispatch_intent,
+                )
             )
         else:
-            valid = False
+            binding = self.active_binding
+            reservation = self.active_reservation
+            valid = (
+                type(binding) is OllamaV2NativeExecutionBindingD2
+                and type(reservation) is OllamaV2NativeReservationD2
+                and reservation.execution_binding_hash == binding.content_hash
+                and self.head.active_reservation_id == reservation.reservation_id
+                and self.head.active_fence_hash == reservation.fence_hash
+                and self.head.fence_generation == reservation.fence_generation
+                and self.head.record_sequence == reservation.previous_fence_sequence
+                and self.head.record_head_hash == reservation.previous_fence_hash
+            )
+            if self.head.active_state == "reserved":
+                valid = valid and (
+                    self.active_c2_reference is None
+                    and self.active_dispatch_intent is None
+                )
+            elif self.head.active_state == "c2_referenced":
+                c2 = self.active_c2_reference
+                valid = valid and (
+                    type(c2) is OllamaV2C2AuthorizationReferenceD2
+                    and c2.execution_binding_hash == binding.content_hash
+                    and c2.reservation_hash == reservation.content_hash
+                    and self.active_dispatch_intent is None
+                )
+            elif self.head.active_state == "dispatch_committed":
+                c2 = self.active_c2_reference
+                dispatch = self.active_dispatch_intent
+                valid = valid and (
+                    type(c2) is OllamaV2C2AuthorizationReferenceD2
+                    and type(dispatch) is OllamaV2DispatchEnvelopeD2
+                    and c2.execution_binding_hash == binding.content_hash
+                    and c2.reservation_hash == reservation.content_hash
+                    and dispatch.execution_binding.to_bytes() == binding.to_bytes()
+                    and dispatch.reservation.to_bytes() == reservation.to_bytes()
+                    and dispatch.c2_authorization.to_bytes() == c2.to_bytes()
+                )
+            else:
+                valid = False
         if not valid:
             raise CustodyLedgerReferenceInvalidStateError("reference_snapshot_invalid")
 
@@ -609,8 +747,19 @@ class CustodyLedgerReferenceTransition:
 class _ReferenceReplay:
     snapshot: CustodyLedgerReferenceSnapshot
     sources: dict[str, tuple[OllamaV2SourceBundleDescriptorD2, CustodyLedgerReferenceEventDocument]]
+    c2_references: dict[
+        str,
+        tuple[OllamaV2C2AuthorizationReferenceD2, CustodyLedgerReferenceEventDocument],
+    ]
+    c2_consumptions: dict[str, str]
+    dispatch_intents: dict[
+        str,
+        tuple[OllamaV2DispatchEnvelopeD2, CustodyLedgerReferenceEventDocument],
+    ]
     events: dict[str, CustodyLedgerReferenceEventDocument]
-    active_event: CustodyLedgerReferenceEventDocument | None
+    reservation_event: CustodyLedgerReferenceEventDocument | None
+    c2_event: CustodyLedgerReferenceEventDocument | None
+    dispatch_event: CustodyLedgerReferenceEventDocument | None
 
 
 _STATUS = CustodyLedgerReferenceStatus(
@@ -833,7 +982,7 @@ _INDEX_CENSUS = {
 
 
 class OllamaV2CustodyLedgerReferenceStore:
-    """Identity-bound b1 foundation for one injected local reference ledger."""
+    """Identity-bound, event-only injected local reference ledger."""
 
     def __init__(
         self,
@@ -982,6 +1131,26 @@ class OllamaV2CustodyLedgerReferenceStore:
             else None
         )
 
+    def load_c2_reference(
+        self,
+        reference_id: str,
+    ) -> OllamaV2C2AuthorizationReferenceD2 | None:
+        self._assert_boundary()
+        self._assert_identifier(reference_id)
+        reference = self._verify_store().c2_references.get(reference_id)
+        self._assert_boundary()
+        return None if reference is None else reference[0]
+
+    def load_dispatch_intent(
+        self,
+        dispatch_id: str,
+    ) -> OllamaV2DispatchEnvelopeD2 | None:
+        self._assert_boundary()
+        self._assert_identifier(dispatch_id)
+        dispatch = self._verify_store().dispatch_intents.get(dispatch_id)
+        self._assert_boundary()
+        return None if dispatch is None else dispatch[0]
+
     def register_source(
         self,
         source: OllamaV2SourceBundleDescriptorD2,
@@ -1041,11 +1210,11 @@ class OllamaV2CustodyLedgerReferenceStore:
                     raise CustodyLedgerReferenceConflictError(
                         "reference_active_reservation_conflict"
                     )
-                assert state.active_event is not None
+                assert state.reservation_event is not None
                 self._rollback()
                 return CustodyLedgerReferenceTransition(
                     snapshot=state.snapshot,
-                    event=state.active_event,
+                    event=state.reservation_event,
                     committed_now=False,
                 )
             self._verify_registered_source(binding, state)
@@ -1078,6 +1247,153 @@ class OllamaV2CustodyLedgerReferenceStore:
             raise CustodyLedgerReferenceInvalidStateError(
                 "reference_reservation_invalid"
             ) from exc
+
+    def attach_c2_reference(
+        self,
+        reference: OllamaV2C2AuthorizationReferenceD2,
+    ) -> CustodyLedgerReferenceTransition:
+        """Persist one opaque Studio-required C2 reference without verifying Studio."""
+
+        self._assert_boundary()
+        if type(reference) is not OllamaV2C2AuthorizationReferenceD2:
+            raise CustodyLedgerReferenceInvalidStateError("reference_c2_invalid")
+        self._begin_immediate()
+        try:
+            state = self._verify_store()
+            self._require_mutable(state.snapshot)
+            active = state.snapshot.active_c2_reference
+            if active is not None:
+                if active.to_bytes() != reference.to_bytes():
+                    raise CustodyLedgerReferenceConflictError(
+                        "reference_c2_active_mismatch"
+                    )
+                assert state.c2_event is not None
+                self._rollback()
+                return CustodyLedgerReferenceTransition(
+                    snapshot=state.snapshot,
+                    event=state.c2_event,
+                    committed_now=False,
+                )
+            snapshot = state.snapshot
+            if snapshot.head.active_state != "reserved":
+                raise CustodyLedgerReferenceConflictError(
+                    "reference_c2_state_conflict"
+                )
+            binding = snapshot.active_binding
+            reservation = snapshot.active_reservation
+            assert type(binding) is OllamaV2NativeExecutionBindingD2
+            assert type(reservation) is OllamaV2NativeReservationD2
+            if (
+                reference.execution_binding_hash != binding.content_hash
+                or reference.reservation_hash != reservation.content_hash
+            ):
+                raise CustodyLedgerReferenceConflictError(
+                    "reference_c2_active_mismatch"
+                )
+            existing_reference = state.c2_references.get(reference.reference_id)
+            existing_consumption = state.c2_consumptions.get(reference.consumption_id)
+            if existing_reference is not None or existing_consumption is not None:
+                raise CustodyLedgerReferenceDuplicateMismatchError(
+                    "reference_duplicate_mismatch"
+                )
+            event = CustodyLedgerReferenceEventDocument.create(
+                sequence=snapshot.head.event_sequence + 1,
+                event_type="c2.referenced",
+                artifact=reference,
+                binding=None,
+                previous_event_hash=snapshot.head.event_head_hash,
+                subject_id=reservation.reservation_id,
+            )
+            self._assert_no_unique_collision(event)
+            self._insert_event(event)
+            self._update_active_state_for_event(
+                event,
+                expected_state="reserved",
+                next_state="c2_referenced",
+            )
+            after = self._verify_store().snapshot
+            return self._finish_event_commit(event, after)
+        except CustodyLedgerReferenceStoreError:
+            self._rollback()
+            raise
+        except sqlite3.Error as exc:
+            self._rollback()
+            _raise_sqlite_failure(exc, "reference_c2_attachment_failed")
+
+    def commit_dispatch_intent(
+        self,
+        dispatch: OllamaV2DispatchEnvelopeD2,
+    ) -> CustodyLedgerReferenceTransition:
+        """Commit dispatch intent only; this does not execute an external effect."""
+
+        self._assert_boundary()
+        if type(dispatch) is not OllamaV2DispatchEnvelopeD2:
+            raise CustodyLedgerReferenceInvalidStateError(
+                "reference_dispatch_invalid"
+            )
+        self._begin_immediate()
+        try:
+            state = self._verify_store()
+            self._require_mutable(state.snapshot)
+            active = state.snapshot.active_dispatch_intent
+            if active is not None:
+                if active.to_bytes() != dispatch.to_bytes():
+                    raise CustodyLedgerReferenceConflictError(
+                        "reference_dispatch_active_mismatch"
+                    )
+                assert state.dispatch_event is not None
+                self._rollback()
+                return CustodyLedgerReferenceTransition(
+                    snapshot=state.snapshot,
+                    event=state.dispatch_event,
+                    committed_now=False,
+                )
+            snapshot = state.snapshot
+            if snapshot.head.active_state != "c2_referenced":
+                raise CustodyLedgerReferenceConflictError(
+                    "reference_dispatch_state_conflict"
+                )
+            binding = snapshot.active_binding
+            reservation = snapshot.active_reservation
+            reference = snapshot.active_c2_reference
+            assert type(binding) is OllamaV2NativeExecutionBindingD2
+            assert type(reservation) is OllamaV2NativeReservationD2
+            assert type(reference) is OllamaV2C2AuthorizationReferenceD2
+            if (
+                dispatch.execution_binding.to_bytes() != binding.to_bytes()
+                or dispatch.reservation.to_bytes() != reservation.to_bytes()
+                or dispatch.c2_authorization.to_bytes() != reference.to_bytes()
+            ):
+                raise CustodyLedgerReferenceConflictError(
+                    "reference_dispatch_active_mismatch"
+                )
+            if dispatch.dispatch_id in state.dispatch_intents:
+                raise CustodyLedgerReferenceDuplicateMismatchError(
+                    "reference_duplicate_mismatch"
+                )
+            event = CustodyLedgerReferenceEventDocument.create(
+                sequence=snapshot.head.event_sequence + 1,
+                event_type="dispatch.committed",
+                artifact=dispatch,
+                binding=None,
+                previous_event_hash=snapshot.head.event_head_hash,
+                subject_id=reference.reference_id,
+            )
+            self._assert_no_unique_collision(event)
+            self._insert_event(event)
+            self._update_active_state_for_event(
+                event,
+                expected_state="c2_referenced",
+                next_state="dispatch_committed",
+            )
+            after = self._verify_store().snapshot
+            return self._finish_event_commit(event, after)
+        except CustodyLedgerReferenceStoreError:
+            self._rollback()
+            raise
+        except sqlite3.Error as exc:
+            self._rollback()
+            _raise_sqlite_failure(exc, "reference_dispatch_commit_failed")
 
     @staticmethod
     def _assert_identifier(value: object) -> None:
@@ -1237,6 +1553,35 @@ class OllamaV2CustodyLedgerReferenceStore:
         if cursor.rowcount != 1:
             raise CustodyLedgerReferenceConflictError("reference_head_conflict")
 
+    def _update_active_state_for_event(
+        self,
+        event: CustodyLedgerReferenceEventDocument,
+        *,
+        expected_state: str,
+        next_state: str,
+    ) -> None:
+        connection = self._connection
+        assert connection is not None
+        cursor = connection.execute(
+            """UPDATE ollama_v2_custody_head
+            SET active_state = ?, event_sequence = ?, event_head_hash = ?
+            WHERE scope = ? AND active_state = ?
+              AND active_reservation_id IS NOT NULL
+              AND active_fence_hash IS NOT NULL
+              AND event_sequence = ? AND event_head_hash = ? AND poisoned = 0""",
+            (
+                next_state,
+                event.sequence,
+                event.event_hash,
+                CUSTODY_SCOPE,
+                expected_state,
+                event.sequence - 1,
+                event.previous_event_hash,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise CustodyLedgerReferenceConflictError("reference_head_conflict")
+
     def _finish_event_commit(
         self,
         event: CustodyLedgerReferenceEventDocument,
@@ -1271,7 +1616,7 @@ class OllamaV2CustodyLedgerReferenceStore:
                         raise CustodyLedgerReferenceCommitNotAppliedError(
                             "reference_commit_not_applied"
                         ) from exc
-                    if observed != event:
+                    if not _same_reference_event_identity(event, observed):
                         raise CustodyLedgerReferenceRecoveryRequiredError(
                             "reference_commit_recovery_required"
                         ) from exc
@@ -1993,11 +2338,31 @@ class OllamaV2CustodyLedgerReferenceStore:
         record_head_hash = _ZERO_HASH
         active_binding: OllamaV2NativeExecutionBindingD2 | None = None
         active_reservation: OllamaV2NativeReservationD2 | None = None
-        active_event: CustodyLedgerReferenceEventDocument | None = None
+        active_c2_reference: OllamaV2C2AuthorizationReferenceD2 | None = None
+        active_dispatch_intent: OllamaV2DispatchEnvelopeD2 | None = None
+        active_state = "idle"
+        reservation_event: CustodyLedgerReferenceEventDocument | None = None
+        c2_event: CustodyLedgerReferenceEventDocument | None = None
+        dispatch_event: CustodyLedgerReferenceEventDocument | None = None
         sources: dict[
             str,
             tuple[
                 OllamaV2SourceBundleDescriptorD2,
+                CustodyLedgerReferenceEventDocument,
+            ],
+        ] = {}
+        c2_references: dict[
+            str,
+            tuple[
+                OllamaV2C2AuthorizationReferenceD2,
+                CustodyLedgerReferenceEventDocument,
+            ],
+        ] = {}
+        c2_consumptions: dict[str, str] = {}
+        dispatch_intents: dict[
+            str,
+            tuple[
+                OllamaV2DispatchEnvelopeD2,
                 CustodyLedgerReferenceEventDocument,
             ],
         ] = {}
@@ -2085,7 +2450,7 @@ class OllamaV2CustodyLedgerReferenceStore:
                 binding_value = event.binding
                 assert type(reservation) is OllamaV2NativeReservationD2
                 assert type(binding_value) is OllamaV2NativeExecutionBindingD2
-                if active_reservation is not None:
+                if active_state != "idle" or active_reservation is not None:
                     raise CustodyLedgerReferenceCorruptionError(
                         "reference_active_reservation_invalid"
                     )
@@ -2115,14 +2480,60 @@ class OllamaV2CustodyLedgerReferenceStore:
                 fence_generation = reservation.fence_generation
                 active_binding = binding_value
                 active_reservation = reservation
-                active_event = event
+                active_state = "reserved"
+                reservation_event = event
+            elif event.event_type == "c2.referenced":
+                reference = event.artifact
+                assert type(reference) is OllamaV2C2AuthorizationReferenceD2
+                if (
+                    active_state != "reserved"
+                    or active_binding is None
+                    or active_reservation is None
+                    or event.subject_id != active_reservation.reservation_id
+                    or reference.execution_binding_hash
+                    != active_binding.content_hash
+                    or reference.reservation_hash != active_reservation.content_hash
+                    or reference.reference_id in c2_references
+                    or reference.consumption_id in c2_consumptions
+                ):
+                    raise CustodyLedgerReferenceCorruptionError(
+                        "reference_c2_graph_invalid"
+                    )
+                c2_references[reference.reference_id] = (reference, event)
+                c2_consumptions[reference.consumption_id] = reference.reference_id
+                active_c2_reference = reference
+                active_state = "c2_referenced"
+                c2_event = event
+            elif event.event_type == "dispatch.committed":
+                dispatch = event.artifact
+                assert type(dispatch) is OllamaV2DispatchEnvelopeD2
+                if (
+                    active_state != "c2_referenced"
+                    or active_binding is None
+                    or active_reservation is None
+                    or active_c2_reference is None
+                    or event.subject_id != active_c2_reference.reference_id
+                    or dispatch.execution_binding.to_bytes()
+                    != active_binding.to_bytes()
+                    or dispatch.reservation.to_bytes()
+                    != active_reservation.to_bytes()
+                    or dispatch.c2_authorization.to_bytes()
+                    != active_c2_reference.to_bytes()
+                    or dispatch.dispatch_id in dispatch_intents
+                ):
+                    raise CustodyLedgerReferenceCorruptionError(
+                        "reference_dispatch_graph_invalid"
+                    )
+                dispatch_intents[dispatch.dispatch_id] = (dispatch, event)
+                active_dispatch_intent = dispatch
+                active_state = "dispatch_committed"
+                dispatch_event = event
             else:
                 raise CustodyLedgerReferenceCorruptionError(
                     "reference_event_type_unsupported"
                 )
             events[event.event_id] = event
             expected_event_hash = event.event_hash
-        active = active_reservation is not None
         replayed_head = CustodyLedgerReferenceHead(
             scope=CUSTODY_SCOPE,
             fence_generation=fence_generation,
@@ -2134,7 +2545,7 @@ class OllamaV2CustodyLedgerReferenceStore:
             active_fence_hash=(
                 None if active_reservation is None else active_reservation.fence_hash
             ),
-            active_state="reserved" if active else "idle",
+            active_state=active_state,
             event_sequence=expected_sequence,
             event_head_hash=expected_event_hash,
             poisoned=persisted_head.poisoned,
@@ -2147,12 +2558,19 @@ class OllamaV2CustodyLedgerReferenceStore:
             head=replayed_head,
             active_binding=active_binding,
             active_reservation=active_reservation,
+            active_c2_reference=active_c2_reference,
+            active_dispatch_intent=active_dispatch_intent,
         )
         return _ReferenceReplay(
             snapshot=snapshot,
             sources=sources,
+            c2_references=c2_references,
+            c2_consumptions=c2_consumptions,
+            dispatch_intents=dispatch_intents,
             events=events,
-            active_event=active_event,
+            reservation_event=reservation_event,
+            c2_event=c2_event,
+            dispatch_event=dispatch_event,
         )
 
     def _verify_schema_objects(self) -> None:

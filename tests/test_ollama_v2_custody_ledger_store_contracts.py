@@ -63,8 +63,15 @@ class CustodyLedgerReferenceStoreSurfaceTests(unittest.TestCase):
         expected_methods = {
             "close",
             "head",
+            "load_binding",
+            "load_event",
+            "load_reservation",
+            "load_source",
             "native_status",
+            "register_source",
+            "reserve",
             "schema_census",
+            "snapshot",
         }
         actual_methods = {
             name
@@ -104,8 +111,8 @@ class CustodyLedgerReferenceStoreSurfaceTests(unittest.TestCase):
                     PROVIDER_EXECUTION_ENABLED,
                 )
                 self.assertFalse(status.rollback_resistant)
-                self.assertFalse(hasattr(store, "register_source"))
-                self.assertFalse(hasattr(store, "reserve"))
+                self.assertTrue(hasattr(store, "register_source"))
+                self.assertTrue(hasattr(store, "reserve"))
                 self.assertFalse(hasattr(store, "dispatch"))
                 self.assertFalse(hasattr(store, "redispatch"))
                 self.assertFalse(
@@ -146,14 +153,22 @@ class CustodyLedgerReferenceStoreSurfaceTests(unittest.TestCase):
                 "SCHEMA_FINGERPRINT",
                 "SCHEMA_VERSION",
                 "CustodyLedgerReferenceClosedError",
+                "CustodyLedgerReferenceCommitNotAppliedError",
+                "CustodyLedgerReferenceConflictError",
                 "CustodyLedgerReferenceCorruptionError",
+                "CustodyLedgerReferenceDuplicateMismatchError",
+                "CustodyLedgerReferenceEventDocument",
                 "CustodyLedgerReferenceHead",
                 "CustodyLedgerReferenceInvalidStateError",
+                "CustodyLedgerReferenceRecoveryRequiredError",
                 "CustodyLedgerReferenceSchemaObject",
+                "CustodyLedgerReferenceSnapshot",
                 "CustodyLedgerReferenceStatus",
                 "CustodyLedgerReferenceStoreError",
+                "CustodyLedgerReferenceTransition",
                 "CustodyLedgerReferenceUnsupportedError",
                 "OllamaV2CustodyLedgerReferenceStore",
+                "parse_custody_ledger_reference_event",
             ),
         )
         import worldforge.provider_evidence as provider_evidence
@@ -166,9 +181,7 @@ class CustodyLedgerReferenceStoreSurfaceTests(unittest.TestCase):
             "dispatch",
             "execute",
             "redispatch",
-            "register_source",
             "release",
-            "reserve",
             "retry",
             "tombstone",
         }
@@ -228,7 +241,12 @@ class CustodyLedgerReferenceStoreSurfaceTests(unittest.TestCase):
             store = OllamaV2CustodyLedgerReferenceStore(root, mode="create")
             store.close()
             store.close()
-            for call in (store.native_status, store.schema_census, store.head):
+            for call in (
+                store.native_status,
+                store.schema_census,
+                store.head,
+                store.snapshot,
+            ):
                 with self.assertRaisesRegex(
                     CustodyLedgerReferenceClosedError,
                     "reference_store_closed",

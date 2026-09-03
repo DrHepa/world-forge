@@ -9,6 +9,7 @@ of root-global custody, native execution, or production eligibility.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import sqlite3
@@ -38,7 +39,12 @@ from .ollama_v2_native_execution_contracts import (
     PROVIDER_EXECUTION_ENABLED,
     ROOT_GLOBAL_ENFORCED,
     SOURCE_CUSTODY_VERIFIED,
+    OllamaV2NativeExecutionBindingD2,
+    OllamaV2NativeExecutionContractError,
+    OllamaV2NativeReservationD2,
+    OllamaV2SourceBundleDescriptorD2,
     canonical_ollama_v2_native_execution_bytes,
+    parse_ollama_v2_native_execution_contract,
 )
 
 SCHEMA_VERSION = 1
@@ -63,6 +69,12 @@ _ACTIVE_STATES = frozenset(
         "tombstoned",
     }
 )
+_EVENT_FORMAT = "world-forge.private.ollama_v2_custody_reference_event"
+_EVENT_ID_DOMAIN = b"world-forge.private.ollama_v2_custody_reference_event_id.v1\0"
+_EVENT_HASH_DOMAIN = b"world-forge.private.ollama_v2_custody_reference_event_hash.v1\0"
+_SOURCE_FORMAT = "world-forge.private.ollama_v2_source_bundle_descriptor_d2"
+_RESERVATION_FORMAT = "world-forge.private.ollama_v2_native_reservation_d2"
+_MAX_EVENT_BYTES = 4 * 1024 * 1024
 
 
 class CustodyLedgerReferenceStoreError(RuntimeError):
@@ -87,6 +99,22 @@ class CustodyLedgerReferenceUnsupportedError(CustodyLedgerReferenceStoreError):
 
 class CustodyLedgerReferenceClosedError(CustodyLedgerReferenceStoreError):
     """A public operation was attempted after the store was closed."""
+
+
+class CustodyLedgerReferenceConflictError(CustodyLedgerReferenceStoreError):
+    """The supplied transition conflicts with the exact durable state."""
+
+
+class CustodyLedgerReferenceDuplicateMismatchError(CustodyLedgerReferenceStoreError):
+    """A unique identity was reused by a different canonical transition."""
+
+
+class CustodyLedgerReferenceCommitNotAppliedError(CustodyLedgerReferenceStoreError):
+    """A commit exception reconciled to a valid state without the target event."""
+
+
+class CustodyLedgerReferenceRecoveryRequiredError(CustodyLedgerReferenceStoreError):
+    """A commit exception could not be reconciled to one valid event history."""
 
 
 def _raise_sqlite_failure(exc: sqlite3.Error, corruption_reason: str) -> None:
@@ -223,6 +251,366 @@ class CustodyLedgerReferenceSchemaObject:
             raise CustodyLedgerReferenceInvalidStateError(
                 "reference_schema_object_invalid"
             )
+
+
+def _event_identity_payload(
+    *,
+    event_type: str,
+    subject_id: str,
+    subject_stage: str,
+    artifact_id: str,
+    artifact_type: str,
+    artifact_hash: str,
+    binding_hash: str | None,
+) -> dict[str, object]:
+    return {
+        "event_type": event_type,
+        "subject_id": subject_id,
+        "subject_stage": subject_stage,
+        "artifact_id": artifact_id,
+        "artifact_type": artifact_type,
+        "artifact_hash": artifact_hash,
+        "binding_hash": binding_hash,
+    }
+
+
+def _reference_event_id(identity: dict[str, object]) -> str:
+    digest = hashlib.sha256(
+        _EVENT_ID_DOMAIN + canonical_ollama_v2_native_execution_bytes(identity)
+    ).hexdigest()
+    return "event-" + digest[:32]
+
+
+@dataclass(frozen=True, slots=True)
+class CustodyLedgerReferenceEventDocument:
+    """One exact store-owned event in the local reference hash chain."""
+
+    sequence: int
+    event_id: str
+    event_type: str
+    subject_id: str
+    subject_stage: str
+    artifact_id: str
+    artifact_type: str
+    artifact_hash: str
+    artifact: OllamaV2SourceBundleDescriptorD2 | OllamaV2NativeReservationD2
+    binding_hash: str | None
+    binding: OllamaV2NativeExecutionBindingD2 | None
+    previous_event_hash: str
+    event_hash: str
+
+    def __post_init__(self) -> None:
+        scalar_ids = (self.event_id, self.subject_id, self.artifact_id)
+        valid = (
+            type(self.sequence) is int
+            and self.sequence >= 1
+            and all(type(value) is str and _ID_RE.fullmatch(value) for value in scalar_ids)
+            and type(self.event_type) is str
+            and self.event_type in {"source.registered", "reservation.held"}
+            and type(self.subject_stage) is str
+            and type(self.artifact_type) is str
+            and type(self.artifact_hash) is str
+            and _HASH_RE.fullmatch(self.artifact_hash) is not None
+            and type(self.previous_event_hash) is str
+            and _HASH_RE.fullmatch(self.previous_event_hash) is not None
+            and type(self.event_hash) is str
+            and _HASH_RE.fullmatch(self.event_hash) is not None
+        )
+        if not valid:
+            raise CustodyLedgerReferenceInvalidStateError(
+                "reference_event_document_invalid"
+            )
+        if self.event_type == "source.registered":
+            exact = (
+                type(self.artifact) is OllamaV2SourceBundleDescriptorD2
+                and self.subject_id == self.artifact.descriptor_id
+                and self.subject_stage == "source.registered"
+                and self.artifact_id == self.artifact.descriptor_id
+                and self.artifact_type == _SOURCE_FORMAT
+                and self.binding_hash is None
+                and self.binding is None
+            )
+        else:
+            exact = (
+                type(self.artifact) is OllamaV2NativeReservationD2
+                and type(self.binding) is OllamaV2NativeExecutionBindingD2
+                and type(self.binding_hash) is str
+                and _HASH_RE.fullmatch(self.binding_hash) is not None
+                and self.subject_id == self.binding.binding_id
+                and self.subject_stage == "reservation.held"
+                and self.artifact_id == self.artifact.reservation_id
+                and self.artifact_type == _RESERVATION_FORMAT
+                and self.binding_hash == self.binding.content_hash
+                and self.artifact.execution_binding_hash == self.binding.content_hash
+            )
+        identity = _event_identity_payload(
+            event_type=self.event_type,
+            subject_id=self.subject_id,
+            subject_stage=self.subject_stage,
+            artifact_id=self.artifact_id,
+            artifact_type=self.artifact_type,
+            artifact_hash=self.artifact_hash,
+            binding_hash=self.binding_hash,
+        )
+        if (
+            not exact
+            or self.artifact_hash != self.artifact.content_hash
+            or self.event_id != _reference_event_id(identity)
+            or self.event_hash != self._computed_event_hash()
+        ):
+            raise CustodyLedgerReferenceInvalidStateError(
+                "reference_event_document_invalid"
+            )
+
+    def _payload(self) -> dict[str, object]:
+        return {
+            "format": _EVENT_FORMAT,
+            "format_version": 1,
+            "scope": CUSTODY_SCOPE,
+            "sequence": self.sequence,
+            "event_id": self.event_id,
+            "event_type": self.event_type,
+            "subject_id": self.subject_id,
+            "subject_stage": self.subject_stage,
+            "artifact_id": self.artifact_id,
+            "artifact_type": self.artifact_type,
+            "artifact_hash": self.artifact_hash,
+            "artifact": self.artifact.to_document(),
+            "binding_hash": self.binding_hash,
+            "binding": None if self.binding is None else self.binding.to_document(),
+            "previous_event_hash": self.previous_event_hash,
+        }
+
+    def _computed_event_hash(self) -> str:
+        return hashlib.sha256(
+            _EVENT_HASH_DOMAIN
+            + bytes.fromhex(self.previous_event_hash)
+            + canonical_ollama_v2_native_execution_bytes(self._payload())
+        ).hexdigest()
+
+    def to_document(self) -> dict[str, object]:
+        return {**self._payload(), "event_hash": self.event_hash}
+
+    def to_bytes(self) -> bytes:
+        return canonical_ollama_v2_native_execution_bytes(self.to_document())
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        sequence: int,
+        event_type: str,
+        artifact: OllamaV2SourceBundleDescriptorD2 | OllamaV2NativeReservationD2,
+        binding: OllamaV2NativeExecutionBindingD2 | None,
+        previous_event_hash: str,
+    ) -> CustodyLedgerReferenceEventDocument:
+        if event_type == "source.registered" and type(artifact) is OllamaV2SourceBundleDescriptorD2:
+            subject_id = artifact.descriptor_id
+            subject_stage = event_type
+            artifact_id = artifact.descriptor_id
+            artifact_type = _SOURCE_FORMAT
+            binding_hash = None
+        elif (
+            event_type == "reservation.held"
+            and type(artifact) is OllamaV2NativeReservationD2
+            and type(binding) is OllamaV2NativeExecutionBindingD2
+        ):
+            subject_id = binding.binding_id
+            subject_stage = event_type
+            artifact_id = artifact.reservation_id
+            artifact_type = _RESERVATION_FORMAT
+            binding_hash = binding.content_hash
+        else:
+            raise CustodyLedgerReferenceInvalidStateError(
+                "reference_event_document_invalid"
+            )
+        identity = _event_identity_payload(
+            event_type=event_type,
+            subject_id=subject_id,
+            subject_stage=subject_stage,
+            artifact_id=artifact_id,
+            artifact_type=artifact_type,
+            artifact_hash=artifact.content_hash,
+            binding_hash=binding_hash,
+        )
+        event_id = _reference_event_id(identity)
+        provisional = object.__new__(cls)
+        values = {
+            "sequence": sequence,
+            "event_id": event_id,
+            "event_type": event_type,
+            "subject_id": subject_id,
+            "subject_stage": subject_stage,
+            "artifact_id": artifact_id,
+            "artifact_type": artifact_type,
+            "artifact_hash": artifact.content_hash,
+            "artifact": artifact,
+            "binding_hash": binding_hash,
+            "binding": binding,
+            "previous_event_hash": previous_event_hash,
+        }
+        for name, value in values.items():
+            object.__setattr__(provisional, name, value)
+        event_hash = provisional._computed_event_hash()
+        return cls(event_hash=event_hash, **values)
+
+
+def _reject_reference_json_number(_: str) -> object:
+    raise CustodyLedgerReferenceInvalidStateError("reference_event_json_noncanonical")
+
+
+def _reference_object_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise CustodyLedgerReferenceInvalidStateError(
+                "reference_event_json_duplicate_key"
+            )
+        result[key] = value
+    return result
+
+
+def parse_custody_ledger_reference_event(
+    value: object,
+) -> CustodyLedgerReferenceEventDocument:
+    """Parse one exact canonical store event document."""
+
+    if type(value) is not bytes or not value or len(value) > _MAX_EVENT_BYTES:
+        raise CustodyLedgerReferenceInvalidStateError("reference_event_json_invalid")
+    try:
+        document = json.loads(
+            value.decode("utf-8"),
+            object_pairs_hook=_reference_object_pairs,
+            parse_float=_reject_reference_json_number,
+            parse_constant=_reject_reference_json_number,
+        )
+    except CustodyLedgerReferenceStoreError:
+        raise
+    except (UnicodeError, ValueError, TypeError, RecursionError) as exc:
+        raise CustodyLedgerReferenceInvalidStateError(
+            "reference_event_json_invalid"
+        ) from exc
+    if (
+        type(document) is not dict
+        or canonical_ollama_v2_native_execution_bytes(document) != value
+        or set(document)
+        != {
+            "format",
+            "format_version",
+            "scope",
+            "sequence",
+            "event_id",
+            "event_type",
+            "subject_id",
+            "subject_stage",
+            "artifact_id",
+            "artifact_type",
+            "artifact_hash",
+            "artifact",
+            "binding_hash",
+            "binding",
+            "previous_event_hash",
+            "event_hash",
+        }
+        or document["format"] != _EVENT_FORMAT
+        or type(document["format_version"]) is not int
+        or document["format_version"] != 1
+        or document["scope"] != CUSTODY_SCOPE
+    ):
+        raise CustodyLedgerReferenceInvalidStateError(
+            "reference_event_document_invalid"
+        )
+    try:
+        artifact = parse_ollama_v2_native_execution_contract(
+            canonical_ollama_v2_native_execution_bytes(document["artifact"])
+        )
+        binding_document = document["binding"]
+        binding = (
+            None
+            if binding_document is None
+            else parse_ollama_v2_native_execution_contract(
+                canonical_ollama_v2_native_execution_bytes(binding_document)
+            )
+        )
+        return CustodyLedgerReferenceEventDocument(
+            sequence=document["sequence"],
+            event_id=document["event_id"],
+            event_type=document["event_type"],
+            subject_id=document["subject_id"],
+            subject_stage=document["subject_stage"],
+            artifact_id=document["artifact_id"],
+            artifact_type=document["artifact_type"],
+            artifact_hash=document["artifact_hash"],
+            artifact=artifact,
+            binding_hash=document["binding_hash"],
+            binding=binding,
+            previous_event_hash=document["previous_event_hash"],
+            event_hash=document["event_hash"],
+        )
+    except (OllamaV2NativeExecutionContractError, TypeError) as exc:
+        raise CustodyLedgerReferenceInvalidStateError(
+            "reference_event_document_invalid"
+        ) from exc
+
+
+@dataclass(frozen=True, slots=True)
+class CustodyLedgerReferenceSnapshot:
+    """Exact replayed active projection of the b2 reference store."""
+
+    head: CustodyLedgerReferenceHead
+    active_binding: OllamaV2NativeExecutionBindingD2 | None
+    active_reservation: OllamaV2NativeReservationD2 | None
+
+    def __post_init__(self) -> None:
+        if type(self.head) is not CustodyLedgerReferenceHead:
+            raise CustodyLedgerReferenceInvalidStateError("reference_snapshot_invalid")
+        if self.head.active_state == "idle":
+            valid = self.active_binding is None and self.active_reservation is None
+        elif self.head.active_state == "reserved":
+            valid = (
+                type(self.active_binding) is OllamaV2NativeExecutionBindingD2
+                and type(self.active_reservation) is OllamaV2NativeReservationD2
+                and self.active_reservation.execution_binding_hash
+                == self.active_binding.content_hash
+                and self.head.active_reservation_id
+                == self.active_reservation.reservation_id
+                and self.head.active_fence_hash == self.active_reservation.fence_hash
+                and self.head.fence_generation
+                == self.active_reservation.fence_generation
+                and self.head.record_sequence
+                == self.active_reservation.previous_fence_sequence
+                and self.head.record_head_hash
+                == self.active_reservation.previous_fence_hash
+            )
+        else:
+            valid = False
+        if not valid:
+            raise CustodyLedgerReferenceInvalidStateError("reference_snapshot_invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class CustodyLedgerReferenceTransition:
+    """A replayed snapshot and ownership result for one target event."""
+
+    snapshot: CustodyLedgerReferenceSnapshot
+    event: CustodyLedgerReferenceEventDocument
+    committed_now: bool
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.snapshot) is not CustodyLedgerReferenceSnapshot
+            or type(self.event) is not CustodyLedgerReferenceEventDocument
+            or type(self.committed_now) is not bool
+        ):
+            raise CustodyLedgerReferenceInvalidStateError("reference_transition_invalid")
+
+
+@dataclass(slots=True)
+class _ReferenceReplay:
+    snapshot: CustodyLedgerReferenceSnapshot
+    sources: dict[str, tuple[OllamaV2SourceBundleDescriptorD2, CustodyLedgerReferenceEventDocument]]
+    events: dict[str, CustodyLedgerReferenceEventDocument]
+    active_event: CustodyLedgerReferenceEventDocument | None
 
 
 _STATUS = CustodyLedgerReferenceStatus(
@@ -543,9 +931,393 @@ class OllamaV2CustodyLedgerReferenceStore:
 
     def head(self) -> CustodyLedgerReferenceHead:
         self._assert_boundary()
-        head = self._verify_store()
+        head = self._verify_store().snapshot.head
         self._assert_boundary()
         return head
+
+    def snapshot(self) -> CustodyLedgerReferenceSnapshot:
+        self._assert_boundary()
+        snapshot = self._verify_store().snapshot
+        self._assert_boundary()
+        return snapshot
+
+    def load_event(self, event_id: str) -> CustodyLedgerReferenceEventDocument | None:
+        self._assert_boundary()
+        self._assert_identifier(event_id)
+        event = self._verify_store().events.get(event_id)
+        self._assert_boundary()
+        return event
+
+    def load_source(
+        self,
+        descriptor_id: str,
+    ) -> OllamaV2SourceBundleDescriptorD2 | None:
+        self._assert_boundary()
+        self._assert_identifier(descriptor_id)
+        source = self._verify_store().sources.get(descriptor_id)
+        self._assert_boundary()
+        return None if source is None else source[0]
+
+    def load_binding(
+        self,
+        binding_id: str,
+    ) -> OllamaV2NativeExecutionBindingD2 | None:
+        self._assert_boundary()
+        self._assert_identifier(binding_id)
+        binding = self._verify_store().snapshot.active_binding
+        self._assert_boundary()
+        return binding if binding is not None and binding.binding_id == binding_id else None
+
+    def load_reservation(
+        self,
+        reservation_id: str,
+    ) -> OllamaV2NativeReservationD2 | None:
+        self._assert_boundary()
+        self._assert_identifier(reservation_id)
+        reservation = self._verify_store().snapshot.active_reservation
+        self._assert_boundary()
+        return (
+            reservation
+            if reservation is not None and reservation.reservation_id == reservation_id
+            else None
+        )
+
+    def register_source(
+        self,
+        source: OllamaV2SourceBundleDescriptorD2,
+    ) -> CustodyLedgerReferenceTransition:
+        self._assert_boundary()
+        if type(source) is not OllamaV2SourceBundleDescriptorD2:
+            raise CustodyLedgerReferenceInvalidStateError("reference_source_invalid")
+        self._begin_immediate()
+        try:
+            state = self._verify_store()
+            self._require_mutable(state.snapshot)
+            existing = state.sources.get(source.descriptor_id)
+            if existing is not None:
+                if existing[0].to_bytes() != source.to_bytes():
+                    raise CustodyLedgerReferenceDuplicateMismatchError(
+                        "reference_duplicate_mismatch"
+                    )
+                self._rollback()
+                return CustodyLedgerReferenceTransition(
+                    snapshot=state.snapshot,
+                    event=existing[1],
+                    committed_now=False,
+                )
+            event = CustodyLedgerReferenceEventDocument.create(
+                sequence=state.snapshot.head.event_sequence + 1,
+                event_type="source.registered",
+                artifact=source,
+                binding=None,
+                previous_event_hash=state.snapshot.head.event_head_hash,
+            )
+            self._assert_no_unique_collision(event)
+            self._insert_event(event)
+            self._update_head_for_event(event, reservation=None)
+            after = self._verify_store().snapshot
+            return self._finish_event_commit(event, after)
+        except CustodyLedgerReferenceStoreError:
+            self._rollback()
+            raise
+        except sqlite3.Error as exc:
+            self._rollback()
+            _raise_sqlite_failure(exc, "reference_source_registration_failed")
+
+    def reserve(
+        self,
+        binding: OllamaV2NativeExecutionBindingD2,
+    ) -> CustodyLedgerReferenceTransition:
+        self._assert_boundary()
+        if type(binding) is not OllamaV2NativeExecutionBindingD2:
+            raise CustodyLedgerReferenceInvalidStateError("reference_binding_invalid")
+        self._begin_immediate()
+        try:
+            state = self._verify_store()
+            self._require_mutable(state.snapshot)
+            active = state.snapshot.active_binding
+            if active is not None:
+                if active.to_bytes() != binding.to_bytes():
+                    raise CustodyLedgerReferenceConflictError(
+                        "reference_active_reservation_conflict"
+                    )
+                assert state.active_event is not None
+                self._rollback()
+                return CustodyLedgerReferenceTransition(
+                    snapshot=state.snapshot,
+                    event=state.active_event,
+                    committed_now=False,
+                )
+            self._verify_registered_source(binding, state)
+            head = state.snapshot.head
+            reservation = OllamaV2NativeReservationD2.create(
+                binding,
+                fence_generation=head.fence_generation + 1,
+                previous_fence_sequence=head.record_sequence,
+                previous_fence_hash=head.record_head_hash,
+            )
+            event = CustodyLedgerReferenceEventDocument.create(
+                sequence=head.event_sequence + 1,
+                event_type="reservation.held",
+                artifact=reservation,
+                binding=binding,
+                previous_event_hash=head.event_head_hash,
+            )
+            self._assert_no_unique_collision(event)
+            self._insert_event(event)
+            self._update_head_for_event(event, reservation=reservation)
+            after = self._verify_store().snapshot
+            return self._finish_event_commit(event, after)
+        except CustodyLedgerReferenceStoreError:
+            self._rollback()
+            raise
+        except (OllamaV2NativeExecutionContractError, sqlite3.Error) as exc:
+            self._rollback()
+            if isinstance(exc, sqlite3.Error):
+                _raise_sqlite_failure(exc, "reference_reservation_failed")
+            raise CustodyLedgerReferenceInvalidStateError(
+                "reference_reservation_invalid"
+            ) from exc
+
+    @staticmethod
+    def _assert_identifier(value: object) -> None:
+        if type(value) is not str or _ID_RE.fullmatch(value) is None:
+            raise CustodyLedgerReferenceInvalidStateError(
+                "reference_identifier_invalid"
+            )
+
+    @staticmethod
+    def _require_mutable(snapshot: CustodyLedgerReferenceSnapshot) -> None:
+        if snapshot.head.poisoned:
+            raise CustodyLedgerReferenceRecoveryRequiredError(
+                "reference_store_poisoned"
+            )
+
+    @staticmethod
+    def _verify_registered_source(
+        binding: OllamaV2NativeExecutionBindingD2,
+        state: _ReferenceReplay,
+    ) -> None:
+        source = binding.source_bundle_descriptor
+        if source is None:
+            if binding.effect_kind in {"release.stage", "model.stage"}:
+                raise CustodyLedgerReferenceConflictError(
+                    "reference_source_registration_mismatch"
+                )
+            return
+        if binding.effect_kind not in {"release.stage", "model.stage"}:
+            raise CustodyLedgerReferenceConflictError(
+                "reference_source_registration_mismatch"
+            )
+        registered = state.sources.get(source.descriptor_id)
+        if registered is None:
+            raise CustodyLedgerReferenceConflictError(
+                "reference_source_not_registered"
+            )
+        if registered[0].to_bytes() != source.to_bytes():
+            raise CustodyLedgerReferenceConflictError(
+                "reference_source_registration_mismatch"
+            )
+
+    def _begin_immediate(self) -> None:
+        self._assert_boundary()
+        connection = self._connection
+        assert connection is not None
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+        except sqlite3.Error as exc:
+            _raise_sqlite_failure(exc, "reference_transaction_begin_failed")
+
+    def _commit(self) -> None:
+        connection = self._connection
+        assert connection is not None
+        connection.execute("COMMIT")
+
+    def _assert_no_unique_collision(
+        self,
+        event: CustodyLedgerReferenceEventDocument,
+    ) -> None:
+        connection = self._connection
+        assert connection is not None
+        row = connection.execute(
+            """SELECT event_id FROM ollama_v2_custody_events
+            WHERE event_id = ? OR event_hash = ? OR artifact_id = ?
+               OR artifact_hash = ? OR (subject_id = ? AND subject_stage = ?)
+               OR (? IS NOT NULL AND binding_hash = ?)
+            LIMIT 1""",
+            (
+                event.event_id,
+                event.event_hash,
+                event.artifact_id,
+                event.artifact_hash,
+                event.subject_id,
+                event.subject_stage,
+                event.binding_hash,
+                event.binding_hash,
+            ),
+        ).fetchone()
+        if row is not None:
+            raise CustodyLedgerReferenceDuplicateMismatchError(
+                "reference_duplicate_mismatch"
+            )
+
+    def _insert_event(self, event: CustodyLedgerReferenceEventDocument) -> None:
+        connection = self._connection
+        assert connection is not None
+        connection.execute(
+            """INSERT INTO ollama_v2_custody_events(
+                sequence, event_id, event_type, subject_id, subject_stage,
+                artifact_id, artifact_type, artifact_hash, artifact_json,
+                binding_hash, binding_json, previous_event_hash, event_hash
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                event.sequence,
+                event.event_id,
+                event.event_type,
+                event.subject_id,
+                event.subject_stage,
+                event.artifact_id,
+                event.artifact_type,
+                event.artifact_hash,
+                event.artifact.to_bytes(),
+                event.binding_hash,
+                None if event.binding is None else event.binding.to_bytes(),
+                event.previous_event_hash,
+                event.event_hash,
+            ),
+        )
+
+    def _update_head_for_event(
+        self,
+        event: CustodyLedgerReferenceEventDocument,
+        *,
+        reservation: OllamaV2NativeReservationD2 | None,
+    ) -> None:
+        connection = self._connection
+        assert connection is not None
+        if reservation is None:
+            cursor = connection.execute(
+                """UPDATE ollama_v2_custody_head
+                SET event_sequence = ?, event_head_hash = ?
+                WHERE scope = ? AND event_sequence = ?
+                  AND event_head_hash = ? AND poisoned = 0""",
+                (
+                    event.sequence,
+                    event.event_hash,
+                    CUSTODY_SCOPE,
+                    event.sequence - 1,
+                    event.previous_event_hash,
+                ),
+            )
+        else:
+            cursor = connection.execute(
+                """UPDATE ollama_v2_custody_head
+                SET fence_generation = ?, active_reservation_id = ?,
+                    active_fence_hash = ?, active_state = 'reserved',
+                    event_sequence = ?, event_head_hash = ?
+                WHERE scope = ? AND fence_generation = ?
+                  AND record_sequence = ? AND record_head_hash = ?
+                  AND active_state = 'idle' AND active_reservation_id IS NULL
+                  AND active_fence_hash IS NULL AND event_sequence = ?
+                  AND event_head_hash = ? AND poisoned = 0""",
+                (
+                    reservation.fence_generation,
+                    reservation.reservation_id,
+                    reservation.fence_hash,
+                    event.sequence,
+                    event.event_hash,
+                    CUSTODY_SCOPE,
+                    reservation.fence_generation - 1,
+                    reservation.previous_fence_sequence,
+                    reservation.previous_fence_hash,
+                    event.sequence - 1,
+                    event.previous_event_hash,
+                ),
+            )
+        if cursor.rowcount != 1:
+            raise CustodyLedgerReferenceConflictError("reference_head_conflict")
+
+    def _finish_event_commit(
+        self,
+        event: CustodyLedgerReferenceEventDocument,
+        snapshot: CustodyLedgerReferenceSnapshot,
+    ) -> CustodyLedgerReferenceTransition:
+        try:
+            self._commit()
+            self._assert_boundary()
+            return CustodyLedgerReferenceTransition(
+                snapshot=snapshot,
+                event=event,
+                committed_now=True,
+            )
+        except BaseException as exc:
+            self._rollback()
+            try:
+                with OllamaV2CustodyLedgerReferenceStore(
+                    self._root,
+                    mode="open",
+                ) as probe:
+                    if (
+                        probe._root_identity != self._root_identity
+                        or probe._lock_identity != self._lock_identity
+                        or probe._database_identity != self._database_identity
+                    ):
+                        raise CustodyLedgerReferenceRecoveryRequiredError(
+                            "reference_commit_recovery_required"
+                        ) from exc
+                    replay = probe._verify_store()
+                    observed = replay.events.get(event.event_id)
+                    if observed is None:
+                        raise CustodyLedgerReferenceCommitNotAppliedError(
+                            "reference_commit_not_applied"
+                        ) from exc
+                    if observed != event:
+                        raise CustodyLedgerReferenceRecoveryRequiredError(
+                            "reference_commit_recovery_required"
+                        ) from exc
+                    return CustodyLedgerReferenceTransition(
+                        snapshot=replay.snapshot,
+                        event=observed,
+                        committed_now=False,
+                    )
+            except CustodyLedgerReferenceCommitNotAppliedError:
+                raise
+            except BaseException as reconcile_error:
+                self._poison_best_effort()
+                if isinstance(
+                    reconcile_error,
+                    CustodyLedgerReferenceRecoveryRequiredError,
+                ):
+                    raise
+                raise CustodyLedgerReferenceRecoveryRequiredError(
+                    "reference_commit_recovery_required"
+                ) from exc
+
+    def _poison_best_effort(self) -> None:
+        try:
+            descriptor = self._database_descriptor
+            if descriptor is None:
+                return
+            descriptor_path = _DESCRIPTOR_DIRECTORY / str(descriptor)
+            if file_identity(os.stat(descriptor_path)) != self._database_identity:
+                return
+            connection = sqlite3.connect(
+                f"{descriptor_path.as_uri()}?mode=rw",
+                isolation_level=None,
+                timeout=BUSY_TIMEOUT_MS / 1_000,
+                uri=True,
+            )
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    "UPDATE ollama_v2_custody_head SET poisoned = 1 WHERE scope = ?",
+                    (CUSTODY_SCOPE,),
+                )
+                connection.execute("COMMIT")
+            finally:
+                connection.close()
+        except BaseException:
+            pass
 
     def close(self) -> None:
         if os.getpid() != self._owner_pid:
@@ -1012,10 +1784,12 @@ class OllamaV2CustodyLedgerReferenceStore:
             raise CustodyLedgerReferenceInvalidStateError(
                 "reference_database_replaced"
             )
-        self._assert_sidecars_absent()
+        self._assert_sidecars_absent(allow_delete_journal=True)
 
-    def _assert_sidecars_absent(self) -> None:
+    def _assert_sidecars_absent(self, *, allow_delete_journal: bool = False) -> None:
         for suffix in ("-wal", "-shm", "-journal"):
+            if suffix == "-journal" and allow_delete_journal:
+                continue
             if self._path_exists(Path(f"{self._database_path}{suffix}")):
                 raise CustodyLedgerReferenceInvalidStateError(
                     "reference_database_sidecar_unexpected"
@@ -1068,7 +1842,26 @@ class OllamaV2CustodyLedgerReferenceStore:
             raise CustodyLedgerReferenceInvalidStateError(invalid_reason)
         return identity
 
-    def _verify_store(self) -> CustodyLedgerReferenceHead:
+    def _verify_store(self) -> _ReferenceReplay:
+        connection = self._connection
+        assert connection is not None
+        owns_transaction = not connection.in_transaction
+        if owns_transaction:
+            try:
+                connection.execute("BEGIN")
+            except sqlite3.Error as exc:
+                _raise_sqlite_failure(exc, "reference_read_transaction_failed")
+        try:
+            replay = self._verify_store_in_transaction()
+            if owns_transaction:
+                connection.execute("COMMIT")
+            return replay
+        except BaseException:
+            if owns_transaction:
+                self._rollback()
+            raise
+
+    def _verify_store_in_transaction(self) -> _ReferenceReplay:
         connection = self._connection
         assert connection is not None
         try:
@@ -1138,55 +1931,228 @@ class OllamaV2CustodyLedgerReferenceStore:
             row = head_rows[0]
             values = tuple(row[index] for index in range(10))
             storage = tuple(row[index] for index in range(10, 20))
-            expected_values = (
-                CUSTODY_SCOPE,
-                0,
-                0,
-                _ZERO_HASH,
-                None,
-                None,
-                "idle",
-                0,
-                _ZERO_HASH,
-                0,
-            )
             expected_storage = (
                 "text",
                 "integer",
                 "integer",
                 "text",
-                "null",
-                "null",
+                "null" if values[4] is None else "text",
+                "null" if values[5] is None else "text",
                 "text",
                 "integer",
                 "text",
                 "integer",
             )
-            if values != expected_values or storage != expected_storage:
+            if storage != expected_storage or values[9] not in {0, 1}:
                 raise CustodyLedgerReferenceCorruptionError(
-                    "reference_head_genesis_invalid"
+                    "reference_head_storage_invalid"
                 )
-            if connection.execute(
-                "SELECT COUNT(*) FROM ollama_v2_custody_events"
-            ).fetchone()[0] != 0:
+            try:
+                persisted_head = CustodyLedgerReferenceHead(
+                    scope=values[0],
+                    fence_generation=values[1],
+                    record_sequence=values[2],
+                    record_head_hash=values[3],
+                    active_reservation_id=values[4],
+                    active_fence_hash=values[5],
+                    active_state=values[6],
+                    event_sequence=values[7],
+                    event_head_hash=values[8],
+                    poisoned=bool(values[9]),
+                )
+            except CustodyLedgerReferenceInvalidStateError as exc:
                 raise CustodyLedgerReferenceCorruptionError(
-                    "reference_events_nonempty_in_b1"
-                )
+                    "reference_head_invalid"
+                ) from exc
+            replay = self._replay_event_rows(persisted_head)
         except CustodyLedgerReferenceStoreError:
             raise
         except sqlite3.Error as exc:
             _raise_sqlite_failure(exc, "reference_storage_corrupt")
-        return CustodyLedgerReferenceHead(
+        return replay
+
+    def _replay_event_rows(
+        self,
+        persisted_head: CustodyLedgerReferenceHead,
+    ) -> _ReferenceReplay:
+        connection = self._connection
+        assert connection is not None
+        rows = connection.execute(
+            """SELECT *,
+                typeof(sequence), typeof(event_id), typeof(event_type),
+                typeof(subject_id), typeof(subject_stage), typeof(artifact_id),
+                typeof(artifact_type), typeof(artifact_hash), typeof(artifact_json),
+                typeof(binding_hash), typeof(binding_json),
+                typeof(previous_event_hash), typeof(event_hash)
+            FROM ollama_v2_custody_events ORDER BY sequence"""
+        ).fetchall()
+        expected_sequence = 0
+        expected_event_hash = _ZERO_HASH
+        fence_generation = 0
+        record_sequence = 0
+        record_head_hash = _ZERO_HASH
+        active_binding: OllamaV2NativeExecutionBindingD2 | None = None
+        active_reservation: OllamaV2NativeReservationD2 | None = None
+        active_event: CustodyLedgerReferenceEventDocument | None = None
+        sources: dict[
+            str,
+            tuple[
+                OllamaV2SourceBundleDescriptorD2,
+                CustodyLedgerReferenceEventDocument,
+            ],
+        ] = {}
+        events: dict[str, CustodyLedgerReferenceEventDocument] = {}
+        for row in rows:
+            values = tuple(row[index] for index in range(13))
+            storage = tuple(row[index] for index in range(13, 26))
+            expected_storage = (
+                "integer",
+                "text",
+                "text",
+                "text",
+                "text",
+                "text",
+                "text",
+                "text",
+                "blob",
+                "null" if values[9] is None else "text",
+                "null" if values[10] is None else "blob",
+                "text",
+                "text",
+            )
+            if storage != expected_storage or type(values[0]) is not int:
+                raise CustodyLedgerReferenceCorruptionError(
+                    "reference_event_row_bijection_invalid"
+                )
+            expected_sequence += 1
+            if values[0] != expected_sequence or values[11] != expected_event_hash:
+                raise CustodyLedgerReferenceCorruptionError(
+                    "reference_event_chain_invalid"
+                )
+            try:
+                artifact = parse_ollama_v2_native_execution_contract(bytes(values[8]))
+                binding = (
+                    None
+                    if values[10] is None
+                    else parse_ollama_v2_native_execution_contract(bytes(values[10]))
+                )
+                event = CustodyLedgerReferenceEventDocument(
+                    sequence=values[0],
+                    event_id=values[1],
+                    event_type=values[2],
+                    subject_id=values[3],
+                    subject_stage=values[4],
+                    artifact_id=values[5],
+                    artifact_type=values[6],
+                    artifact_hash=values[7],
+                    artifact=artifact,
+                    binding_hash=values[9],
+                    binding=binding,
+                    previous_event_hash=values[11],
+                    event_hash=values[12],
+                )
+            except (
+                CustodyLedgerReferenceStoreError,
+                OllamaV2NativeExecutionContractError,
+                TypeError,
+            ) as exc:
+                raise CustodyLedgerReferenceCorruptionError(
+                    "reference_event_semantic_replay_invalid"
+                ) from exc
+            if (
+                event.artifact.to_bytes() != bytes(values[8])
+                or (
+                    event.binding is None
+                    and values[10] is not None
+                    or event.binding is not None
+                    and event.binding.to_bytes() != bytes(values[10])
+                )
+                or event.event_id in events
+            ):
+                raise CustodyLedgerReferenceCorruptionError(
+                    "reference_event_row_bijection_invalid"
+                )
+            if event.event_type == "source.registered":
+                source = event.artifact
+                assert type(source) is OllamaV2SourceBundleDescriptorD2
+                if source.descriptor_id in sources:
+                    raise CustodyLedgerReferenceCorruptionError(
+                        "reference_source_registry_invalid"
+                    )
+                sources[source.descriptor_id] = (source, event)
+            elif event.event_type == "reservation.held":
+                reservation = event.artifact
+                binding_value = event.binding
+                assert type(reservation) is OllamaV2NativeReservationD2
+                assert type(binding_value) is OllamaV2NativeExecutionBindingD2
+                if active_reservation is not None:
+                    raise CustodyLedgerReferenceCorruptionError(
+                        "reference_active_reservation_invalid"
+                    )
+                source = binding_value.source_bundle_descriptor
+                if source is None:
+                    source_valid = binding_value.effect_kind not in {
+                        "release.stage",
+                        "model.stage",
+                    }
+                else:
+                    registered = sources.get(source.descriptor_id)
+                    source_valid = (
+                        binding_value.effect_kind in {"release.stage", "model.stage"}
+                        and registered is not None
+                        and registered[0].to_bytes() == source.to_bytes()
+                    )
+                if (
+                    not source_valid
+                    or reservation.fence_generation != fence_generation + 1
+                    or reservation.previous_fence_sequence != record_sequence
+                    or reservation.fence_sequence != record_sequence + 1
+                    or reservation.previous_fence_hash != record_head_hash
+                ):
+                    raise CustodyLedgerReferenceCorruptionError(
+                        "reference_reservation_graph_invalid"
+                    )
+                fence_generation = reservation.fence_generation
+                active_binding = binding_value
+                active_reservation = reservation
+                active_event = event
+            else:
+                raise CustodyLedgerReferenceCorruptionError(
+                    "reference_event_type_unsupported"
+                )
+            events[event.event_id] = event
+            expected_event_hash = event.event_hash
+        active = active_reservation is not None
+        replayed_head = CustodyLedgerReferenceHead(
             scope=CUSTODY_SCOPE,
-            fence_generation=0,
-            record_sequence=0,
-            record_head_hash=_ZERO_HASH,
-            active_reservation_id=None,
-            active_fence_hash=None,
-            active_state="idle",
-            event_sequence=0,
-            event_head_hash=_ZERO_HASH,
-            poisoned=False,
+            fence_generation=fence_generation,
+            record_sequence=record_sequence,
+            record_head_hash=record_head_hash,
+            active_reservation_id=(
+                None if active_reservation is None else active_reservation.reservation_id
+            ),
+            active_fence_hash=(
+                None if active_reservation is None else active_reservation.fence_hash
+            ),
+            active_state="reserved" if active else "idle",
+            event_sequence=expected_sequence,
+            event_head_hash=expected_event_hash,
+            poisoned=persisted_head.poisoned,
+        )
+        if replayed_head != persisted_head:
+            raise CustodyLedgerReferenceCorruptionError(
+                "reference_head_replay_mismatch"
+            )
+        snapshot = CustodyLedgerReferenceSnapshot(
+            head=replayed_head,
+            active_binding=active_binding,
+            active_reservation=active_reservation,
+        )
+        return _ReferenceReplay(
+            snapshot=snapshot,
+            sources=sources,
+            events=events,
+            active_event=active_event,
         )
 
     def _verify_schema_objects(self) -> None:
@@ -1315,12 +2281,20 @@ __all__ = (
     "SCHEMA_FINGERPRINT",
     "SCHEMA_VERSION",
     "CustodyLedgerReferenceClosedError",
+    "CustodyLedgerReferenceCommitNotAppliedError",
+    "CustodyLedgerReferenceConflictError",
     "CustodyLedgerReferenceCorruptionError",
+    "CustodyLedgerReferenceDuplicateMismatchError",
+    "CustodyLedgerReferenceEventDocument",
     "CustodyLedgerReferenceHead",
     "CustodyLedgerReferenceInvalidStateError",
+    "CustodyLedgerReferenceRecoveryRequiredError",
     "CustodyLedgerReferenceSchemaObject",
+    "CustodyLedgerReferenceSnapshot",
     "CustodyLedgerReferenceStatus",
     "CustodyLedgerReferenceStoreError",
+    "CustodyLedgerReferenceTransition",
     "CustodyLedgerReferenceUnsupportedError",
     "OllamaV2CustodyLedgerReferenceStore",
+    "parse_custody_ledger_reference_event",
 )

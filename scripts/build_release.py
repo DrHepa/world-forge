@@ -72,6 +72,35 @@ RESERVED_WHEEL_ROOT_METADATA_FILES = frozenset(
 )
 RESERVED_WHEEL_NAMESPACE_SUFFIXES = (".dist-info", ".data", ".egg-info")
 MAX_RELEASE_ARCHIVE_PATH_BYTES = 1024
+CANONICAL_NATIVE_CODEC_SOURCE_INVENTORY_D22A = (
+    ("LICENSE", "license"),
+    ("THIRD_PARTY_NOTICES.md", "notice"),
+    ("native/ollama_v2_control/codec_initiator.c", "codec_initiator_source"),
+    ("native/ollama_v2_control/codec_responder.c", "codec_responder_source"),
+    ("native/ollama_v2_control/protocol-lock.json", "protocol_lock"),
+    ("native/ollama_v2_control/toolchain-lock.json", "toolchain_lock"),
+    ("native/ollama_v2_control/wf_ov2_protocol.c", "shared_codec_source"),
+    ("native/ollama_v2_control/wf_ov2_protocol.h", "shared_codec_header"),
+    ("scripts/build_ollama_v2_native.py", "build_driver_source"),
+    (
+        "src/worldforge/provider_evidence/ollama_v2_native_build_contracts.py",
+        "contract_source",
+    ),
+)
+_NATIVE_CODEC_SOURCE_ENTRY_KEYS = frozenset(
+    {
+        "format",
+        "format_version",
+        "logical_path",
+        "artifact_role",
+        "size_bytes",
+        "sha256",
+        "content_hash",
+    }
+)
+_NATIVE_CODEC_SOURCE_ENTRY_FORMAT = "world-forge.private.ollama_v2_native_source_entry_v1"
+_LOWER_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_ZERO_SHA256 = "0" * 64
 
 
 class ReleaseBuildError(RuntimeError):
@@ -807,6 +836,163 @@ def _verify_sdist_public_data(path: Path, identity: ReleaseIdentity) -> None:
     _validate_archive_public_trees(trees, archive_kind="sdist")
 
 
+def _is_exact_nfc_utf8_text(value: object) -> bool:
+    if type(value) is not str:
+        return False
+    try:
+        value.encode("utf-8")
+    except UnicodeError:
+        return False
+    return unicodedata.normalize("NFC", value) == value
+
+
+def _validate_sdist_native_codec_source_entry(
+    entry: object,
+) -> tuple[str, str, int, str]:
+    if (
+        type(entry) is not dict
+        or any(type(key) is not str for key in entry)
+        or set(entry) != _NATIVE_CODEC_SOURCE_ENTRY_KEYS
+    ):
+        raise ReleaseBuildError("sdist native codec source entry is invalid")
+    entry_format = entry["format"]
+    format_version = entry["format_version"]
+    relative = entry["logical_path"]
+    role = entry["artifact_role"]
+    size = entry["size_bytes"]
+    digest = entry["sha256"]
+    content_hash = entry["content_hash"]
+    if (
+        type(entry_format) is not str
+        or entry_format != _NATIVE_CODEC_SOURCE_ENTRY_FORMAT
+        or type(format_version) is not int
+        or format_version != 1
+        or not _is_exact_nfc_utf8_text(relative)
+        or not relative
+        or relative.startswith("/")
+        or "\\" in relative
+        or "\x00" in relative
+        or any(part in {"", ".", ".."} for part in relative.split("/"))
+        or not _is_exact_nfc_utf8_text(role)
+        or not role
+        or type(size) is not int
+        or size <= 0
+        or type(digest) is not str
+        or _LOWER_SHA256_RE.fullmatch(digest) is None
+        or digest == _ZERO_SHA256
+        or type(content_hash) is not str
+        or _LOWER_SHA256_RE.fullmatch(content_hash) is None
+        or content_hash == _ZERO_SHA256
+    ):
+        raise ReleaseBuildError("sdist native codec source entry is invalid")
+    preimage = dict(entry)
+    preimage.pop("content_hash")
+    canonical_preimage = json.dumps(
+        preimage,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    if content_hash != hashlib.sha256(canonical_preimage).hexdigest():
+        raise ReleaseBuildError("sdist native codec source entry hash is invalid")
+    return relative, role, size, digest
+
+
+def _verify_sdist_native_codec_sources(path: Path, identity: ReleaseIdentity) -> None:
+    """Require the complete locked D2.2a source/build/legal inventory in the sdist."""
+
+    _require_expected_release_identity(identity)
+    entries = _read_sdist_entries(path)
+    files = {
+        name: payload
+        for name, is_directory, payload in entries
+        if not is_directory and payload is not None
+    }
+    prefix = f"{identity.sdist_root}/"
+    lock_name = prefix + "native/ollama_v2_control/source-lock.json"
+    lock_bytes = files.get(lock_name)
+    if lock_bytes is None:
+        raise ReleaseBuildError("sdist is missing native codec source lock")
+    try:
+        lock = json.loads(lock_bytes.decode("utf-8"))
+    except (UnicodeError, ValueError) as exc:
+        raise ReleaseBuildError("sdist native codec source lock is invalid") from exc
+    if type(lock) is not dict or set(lock) != {
+        "format",
+        "format_version",
+        "source_scope",
+        "entries",
+        "content_hash",
+    }:
+        raise ReleaseBuildError("sdist native codec source lock has invalid shape")
+    content_hash = lock["content_hash"]
+    if (
+        type(lock["format"]) is not str
+        or lock["format"] != "world-forge.private.ollama_v2_native_source_manifest_d22a"
+        or type(lock["format_version"]) is not int
+        or lock["format_version"] != 1
+        or type(lock["source_scope"]) is not str
+        or lock["source_scope"] != "ollama_v2_codec_probe_source_d22a"
+        or type(content_hash) is not str
+        or _LOWER_SHA256_RE.fullmatch(content_hash) is None
+        or content_hash == _ZERO_SHA256
+    ):
+        raise ReleaseBuildError("sdist native codec source lock is noncanonical")
+    try:
+        canonical_as_received = json.dumps(
+            lock,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+            allow_nan=False,
+        ).encode("utf-8")
+        preimage = dict(lock)
+        preimage.pop("content_hash")
+        canonical_preimage = json.dumps(
+            preimage,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise ReleaseBuildError("sdist native codec source lock is noncanonical") from exc
+    if (
+        lock_bytes != canonical_as_received
+        or content_hash != hashlib.sha256(canonical_preimage).hexdigest()
+    ):
+        raise ReleaseBuildError("sdist native codec source lock is noncanonical")
+    locked_entries = lock.get("entries")
+    if type(locked_entries) is not list or not locked_entries:
+        raise ReleaseBuildError("sdist native codec source lock has no entries")
+    validated = tuple(_validate_sdist_native_codec_source_entry(entry) for entry in locked_entries)
+    paths = tuple(relative for relative, _role, _size, _digest in validated)
+    if (
+        paths != tuple(sorted(paths, key=lambda item: item.encode("utf-8")))
+        or len(paths) != len(set(paths))
+        or len(paths) != len({item.casefold() for item in paths})
+    ):
+        raise ReleaseBuildError("sdist native codec source census is invalid")
+    observed_census = tuple((relative, role) for relative, role, _size, _digest in validated)
+    if observed_census != CANONICAL_NATIVE_CODEC_SOURCE_INVENTORY_D22A:
+        raise ReleaseBuildError("sdist native codec source census is not exact")
+
+    required = {
+        "native/ollama_v2_control/source-lock.json",
+        *(relative for relative, _role in CANONICAL_NATIVE_CODEC_SOURCE_INVENTORY_D22A),
+    }
+    for relative, _role, size, digest in validated:
+        payload = files.get(prefix + relative)
+        if payload is None or len(payload) != size or hashlib.sha256(payload).hexdigest() != digest:
+            raise ReleaseBuildError(f"sdist native codec source mismatch: {relative}")
+    native_prefix = prefix + "native/ollama_v2_control/"
+    actual_native = {name[len(prefix) :] for name in files if name.startswith(native_prefix)}
+    expected_native = {name for name in required if name.startswith("native/ollama_v2_control/")}
+    if actual_native != expected_native:
+        raise ReleaseBuildError("sdist native codec source inventory is not exact")
+
+
 def _verify_wheel_public_data(path: Path, identity: ReleaseIdentity) -> None:
     _require_expected_release_identity(identity)
     if path.name != identity.wheel_filename:
@@ -846,6 +1032,26 @@ def _verify_wheel_public_data(path: Path, identity: ReleaseIdentity) -> None:
     _validate_archive_public_trees(trees, archive_kind="wheel")
 
 
+def _verify_wheel_has_no_native_codec(path: Path) -> None:
+    """Keep the project wheel truthful as py3-none-any."""
+
+    with zipfile.ZipFile(path) as archive:
+        for info in archive.infolist():
+            if info.filename.endswith("/"):
+                continue
+            parts = PurePosixPath(info.filename).parts
+            payload = archive.read(info)
+            if (
+                parts[:2] == ("native", "ollama_v2_control")
+                or PurePosixPath(info.filename).suffix.casefold() in {".c", ".h"}
+                or PurePosixPath(info.filename).name == "build_ollama_v2_native.py"
+                or payload.startswith(b"\x7fELF")
+            ):
+                raise ReleaseBuildError(
+                    f"universal wheel contains native codec content: {info.filename}"
+                )
+
+
 def _build_from_source(source_root: Path, output_root: Path, epoch: int) -> tuple[Path, Path]:
     identity = _release_identity(source_root)
     _prepare_release_source(source_root)
@@ -878,7 +1084,9 @@ def _build_from_source(source_root: Path, output_root: Path, epoch: int) -> tupl
     _canonicalize_sdist(sdists[0], canonical_sdist, epoch, identity)
     _canonicalize_wheel(wheels[0], canonical_wheel, identity)
     _verify_sdist_public_data(canonical_sdist, identity)
+    _verify_sdist_native_codec_sources(canonical_sdist, identity)
     _verify_wheel_public_data(canonical_wheel, identity)
+    _verify_wheel_has_no_native_codec(canonical_wheel)
     return canonical_sdist, canonical_wheel
 
 

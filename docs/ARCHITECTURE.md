@@ -1252,6 +1252,57 @@ deterministic-probe revision-6 runtimes. Contract/controller tests are not
 native Ollama evidence. See
 [ADR-0050](decisions/0050-studio-director-governed-ollama-evidence-v2.md).
 
+ADR-0050-D2.2a now supplies a private, probe-only C17 wire codec and two
+reproducibly built Linux/aarch64 PIE executables. Their only complete state
+machine is `NEGOTIATE -> UNAVAILABLE_TERMINAL -> EOF`; malformed, expired,
+truncated, ancillary-FD, extra-record, or non-seqpacket inputs fail closed. The
+EOF check also rejects zero-length seqpacket records, with or without a following
+shutdown. The negotiation body advertises its own type as 1 and the unavailable
+terminal response as type 2. The build requires a fixed exact ten-entry source census and
+126-entry toolchain census. All source descriptors remain open, both build
+roots are materialized only from retained bytes, and named source identity is
+rechecked after queries, builds, and before publication. An immutable exact
+field vector validates the build profile on every parse or construction, with
+no factory-order state. The authoritative CLI accepts only direct execution of
+the builder source file. Its source-only loader reads and compiles the exact
+contract `.py` bytes without consulting cached bytecode; normal import, `-m`,
+and sourceless entry modes cannot publish. The declared driver and contract
+sources must match before a driver query and their identities are rechecked
+before publication. This local correlation does not attest the Python
+interpreter or standard library and cannot resist hostile in-memory code
+changes. The sdist release gate owns an independent exact copy
+of the ten source path/role pairs and rejects malformed nested entries or any
+census drift before checking archived bytes. The toolchain census binds the
+five executed tool binaries, driver-reported `lto-wrapper`, linker-opened
+`liblto_plugin.so`, `/etc/ld.so.cache`, and the complete declared
+direct/recursive AArch64 ELF runtime-library graph. Every authoritative link
+captures GCC `-v` and GNU ld `--trace` diagnostics. The build profile pins the
+SHA-256 of their complete normalized ordered stdout/stderr transcript; traced
+paths are mapped through the retained toolchain-lock roles, and no unclassified,
+missing, extra, duplicated, reordered, malformed, or localized line is accepted.
+The system/toolchain trace path spellings remain byte-exact in that transcript,
+including GCC's legitimate `../../../` segments. Only exact generated output,
+object, and resolution-file paths are substituted; symlink and lexical aliases
+such as `/./`, alternate `/../`, or duplicate slashes are rejected even when
+they resolve to the same retained input.
+A bounded GNU ld-script
+parser expands the locked `libc.so` and `libgcc_s.so` `GROUP`, `INPUT`,
+`AS_NEEDED`, and `-l` references and requires every selected regular input,
+including `libc_nonshared.a`, in the census. Its bounded parsers reject
+undeclared or ambiguous providers, RPATH/RUNPATH/audit/filter tags, loader
+environment overrides, and drift before a driver query. Canonical toolchain
+paths are root-owned and non-writable, GCC driver execution is descriptor-bound,
+and pre/post byte and identity plus exact ELF checks remain mandatory. GCC
+subtools cannot all be descriptor-forced, so coherent same-principal/root
+substitution, malicious-root resistance, kernel/locale closure, independent
+source custody, Python-runtime custody, in-memory-code resistance, and
+installation custody are explicitly not claimed. It
+remains outside Studio, Harness, catalog, public schemas, and
+`src/isoworld`: `codec_implementation_state: built`,
+`effect_interpreter_state: absent`, `availability: unavailable`, and
+`production_eligible: false`. Codec/process tests are not installation,
+custody, host-effect, provider, inference, or native observed evidence.
+
 Slice 2B retains the closed, identity/evidence-only plan, observation, and report
 boundary for an optional codebase-memory comparison and adds a pure evaluator
 plus an explicit-input, atomic no-replace CLI. Validators resolve the exact plan

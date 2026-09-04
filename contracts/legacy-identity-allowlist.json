@@ -12,7 +12,7 @@
     },
     {
       "category": "migration",
-      "file_sha256": "a6715173f889209699fd6d41b05bf6198289b7c295bc59803020b88b2019ceb3",
+      "file_sha256": "c8cf40a4c721ae952896f8de0a8056a87eec03502b26ad084349c5310b1207aa",
       "justification": "Source distributions retain the legacy installed public-data path during the compatibility bridge.",
       "offsets": [
         226
@@ -22,7 +22,7 @@
     },
     {
       "category": "migration",
-      "file_sha256": "701051c802affe30ecccc16d54601a07e304a64f44d2f1c1925cd240b31fdd14",
+      "file_sha256": "f3264c3e1caea10156f1035926c88199766f445bcb27c7f40b7aa3c145968150",
       "justification": "The compatibility bridge retains this old public location until the authorized cutover.",
       "offsets": [
         4147,
@@ -1003,7 +1003,7 @@
     },
     {
       "category": "legacy_contract",
-      "file_sha256": "65536127a685deff2d454beed2d49403385c4c628467164e4599cc61e09d0230",
+      "file_sha256": "9c5c68ba76efb29fc7e4601c75fbd1a0fbfe5c1a69db40af25d7bd6ef57b5c6b",
       "justification": "Published legacy format, schema, protocol, or storage identity remains immutable.",
       "offsets": [
         14543,
@@ -2436,13 +2436,13 @@
     },
     {
       "category": "migration",
-      "file_sha256": "c33450d64fff25d99068add603a4852e27dbca77177b7164b1a34e8c456dec4d",
+      "file_sha256": "2f28ba94b45e2285671ea43181821de19d3d34f361e8b1a4a3d13a2b99348edc",
       "justification": "Release assembly retains the legacy installed public-data path during the compatibility bridge.",
       "offsets": [
         1004,
         1455,
-        22093,
-        25862
+        23228,
+        26997
       ],
       "path": "scripts/build_release.py",
       "pattern": "rpg-world-forge"
@@ -3231,17 +3231,17 @@
     },
     {
       "category": "regression_fixture",
-      "file_sha256": "9187f5bf54c80909b2f83d017b38f7e780f2a5c368185c1bcf635b47b4bdfbc7",
+      "file_sha256": "013419ed6b470e006a19320faeff0be36f9916a914f2839f4a432ca8110228a6",
       "justification": "Regression evidence preserves legacy identity input and reader behavior.",
       "offsets": [
-        3043,
-        5363,
-        28310,
-        56157,
-        56275,
-        57718,
-        58113,
-        60556
+        3170,
+        5490,
+        40138,
+        67985,
+        68103,
+        69546,
+        69941,
+        72384
       ],
       "path": "tests/test_m5_release_builder.py",
       "pattern": "rpg-world-forge"

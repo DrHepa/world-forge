@@ -15,6 +15,7 @@ graft schemas
 graft tests
 graft .agents/skills
 graft scripts
+graft native/ollama_v2_control
 recursive-exclude * __pycache__ *.py[cod] .pytest_cache .ruff_cache
 recursive-exclude .git *
 recursive-exclude .agents/tmp *

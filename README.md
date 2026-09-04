@@ -1299,6 +1299,49 @@ and the strict-TDD evidence for the
 plus the
 [Studio backend authorization](docs/evidence/ollama-observed-evidence-v2-studio-authorization-tdd.md).
 
+ADR-0050-D2.2a adds two Linux/aarch64 probe-specific C17 executables and their
+closed `NEGOTIATE -> UNAVAILABLE_TERMINAL -> EOF` codec. This is a real,
+statically attested build artifact whose PIE executables dynamically depend on
+host libc; it is not the future host interpreter/broker:
+`codec_implementation_state: built`, `effect_interpreter_state: absent`,
+`availability: unavailable`, and `production_eligible: false`. The probes can
+express no effect or provider operation and reject zero-length seqpacket records
+as non-EOF. The `NEGOTIATE` body advertises message type 1 for negotiation and
+message type 2 for the unavailable terminal response. The builder retains every
+entry in the exact ten-file source census,
+materializes both roots only from retained bytes, and rechecks named source
+identity before publication. Build-profile parsing is bound to an immutable
+exact field vector rather than lazy factory state. The sdist gate independently
+owns the ten exact source path/role pairs and validates every nested source-lock
+entry before matching archive bytes. Authoritative publication accepts only
+direct source-file execution of the D2.2a native builder. It reads, compiles,
+and executes the declared contract `.py` through a source-only loader that does
+not consult cached bytecode; imported and `-m` entry modes cannot publish.
+Both declared source entries must match the running source bytes before any
+tool query, and active identities are rechecked before publication. This is
+local source-to-active-code correlation, not Python interpreter,
+standard-library, in-memory-code, or independent source custody. Its exact
+126-entry toolchain census includes the five executed tool binaries, the
+driver-reported `lto-wrapper`, the linker-opened `liblto_plugin.so`,
+`/etc/ld.so.cache`, and their complete declared direct/recursive AArch64 ELF
+runtime-library graph. It also locks the `libgcc_s.so` and `libc.so` GNU ld
+scripts and all of their resolved regular inputs, including
+`libc_nonshared.a`. Every authoritative link captures GCC `-v` and GNU ld
+`--trace` diagnostics. The immutable build profile pins the normalized complete
+diagnostic transcript; every ordered stdout/stderr line and every traced path
+must match, so omitted, extra, malformed, localized, duplicated, or reordered
+output fails before the ELF can enter an archive. The system/toolchain trace
+path spellings are retained byte-for-byte, including GCC's legitimate
+`../../../` segments; only exact generated output, object, and resolution-file
+paths are substituted. Symlink and lexical aliases such as `/./`, alternate
+`/../`, or duplicate slashes fail even when they resolve to the same bytes.
+The GCC driver is
+descriptor-bound and all locked tool inputs receive pre/post path and byte
+checks, but GCC subtools cannot all be descriptor-forced; independent source or
+installation custody, kernel/locale closure, and malicious-root or coherent
+same-principal substitution resistance are not claimed. See the
+[bounded evidence record](docs/evidence/ollama-v2-native-static-codec-d22a.md).
+
 Slice 2B adds a pure deterministic evaluator and explicit-input, atomic
 no-replace CLI for the closed recorded-result plan, observation, and report
 documents. They evaluate supplied evidence only; they do not execute a

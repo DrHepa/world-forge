@@ -5,6 +5,7 @@ import csv
 import gzip
 import hashlib
 import io
+import json
 import os
 import shutil
 import stat
@@ -19,6 +20,9 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import scripts.build_release as release_builder
+from worldforge.provider_evidence.ollama_v2_native_build_contracts import (
+    CANONICAL_SOURCE_INVENTORY_D22A,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 PYTHON = Path(sys.executable)
@@ -182,6 +186,250 @@ def _write_public_wheel(
 
 
 class M5ReleaseBuilderTests(unittest.TestCase):
+    def test_native_codec_sources_ship_only_in_sdist_and_never_universal_wheel(self) -> None:
+        identity = release_builder._release_identity(ROOT)
+        source_lock = json.loads((ROOT / "native/ollama_v2_control/source-lock.json").read_bytes())
+        source_payloads = {
+            entry["logical_path"]: (ROOT / entry["logical_path"]).read_bytes()
+            for entry in source_lock["entries"]
+        }
+
+        def canonical_bytes(value: object) -> bytes:
+            return json.dumps(
+                value,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+                allow_nan=False,
+            ).encode("utf-8")
+
+        def rehash_source_lock(
+            document: dict[str, object], *, rehash_entries: bool = True
+        ) -> bytes:
+            candidate = json.loads(json.dumps(document))
+            if rehash_entries:
+                for entry in candidate["entries"]:
+                    preimage = dict(entry)
+                    preimage.pop("content_hash", None)
+                    entry["content_hash"] = hashlib.sha256(canonical_bytes(preimage)).hexdigest()
+            preimage = dict(candidate)
+            preimage.pop("content_hash", None)
+            candidate["content_hash"] = hashlib.sha256(canonical_bytes(preimage)).hexdigest()
+            return canonical_bytes(candidate)
+
+        def write_locked_sdist(
+            path: Path,
+            document: dict[str, object],
+            *,
+            payload_overrides: dict[str, bytes] | None = None,
+            omitted: frozenset[str] = frozenset(),
+            undeclared: tuple[tuple[str, bytes], ...] = (),
+            rehash_entries: bool = True,
+        ) -> None:
+            payloads = dict(source_payloads)
+            payloads.update(payload_overrides or {})
+            members = {
+                "native/ollama_v2_control/source-lock.json": rehash_source_lock(
+                    document, rehash_entries=rehash_entries
+                )
+            }
+            for entry in document["entries"]:
+                relative = entry.get("logical_path")
+                if type(relative) is str and relative not in omitted:
+                    members[relative] = payloads[relative]
+            members.update(undeclared)
+            with tarfile.open(path, "w:gz") as archive:
+                for relative, payload in sorted(members.items()):
+                    info = tarfile.TarInfo(f"{identity.sdist_root}/{relative}")
+                    info.size = len(payload)
+                    info.mode = 0o644
+                    archive.addfile(info, io.BytesIO(payload))
+
+        self.assertEqual(
+            CANONICAL_SOURCE_INVENTORY_D22A,
+            release_builder.CANONICAL_NATIVE_CODEC_SOURCE_INVENTORY_D22A,
+        )
+        self.assertEqual(
+            (ROOT / "native/ollama_v2_control/source-lock.json").read_bytes(),
+            rehash_source_lock(source_lock),
+        )
+        with tempfile.TemporaryDirectory(prefix="rwf-native-distribution-") as temporary:
+            root = Path(temporary)
+            sdist = root / identity.sdist_filename
+            write_locked_sdist(sdist, source_lock)
+            release_builder._verify_sdist_native_codec_sources(sdist, identity)
+
+            wheel = root / identity.wheel_filename
+            with zipfile.ZipFile(wheel, "w") as archive:
+                archive.writestr("worldforge/__init__.py", b"")
+            release_builder._verify_wheel_has_no_native_codec(wheel)
+
+            with zipfile.ZipFile(wheel, "a") as archive:
+                archive.writestr("native/ollama_v2_control/wf_ov2_protocol.c", b"int forbidden;\n")
+            with self.assertRaisesRegex(release_builder.ReleaseBuildError, "native codec content"):
+                release_builder._verify_wheel_has_no_native_codec(wheel)
+
+            for forbidden_name, forbidden_payload in (
+                ("worldforge/build_ollama_v2_native.py", b"pass\n"),
+                ("worldforge/native_probe", b"\x7fELF" + bytes(60)),
+            ):
+                rejected_wheel = root / f"rejected-{Path(forbidden_name).name}.whl"
+                with zipfile.ZipFile(rejected_wheel, "w") as archive:
+                    archive.writestr("worldforge/__init__.py", b"")
+                    archive.writestr(forbidden_name, forbidden_payload)
+                with self.assertRaisesRegex(
+                    release_builder.ReleaseBuildError, "native codec content"
+                ):
+                    release_builder._verify_wheel_has_no_native_codec(rejected_wheel)
+
+            missing = root / f"missing-{identity.sdist_filename}"
+            write_locked_sdist(
+                missing,
+                source_lock,
+                omitted=frozenset({"native/ollama_v2_control/codec_responder.c"}),
+            )
+            with self.assertRaisesRegex(release_builder.ReleaseBuildError, "native codec source"):
+                release_builder._verify_sdist_native_codec_sources(missing, identity)
+
+            tampered = root / f"tampered-{identity.sdist_filename}"
+            write_locked_sdist(
+                tampered,
+                source_lock,
+                payload_overrides={
+                    "native/ollama_v2_control/wf_ov2_protocol.h": (
+                        source_payloads["native/ollama_v2_control/wf_ov2_protocol.h"] + b"\n"
+                    )
+                },
+            )
+            with self.assertRaisesRegex(release_builder.ReleaseBuildError, "source mismatch"):
+                release_builder._verify_sdist_native_codec_sources(tampered, identity)
+
+            mutation_cases: list[tuple[str, dict[str, object], dict[str, bytes] | None, bool]] = []
+
+            omitted_lock = json.loads(json.dumps(source_lock))
+            omitted_lock["entries"] = [
+                entry
+                for entry in omitted_lock["entries"]
+                if not entry["logical_path"].endswith("codec_responder.c")
+            ]
+            mutation_cases.append(("omitted census entry", omitted_lock, None, True))
+
+            extra_payload = b"int wf_extra(void) { return 0; }\n"
+            extra_lock = json.loads(json.dumps(source_lock))
+            extra_entry = dict(extra_lock["entries"][2])
+            extra_entry.update(
+                logical_path="native/ollama_v2_control/extra.c",
+                artifact_role="shared_codec_source",
+                size_bytes=len(extra_payload),
+                sha256=hashlib.sha256(extra_payload).hexdigest(),
+            )
+            extra_lock["entries"].append(extra_entry)
+            extra_lock["entries"].sort(key=lambda entry: entry["logical_path"].encode("utf-8"))
+            mutation_cases.append(
+                (
+                    "extra census entry",
+                    extra_lock,
+                    {"native/ollama_v2_control/extra.c": extra_payload},
+                    True,
+                )
+            )
+
+            relabelled = json.loads(json.dumps(source_lock))
+            relabelled["entries"][0]["artifact_role"] = "notice"
+            mutation_cases.append(("relabelled census entry", relabelled, None, True))
+
+            reordered = json.loads(json.dumps(source_lock))
+            reordered["entries"][0], reordered["entries"][1] = (
+                reordered["entries"][1],
+                reordered["entries"][0],
+            )
+            mutation_cases.append(("reordered census", reordered, None, True))
+
+            duplicated = json.loads(json.dumps(source_lock))
+            duplicated["entries"].append(dict(duplicated["entries"][-1]))
+            mutation_cases.append(("duplicate census entry", duplicated, None, True))
+
+            case_alias = json.loads(json.dumps(source_lock))
+            alias_entry = dict(case_alias["entries"][0])
+            alias_entry["logical_path"] = "license"
+            case_alias["entries"].append(alias_entry)
+            case_alias["entries"].sort(key=lambda entry: entry["logical_path"].encode("utf-8"))
+            mutation_cases.append(
+                ("casefold path alias", case_alias, {"license": source_payloads["LICENSE"]}, True)
+            )
+
+            wrong_scalar = json.loads(json.dumps(source_lock))
+            wrong_scalar["entries"][0]["artifact_role"] = 7
+            mutation_cases.append(("wrong nested scalar", wrong_scalar, None, True))
+
+            extra_key = json.loads(json.dumps(source_lock))
+            extra_key["entries"][0]["unexpected"] = "field"
+            mutation_cases.append(("extra nested key", extra_key, None, True))
+
+            wrong_entry_hash = json.loads(json.dumps(source_lock))
+            wrong_entry_hash["entries"][0]["content_hash"] = "1" * 64
+            mutation_cases.append(("wrong nested content hash", wrong_entry_hash, None, False))
+
+            changed_size = json.loads(json.dumps(source_lock))
+            changed_size["entries"][0]["size_bytes"] += 1
+            mutation_cases.append(("changed locked size", changed_size, None, True))
+
+            changed_hash = json.loads(json.dumps(source_lock))
+            changed_hash["entries"][0]["sha256"] = "1" * 64
+            mutation_cases.append(("changed locked digest", changed_hash, None, True))
+
+            for index, (label, document, overrides, rehash_entries) in enumerate(mutation_cases):
+                with self.subTest(source_lock=label):
+                    candidate = root / f"source-lock-{index}-{identity.sdist_filename}"
+                    write_locked_sdist(
+                        candidate,
+                        document,
+                        payload_overrides=overrides,
+                        rehash_entries=rehash_entries,
+                    )
+                    with self.assertRaisesRegex(
+                        release_builder.ReleaseBuildError, "native codec source"
+                    ):
+                        release_builder._verify_sdist_native_codec_sources(candidate, identity)
+
+            undeclared = root / f"undeclared-{identity.sdist_filename}"
+            write_locked_sdist(
+                undeclared,
+                source_lock,
+                undeclared=(("native/ollama_v2_control/undeclared.c", b"int rogue;\n"),),
+            )
+            with self.assertRaisesRegex(
+                release_builder.ReleaseBuildError, "native codec source inventory"
+            ):
+                release_builder._verify_sdist_native_codec_sources(undeclared, identity)
+
+            class MappingSubclass(dict):
+                pass
+
+            class TextSubclass(str):
+                pass
+
+            class IntegerSubclass(int):
+                pass
+
+            invalid_runtime_entries = []
+            invalid_runtime_entries.append(MappingSubclass(source_lock["entries"][0]))
+            text_subclass = dict(source_lock["entries"][0])
+            text_subclass["logical_path"] = TextSubclass(text_subclass["logical_path"])
+            invalid_runtime_entries.append(text_subclass)
+            integer_subclass = dict(source_lock["entries"][0])
+            integer_subclass["size_bytes"] = IntegerSubclass(integer_subclass["size_bytes"])
+            invalid_runtime_entries.append(integer_subclass)
+            invalid_unicode = dict(source_lock["entries"][0])
+            invalid_unicode["artifact_role"] = "invalid\ud800role"
+            invalid_runtime_entries.append(invalid_unicode)
+            for entry in invalid_runtime_entries:
+                with self.subTest(runtime_type=type(entry).__name__):
+                    with self.assertRaisesRegex(
+                        release_builder.ReleaseBuildError, "native codec source entry"
+                    ):
+                        release_builder._validate_sdist_native_codec_source_entry(entry)
+
     def test_wheel_rejects_non_regular_member_kinds_before_any_read(self) -> None:
         identity = release_builder._release_identity(ROOT)
         inventory = release_builder._release_public_data_inventory(ROOT)

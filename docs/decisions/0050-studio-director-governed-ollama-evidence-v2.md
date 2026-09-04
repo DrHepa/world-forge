@@ -364,6 +364,67 @@ The exact implementation-stage matrix is:
 The overall ADR-0050 implementation therefore remains **PARTIAL**,
 `availability: unavailable`, and `production_eligible: false`.
 
+D2.2a is an additive build/codec substage inside D, not completion of D. It
+checks in the exact C17 bytes, protocol/source/toolchain locks, deterministic
+builder, and two Linux/aarch64 codec probes. Their closed transcript always
+terminates unavailable and has no effect message or host mutation surface:
+`codec_implementation_state: built`, `effect_interpreter_state: absent`,
+`availability: unavailable`, and `production_eligible: false`. A future
+production shim/broker requires a new ABI plus physical installation/source
+custody, operation-wide lease and admission contracts; it cannot promote these
+probe roles. Its negotiation body advertises message type 1 and the unavailable
+terminal type 2, matching the only possible response. The local probe exchange is build/codec evidence only, not native
+Ollama, service, host, provider, inference, or replay-protection evidence.
+The D2.2a builder requires exact fixed ten-entry source and 126-entry toolchain
+censuses. It retains all ten verified source descriptors and materializes both
+clean build roots only from those retained bytes, then rechecks the original
+paths after driver queries, after each build, and before publication. The
+canonical build profile is enforced by an immutable exact field vector on every
+construction, so parser validity never depends on factory call order. The D2.2a native builder
+accepts authoritative publication only through direct
+execution of its source-file path. It reads and compiles the exact declared
+contract `.py` bytes with a source-only loader that never consults cached
+bytecode; imported, `-m`, run-path, or sourceless publication entry modes are
+rejected. The retained driver and contract source entries must match the active
+source bytes before any compiler query, and active origins and identities are
+rechecked before publication. An identical copied source root is valid;
+rehashed but different active-code declarations are not. This is local
+source-to-active-code correlation, not custody of the Python interpreter or
+standard library, and not resistance to hostile in-memory code modification.
+The sdist verifier separately owns the exact ten source path/role pairs and
+validates the canonical nested entry grammar before trusting lock sizes or
+hashes. The
+toolchain census includes five executed tool binaries, the driver-reported
+`lto-wrapper`, the linker-opened `liblto_plugin.so`, their exact declared direct
+and recursive AArch64 ELF runtime-library closure, and `/etc/ld.so.cache`.
+Every authoritative link captures GCC `-v` and GNU ld `--trace` diagnostics.
+The immutable profile pins a normalized whole-transcript SHA-256; the builder
+maps traced files through the retained lock roles and rejects any unclassified,
+missing, extra, reordered, duplicated, malformed, or localized stdout/stderr
+line. The system/toolchain trace path spellings remain byte-exact, including GCC's
+legitimate `../../../` segments. Only exact generated output, object, and
+resolution-file paths are substituted; symlink and lexical aliases such as
+`/./`, alternate `/../`, or duplicate slashes remain invalid even when they
+resolve to the same retained input. It also locks both selected GNU ld scripts and uses a bounded exact parser for
+their `GROUP`, `INPUT`, `AS_NEEDED`, and `-l` references. Every resolved regular
+input, including `libc_nonshared.a`, must have its exact census role and path.
+Runtime resolution rejects loader environment overrides and undeclared,
+ambiguous, or drifted providers before a driver query. Canonical toolchain
+paths must be root-owned and non-group/world-writable; the GCC driver is
+descriptor-bound and all locked tool inputs receive full pre/post byte and
+identity checks. Its honest limit remains
+`same_principal_or_root_coherent_substitution_resistant: false`: subordinate GCC
+tool execution cannot all be descriptor-forced, and the checks do not resist
+malicious root or establish installed custody. Source retention binds the
+materialized bytes but does not make the already running builder an independent
+source custodian, so `source_custody_verified: false` also remains exact. Python
+interpreter/stdlib custody and hostile in-memory-code resistance likewise
+remain false and are documentary limitations rather than new manifest fields. The
+claim is the exact declared executable/direct+recursive ELF runtime-library,
+header, and link-input closure for this local root-owned profile—not the kernel,
+locale database, or malicious-root inputs. Zero-length
+`SOCK_SEQPACKET` records are records, not EOF, even when followed by shutdown.
+
 The shipped backend Studio authority binds an authenticated Director decision
 to an exact controller plan without putting Ollama into the Harness catalog.
 The later protocol/UI ceremony and host preparation remain absent. Host
